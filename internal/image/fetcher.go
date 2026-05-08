@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -453,21 +454,21 @@ func (f *Fetcher) tryDownload(ctx context.Context, url string, auth TeamAuth) ([
 // teamIDFromFilesURL extracts the team ID embedded in a Slack file URL.
 // Returns "" for URLs that aren't on files.slack.com or don't match a
 // recognized path pattern.
+//
+// The host check uses url.Parse + exact equality rather than substring
+// matching: a substring check would accept hostile URLs like
+// https://attacker.com/files.slack.com/files-pri/T01ABCDEF/x.png and
+// authsForURL would then attach the workspace's xoxc Bearer + 'd' cookie
+// to the request, leaking the session to the attacker.
 func teamIDFromFilesURL(rawURL string) string {
-	// Cheap host check before fully parsing.
-	if !strings.Contains(rawURL, "files.slack.com") {
+	u, err := url.Parse(rawURL)
+	if err != nil {
 		return ""
 	}
-	// Find the path portion. We don't need full url.Parse for this.
-	i := strings.Index(rawURL, "files.slack.com")
-	if i < 0 {
+	if u.Host != "files.slack.com" {
 		return ""
 	}
-	rest := rawURL[i+len("files.slack.com"):]
-	// Strip any query string for cleanliness.
-	if q := strings.IndexByte(rest, '?'); q >= 0 {
-		rest = rest[:q]
-	}
+	rest := u.Path
 	for _, prefix := range []string{"/files-tmb/", "/files-pri/", "/files/"} {
 		if !strings.HasPrefix(rest, prefix) {
 			continue
