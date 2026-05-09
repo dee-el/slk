@@ -7,6 +7,10 @@ import (
 )
 
 func TestEnabled_DefaultFalse(t *testing.T) {
+	// Reset the package-level flag so this test is order-independent
+	// under `go test -shuffle=on`. Other tests in this package set
+	// enabled=true via Init.
+	enabled.Store(false)
 	if Enabled() {
 		t.Fatalf("Enabled() should be false before Init")
 	}
@@ -59,8 +63,8 @@ func TestInit_NoFileWhenDisabled(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 	if f != nil {
+		defer f.Close()
 		t.Fatalf("Init should return nil file when SLK_DEBUG is unset, got %v", f.Name())
-		_ = f.Close()
 	}
 	if Enabled() {
 		t.Fatalf("Enabled() should be false after Init with SLK_DEBUG unset")
