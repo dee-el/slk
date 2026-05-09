@@ -20,10 +20,52 @@
 package debuglog
 
 import (
+	"io"
+	"log"
+	"os"
 	"sync/atomic"
 )
 
-var enabled atomic.Bool
+var (
+	enabled atomic.Bool
+	logger  *log.Logger
+)
+
+// Init opens slk-debug.log in cwd (truncating) when SLK_DEBUG is set,
+// configures the package-internal logger, and routes the global stdlib
+// log package to the same file. When SLK_DEBUG is unset, Init sets the
+// global stdlib log to io.Discard (so spurious log.Printf calls don't
+// bleed into the user's altscreen TUI) and returns nil, nil.
+//
+// Returns the *os.File so the caller can close it on exit. Idempotent
+// modulo the underlying file handle: calling Init twice with SLK_DEBUG
+// set will truncate the file twice and return the second handle (the
+// first handle is leaked — the caller is expected to call Init exactly
+// once at startup).
+func Init() (*os.File, error) {
+	if os.Getenv("SLK_DEBUG") == "" {
+		log.SetOutput(io.Discard)
+		enabled.Store(false)
+		return nil, nil
+	}
+	f, err := os.OpenFile("slk-debug.log",
+		os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		// Failed to open — keep enabled=false so calls remain no-op.
+		log.SetOutput(io.Discard)
+		enabled.Store(false)
+		return nil, err
+	}
+	// Route both the package logger and the global stdlib log to the
+	// same file. Log flags set ISO-ish date+time with microsecond
+	// precision so timelines sort lexically.
+	flags := log.Ldate | log.Ltime | log.Lmicroseconds
+	logger = log.New(f, "", flags)
+	log.SetOutput(f)
+	log.SetFlags(flags)
+	enabled.Store(true)
+	return f, nil
+}
 
 // Enabled reports whether logging is active. Cheap (atomic.Bool load).
 func Enabled() bool {
