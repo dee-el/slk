@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -131,5 +132,38 @@ func TestEnabled_FastPathNoOp(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dir, "slk-debug.log")); !os.IsNotExist(err) {
 		t.Fatalf("slk-debug.log should not exist; err=%v", err)
+	}
+}
+
+func TestNextReqID_MonotonicUnique(t *testing.T) {
+	const G = 16
+	const M = 100
+	var wg sync.WaitGroup
+	collected := make([][]uint64, G)
+	for g := 0; g < G; g++ {
+		g := g
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ids := make([]uint64, M)
+			for i := 0; i < M; i++ {
+				ids[i] = NextReqID()
+			}
+			collected[g] = ids
+		}()
+	}
+	wg.Wait()
+
+	seen := map[uint64]struct{}{}
+	for _, ids := range collected {
+		for _, id := range ids {
+			if _, dup := seen[id]; dup {
+				t.Fatalf("duplicate id %d", id)
+			}
+			seen[id] = struct{}{}
+		}
+	}
+	if len(seen) != G*M {
+		t.Fatalf("want %d unique ids, got %d", G*M, len(seen))
 	}
 }

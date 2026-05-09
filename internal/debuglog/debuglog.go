@@ -29,6 +29,7 @@ import (
 var (
 	enabled atomic.Bool
 	logger  *log.Logger
+	reqID   atomic.Uint64
 )
 
 // Init opens slk-debug.log in cwd (truncating) when SLK_DEBUG is set,
@@ -115,4 +116,11 @@ func General(format string, args ...any) {
 		return
 	}
 	logger.Printf("[general] "+format, args...)
+}
+
+// NextReqID returns a process-wide monotonic uint64. Used to correlate
+// image-fetch lifecycle log lines across the enqueue → http →
+// dispatch → recv stages. Safe to call regardless of Enabled().
+func NextReqID() uint64 {
+	return reqID.Add(1)
 }
