@@ -40,6 +40,8 @@ type KeyMap struct {
 	ThemeSwitcherGlobal key.Binding
 	PresenceMenu        key.Binding
 	ToggleSection       key.Binding
+	NavBack             key.Binding
+	NavForward          key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
@@ -80,5 +82,7 @@ func DefaultKeyMap() KeyMap {
 		ThemeSwitcherGlobal: key.NewBinding(key.WithKeys("ctrl+shift+y"), key.WithHelp("ctrl+shift+y", "set default theme")),
 		PresenceMenu:        key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "set status")),
 		ToggleSection:       key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle section")),
+		NavBack:             key.NewBinding(key.WithKeys("ctrl+h"), key.WithHelp("ctrl+h", "navigate back")),
+		NavForward:          key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "navigate forward")),
 	}
 }
