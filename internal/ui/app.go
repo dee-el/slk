@@ -2096,11 +2096,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.CloseThread()
 		a.clearSelections()
 		a.compose.Reset()
-		a.messagepane.SetLoading(true)
-		a.messagepane.SetMessages(nil)
-		cmds = append(cmds, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-			return SpinnerTickMsg{}
-		}))
+		a.statusbar.SetSyncing(false) // defensive: don't carry stale sync state across workspaces
+		// Pane is left as-is — the queued ChannelSelectedMsg below will paint
+		// over it via the three-tier dispatch (Task 10). For empty workspaces
+		// (no Channels) the pane is cleared explicitly in the else branch
+		// below.
 		a.SetMode(ModeNormal)
 		a.compose.Blur()
 		a.sidebar.SetSectionsProvider(msg.SectionsProvider)
@@ -2147,6 +2147,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		} else {
 			a.sidebar.SelectThreadsRow()
+			a.messagepane.SetLoading(false)
+			a.messagepane.SetMessages(nil)
 		}
 		// Kick off an initial threads-list fetch so the sidebar Threads
 		// row badge populates before the user opens the view.

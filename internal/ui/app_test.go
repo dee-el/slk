@@ -2812,32 +2812,68 @@ func TestChannelSelectedFallsBackToSpinnerOnCacheMiss(t *testing.T) {
 	}
 }
 
-// TestWorkspaceSwitchedSetsLoadingBeforeChannelSelect verifies that the
-// WorkspaceSwitchedMsg handler flips the messagepane to loading=true at
-// the same time it clears the message list, so that the empty-state
-// branch ("No messages yet") cannot flash between the synchronous
-// SetMessages(nil) and the deferred ChannelSelectedMsg cmd that would
-// re-populate it on the next Bubbletea tick.
-func TestWorkspaceSwitchedSetsLoadingBeforeChannelSelect(t *testing.T) {
+// TestWorkspaceSwitchedQueuesChannelSelected verifies that the
+// WorkspaceSwitchedMsg handler queues a ChannelSelectedMsg for the
+// restored (or first) channel rather than wiping the pane itself. The
+// pane is intentionally left as-is so the queued ChannelSelectedMsg
+// (handled by the three-tier dispatch) paints over it without an
+// intermediate empty-state flash.
+func TestWorkspaceSwitchedQueuesChannelSelected(t *testing.T) {
 	app := NewApp()
 	app.SetChannelCacheReader(func(channelID string) []messages.MessageItem { return nil })
 	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
 		return MessagesLoadedMsg{ChannelID: channelID, Messages: nil}
 	})
 
-	// Note: do NOT drain the returned cmd batch — we want to assert the
-	// intermediate post-Update state before the deferred
-	// ChannelSelectedMsg dispatch runs on the next tick.
-	app.Update(WorkspaceSwitchedMsg{
+	_, cmd := app.Update(WorkspaceSwitchedMsg{
 		TeamID:   "T2",
 		Channels: []sidebar.ChannelItem{{ID: "C9", Name: "general", Type: "channel"}},
 	})
 
-	if !app.messagepane.IsLoading() {
-		t.Fatalf("expected messagepane loading=true between ticks, got false")
+	// Walk the returned batch and confirm a ChannelSelectedMsg for the
+	// only channel in the new workspace is queued.
+	found := false
+	var walk func(c tea.Cmd)
+	walk = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		msg := c()
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, child := range batch {
+				walk(child)
+			}
+			return
+		}
+		if cs, ok := msg.(ChannelSelectedMsg); ok && cs.ID == "C9" {
+			found = true
+		}
+	}
+	walk(cmd)
+	if !found {
+		t.Fatalf("expected WorkspaceSwitchedMsg to queue ChannelSelectedMsg{ID:C9}, got none")
+	}
+}
+
+// TestWorkspaceSwitchedEmptyClearsPane verifies that the empty-workspace
+// branch (no Channels) explicitly clears the messagepane, since no
+// ChannelSelectedMsg is queued to repaint it.
+func TestWorkspaceSwitchedEmptyClearsPane(t *testing.T) {
+	app := NewApp()
+	// Seed the pane with a stale message so we can prove it gets cleared.
+	app.messagepane.SetMessages([]messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "stale"}})
+	app.messagepane.SetLoading(true)
+
+	app.Update(WorkspaceSwitchedMsg{
+		TeamID:   "T2",
+		Channels: nil,
+	})
+
+	if app.messagepane.IsLoading() {
+		t.Fatalf("expected loading=false on empty workspace, got true")
 	}
 	if got := app.messagepane.Messages(); len(got) != 0 {
-		t.Fatalf("expected messages cleared, got %d", len(got))
+		t.Fatalf("expected messages cleared on empty workspace, got %d", len(got))
 	}
 }
 
