@@ -2689,6 +2689,9 @@ func TestChannelSelectedRendersFromCacheWithoutSpinner(t *testing.T) {
 		}
 		return nil
 	})
+	// Land in Tier 2 (cache rendered + fetcher fires): synced 2 minutes
+	// ago is >30s (not Tier 1) and <5min (not Tier 3).
+	app.SetChannelSyncedAtReader(func(string) int64 { return time.Now().Unix() - 120 })
 	fetcherCalled := false
 	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
 		fetcherCalled = true
@@ -2732,6 +2735,9 @@ func TestMessagesLoadedNilDoesNotClobberCachedView(t *testing.T) {
 	app.SetChannelCacheReader(func(channelID string) []messages.MessageItem {
 		return cachedItems
 	})
+	// Tier 2: cache renders + fetcher fires (the network failure path
+	// under test happens after both).
+	app.SetChannelSyncedAtReader(func(string) int64 { return time.Now().Unix() - 120 })
 	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
 		// Simulate a network failure by returning the same shape the
 		// real fetcher uses on error.
@@ -3289,5 +3295,104 @@ func TestUserResolvedMsg_DropsForOtherWorkspace(t *testing.T) {
 	got := app.messagepane.Messages()
 	if got[0].UserName != "U1" {
 		t.Errorf("UserName changed despite wrong team; got %q", got[0].UserName)
+	}
+}
+
+// drainAllCmds recursively executes every cmd inside the tea.BatchMsg
+// tree returned by Update. Used to surface counter side-effects on
+// closure-bound fakes (channelFetcher, channelReadMarker). The
+// resulting tea.Msgs are NOT fed back into Update — these tests only
+// care about whether the fakes were invoked.
+func drainAllCmds(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	if cmd == nil {
+		return
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			drainAllCmds(t, c)
+		}
+	}
+}
+
+func TestChannelSelected_Tier1_RenderCacheNoFetch(t *testing.T) {
+	app := NewApp()
+	now := time.Now().Unix()
+	app.SetChannelSyncedAtReader(func(id string) int64 { return now - 10 })
+	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+		return []messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "hi"}}
+	})
+	fetchCalled := 0
+	app.SetChannelFetcher(func(id, name string) tea.Msg {
+		fetchCalled++
+		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+	})
+	markCalled := 0
+	app.SetChannelReadMarker(func(id, ts string) tea.Msg {
+		markCalled++
+		return nil
+	})
+
+	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+	drainAllCmds(t, cmd)
+
+	if fetchCalled != 0 {
+		t.Errorf("Tier 1: fetcher should NOT fire; got %d calls", fetchCalled)
+	}
+	if markCalled != 1 {
+		t.Errorf("Tier 1: markRead should fire once; got %d calls", markCalled)
+	}
+}
+
+func TestChannelSelected_Tier2_CacheAndFetch(t *testing.T) {
+	app := NewApp()
+	now := time.Now().Unix()
+	app.SetChannelSyncedAtReader(func(id string) int64 { return now - 120 })
+	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+		return []messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "hi"}}
+	})
+	fetchCalled := 0
+	app.SetChannelFetcher(func(id, name string) tea.Msg {
+		fetchCalled++
+		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+	})
+	markCalled := 0
+	app.SetChannelReadMarker(func(id, ts string) tea.Msg {
+		markCalled++
+		return nil
+	})
+
+	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+	drainAllCmds(t, cmd)
+
+	if fetchCalled != 1 {
+		t.Errorf("Tier 2: fetcher should fire once; got %d", fetchCalled)
+	}
+	if markCalled != 0 {
+		t.Errorf("Tier 2: markRead should NOT fire (fetcher's own mark-as-read handles it); got %d", markCalled)
+	}
+}
+
+func TestChannelSelected_Tier3_SpinnerOnly(t *testing.T) {
+	app := NewApp()
+	app.SetChannelSyncedAtReader(func(id string) int64 { return 0 })
+	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+		return []messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "hi"}}
+	})
+	fetchCalled := 0
+	app.SetChannelFetcher(func(id, name string) tea.Msg {
+		fetchCalled++
+		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+	})
+
+	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+	drainAllCmds(t, cmd)
+
+	if got := app.messagepane.Messages(); len(got) != 0 {
+		t.Errorf("Tier 3: pane should be empty (spinner); got %d msgs", len(got))
+	}
+	if fetchCalled != 1 {
+		t.Errorf("Tier 3: fetcher should fire once; got %d", fetchCalled)
 	}
 }

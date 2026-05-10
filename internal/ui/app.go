@@ -89,6 +89,20 @@ const (
 	ViewThreads
 )
 
+const (
+	// cacheFreshThreshold: cache rendered as-is, no network fetch, no
+	// syncing indicator. Channel was visited or WS-updated within this
+	// window so the SQLite snapshot is provably recent.
+	cacheFreshThreshold = 30 * time.Second
+
+	// cacheStaleThreshold: above this age, cache-first render is
+	// suppressed entirely and a spinner is shown until the network
+	// fetch returns. The 30-second...5-minute middle band gets the
+	// cache-first + verify-in-background treatment with the syncing
+	// indicator.
+	cacheStaleThreshold = 5 * time.Minute
+)
+
 // Messages sent between components
 type (
 	ChannelSelectedMsg struct {
@@ -1430,41 +1444,68 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.messagepane.SetChannel(msg.Name, "")
 		a.messagepane.SetChannelType(msg.Type)
 
-		// Cache-first render: if a cache reader is wired and returns
-		// items synchronously, paint them immediately without the
-		// spinner. The network fetch below still runs and
-		// MessagesLoadedMsg authoritatively replaces this best-effort
-		// cached render once it arrives.
+		a.compose.SetChannel(msg.Name)
+		a.statusbar.SetChannel(msg.Name)
+		a.statusbar.SetChannelType(msg.Type)
+
 		var cached []messages.MessageItem
 		if a.channelCacheReader != nil {
 			cached = a.channelCacheReader(msg.ID)
 		}
-		debuglog.Cache("ChannelSelectedMsg: channel=%s name=%q cache_hit_count=%d",
-			msg.ID, msg.Name, len(cached))
-		if len(cached) > 0 {
-			a.messagepane.SetLoading(false)
-			a.messagepane.SetMessages(cached)
-		} else {
-			a.messagepane.SetLoading(true)
-			a.messagepane.SetMessages(nil) // clear while loading
-			cmds = append(cmds, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-				return SpinnerTickMsg{}
-			}))
+		var syncedAt int64
+		if a.channelSyncedAtReader != nil {
+			syncedAt = a.channelSyncedAtReader(msg.ID)
 		}
-		a.compose.SetChannel(msg.Name)
-		a.statusbar.SetChannel(msg.Name)
-		a.statusbar.SetChannelType(msg.Type)
-		// Always fetch fresh from the network in the background; the
-		// cached render is best-effort.
-		if a.channelFetcher != nil {
+		age := time.Duration(0)
+		if syncedAt > 0 {
+			age = time.Since(time.Unix(syncedAt, 0))
+		}
+		debuglog.Cache("ChannelSelectedMsg: channel=%s name=%q cache_hit_count=%d synced_at=%d age_ms=%d",
+			msg.ID, msg.Name, len(cached), syncedAt, age.Milliseconds())
+
+		fireFetch := func() {
+			if a.channelFetcher == nil {
+				debuglog.Cache("ChannelSelectedMsg: channel=%s no channelFetcher wired", msg.ID)
+				return
+			}
 			fetcher := a.channelFetcher
 			chID, chName := msg.ID, msg.Name
 			debuglog.Cache("ChannelSelectedMsg: channel=%s firing background network fetch", msg.ID)
-			cmds = append(cmds, func() tea.Msg {
-				return fetcher(chID, chName)
-			})
-		} else {
-			debuglog.Cache("ChannelSelectedMsg: channel=%s no channelFetcher wired", msg.ID)
+			cmds = append(cmds, func() tea.Msg { return fetcher(chID, chName) })
+		}
+
+		switch {
+		case syncedAt > 0 && age < cacheFreshThreshold && len(cached) > 0:
+			// Tier 1: cache fresh; render and mark-as-read, no fetch.
+			a.messagepane.SetLoading(false)
+			a.messagepane.SetMessages(cached)
+			a.statusbar.SetSyncing(false)
+			if a.channelReadMarker != nil && len(cached) > 0 {
+				marker := a.channelReadMarker
+				chID := msg.ID
+				latestTS := cached[len(cached)-1].TS
+				cmds = append(cmds, func() tea.Msg { return marker(chID, latestTS) })
+			}
+			debuglog.Cache("ChannelSelectedMsg: channel=%s tier=1_fresh", msg.ID)
+
+		case syncedAt > 0 && age < cacheStaleThreshold && len(cached) > 0:
+			// Tier 2: cache-first + verify.
+			a.messagepane.SetLoading(false)
+			a.messagepane.SetMessages(cached)
+			a.statusbar.SetSyncing(true)
+			fireFetch()
+			debuglog.Cache("ChannelSelectedMsg: channel=%s tier=2_verify", msg.ID)
+
+		default:
+			// Tier 3: stale or never-synced — spinner only.
+			a.messagepane.SetLoading(true)
+			a.messagepane.SetMessages(nil)
+			a.statusbar.SetSyncing(false)
+			cmds = append(cmds, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+				return SpinnerTickMsg{}
+			}))
+			fireFetch()
+			debuglog.Cache("ChannelSelectedMsg: channel=%s tier=3_spinner", msg.ID)
 		}
 
 	case MessagesLoadedMsg:
@@ -1484,6 +1525,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		debuglog.Cache("MessagesLoadedMsg: channel=%s active=%s kind=%s count=%d",
 			msg.ChannelID, a.activeChannelID, kind, len(msg.Messages))
 		if msg.ChannelID == a.activeChannelID {
+			a.statusbar.SetSyncing(false)
 			a.messagepane.SetLoading(false)
 			a.messagepane.SetLastReadTS(msg.LastReadTS)
 			// nil Messages from the fetcher signals network FAILURE, not an
