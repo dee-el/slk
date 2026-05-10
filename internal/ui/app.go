@@ -1880,6 +1880,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// API call completed. If err, optimistic update stays (could add status bar error later).
 
 	case ChannelMarkedReadMsg:
+		debuglog.Cache("ChannelMarkedReadMsg: channel=%s active=%s (optimistic clear)",
+			msg.ChannelID, a.activeChannelID)
 		a.sidebar.ClearUnread(msg.ChannelID)
 
 	case DMNameResolvedMsg:
@@ -5082,6 +5084,8 @@ func (a *App) beginEditOfSelected() tea.Cmd {
 // Idempotent: calling twice with the same values is a no-op past the
 // first one (the underlying setters short-circuit on equality).
 func (a *App) applyChannelMark(channelID, ts string, unreadCount int) {
+	debuglog.Cache("applyChannelMark: channel=%s ts=%s unread_count=%d active=%s",
+		channelID, ts, unreadCount, a.activeChannelID)
 	if channelID == a.activeChannelID {
 		a.messagepane.SetLastReadTS(ts)
 	}
@@ -5093,6 +5097,8 @@ func (a *App) applyChannelMark(channelID, ts string, unreadCount int) {
 // flip threads-view row); read=true means the thread is now read
 // (clear boundary + clear threads-view row).
 func (a *App) applyThreadMark(channelID, threadTS, ts string, read bool) {
+	debuglog.Cache("applyThreadMark: channel=%s thread_ts=%s ts=%s read=%v active=%s",
+		channelID, threadTS, ts, read, a.activeChannelID)
 	if a.threadVisible &&
 		a.threadPanel.ChannelID() == channelID &&
 		a.threadPanel.ThreadTS() == threadTS {
