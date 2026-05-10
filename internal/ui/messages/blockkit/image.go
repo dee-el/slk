@@ -22,6 +22,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/lipgloss/v2"
 
@@ -149,19 +150,30 @@ func fetchOrPlaceholder(url string, target image.Point, ctx Context, rowStart in
 			ts := ctx.MessageTS
 			send := ctx.SendMsg
 			fetcher := ctx.Fetcher
+			reqID := debuglog.NextReqID()
+			debuglog.ImgFetch("enqueue: key=%s url=%s panel=blockkit channel=%s ts=%s req_id=%d",
+				key, url, channel, ts, reqID)
 			go func() {
+				fetchStart := time.Now()
 				_, err := fetcher.Fetch(context.Background(), imgpkg.FetchRequest{
-					Key: key, URL: url, Target: pixelTarget,
+					Key: key, URL: url, Target: pixelTarget, ReqID: reqID,
 				})
 				inflightURLMu.Lock()
 				delete(inflightURL, key)
 				inflightURLMu.Unlock()
 				if err != nil {
+					debuglog.ImgFetch("dispatch: key=%s req_id=%d total_ms=%d kind=failed (blockkit) err=%v",
+						key, reqID, time.Since(fetchStart).Milliseconds(), err)
 					debuglog.ImgFetch("blockkit image fetch failed: key=%s url=%s err=%v", key, url, err)
 					return
 				}
 				if send != nil {
-					send(BlockImageReadyMsg{Channel: channel, TS: ts, URL: url})
+					debuglog.ImgFetch("dispatch: key=%s req_id=%d total_ms=%d kind=ready (blockkit)",
+						key, reqID, time.Since(fetchStart).Milliseconds())
+					send(BlockImageReadyMsg{Channel: channel, TS: ts, URL: url, ReqID: reqID})
+				} else {
+					debuglog.ImgFetch("dispatch: key=%s req_id=%d total_ms=%d kind=skipped (blockkit, SendMsg=nil)",
+						key, reqID, time.Since(fetchStart).Milliseconds())
 				}
 			}()
 		}
