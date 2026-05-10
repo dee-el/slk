@@ -803,7 +803,7 @@ func run() error {
 			if wctx == nil {
 				return nil
 			}
-			msgItems := fetchChannelMessages(wctx.Client, channelID, db, wctx.UserNames, tsFormat, avatarCache)
+			msgItems := fetchChannelMessages(wctx.Client, channelID, db, wctx.UserNames, tsFormat, avatarCache, router)
 
 			lastReadTS := wctx.LastReadMap[channelID]
 
@@ -1697,6 +1697,33 @@ func pickAttachmentURL(f slack.File, kind string) string {
 	return f.URLPrivate
 }
 
+// resolveUserCached returns the display name for userID using only
+// local sources: the in-memory userNames map and the cached users
+// table. Never hits the network. Returns ("", false) when the user
+// is unknown — caller is expected to fall back to userID-as-name and
+// enqueue an async lookup via wctx.UserResolver.Request.
+func resolveUserCached(userID string, userNames map[string]string, db *cache.DB) (string, bool) {
+	if userID == "" {
+		return "", false
+	}
+	if name, ok := userNames[userID]; ok && name != "" {
+		return name, true
+	}
+	if db != nil {
+		if u, err := db.GetUser(userID); err == nil {
+			name := u.DisplayName
+			if name == "" {
+				name = u.Name
+			}
+			if name != "" {
+				userNames[userID] = name
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+
 // resolveUser ensures we have the display name and avatar for a user.
 // If the user is unknown, fetches their profile from Slack on demand.
 // Returns the resolved display name (or the userID as a fallback) and a
@@ -2080,7 +2107,7 @@ func loadCachedThreadReplies(
 // The MessagesLoadedMsg handler distinguishes nil from empty so a
 // failed background refresh doesn't wipe a successfully-rendered
 // cache view. Do NOT change nil to mean "empty channel".
-func fetchChannelMessages(client *slackclient.Client, channelID string, db *cache.DB, userNames map[string]string, tsFormat string, avatarCache *avatar.Cache) []messages.MessageItem {
+func fetchChannelMessages(client *slackclient.Client, channelID string, db *cache.DB, userNames map[string]string, tsFormat string, avatarCache *avatar.Cache, router *workspaceRouter) []messages.MessageItem {
 	ctx := context.Background()
 	debuglog.Cache("fetchChannelMessages: channel=%s entry", channelID)
 	start := time.Now()
@@ -2109,7 +2136,15 @@ func fetchChannelMessages(client *slackclient.Client, channelID string, db *cach
 			CreatedAt:   time.Now().Unix(),
 		})
 
-		userName, _ := resolveUser(client, m.User, userNames, db, avatarCache)
+		userName, ok := resolveUserCached(m.User, userNames, db)
+		if !ok {
+			userName = m.User
+			if router != nil {
+				if wctx := router.Active(); wctx != nil && wctx.UserResolver != nil {
+					wctx.UserResolver.Request(m.User)
+				}
+			}
+		}
 
 		// Convert reactions
 		var reactions []messages.ReactionItem
