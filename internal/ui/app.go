@@ -1507,6 +1507,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case NewMessageMsg:
+		debuglog.Cache("NewMessageMsg: channel=%s ts=%s thread_ts=%s active=%s",
+			msg.ChannelID, msg.Message.TS, msg.Message.ThreadTS, a.activeChannelID)
 		if msg.Message.IsEdited {
 			// Edit echo: update existing message in place rather than
 			// appending. Gate on the active channel for the main pane
@@ -1836,6 +1838,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusbar.SetConnectionState(statusbar.ConnectionState(msg.State))
 
 	case WSMessageDeletedMsg:
+		debuglog.Cache("WSMessageDeletedMsg: channel=%s ts=%s active=%s",
+			msg.ChannelID, msg.TS, a.activeChannelID)
 		if msg.ChannelID == a.activeChannelID {
 			a.messagepane.RemoveMessageByTS(msg.TS)
 		}
