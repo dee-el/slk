@@ -2045,6 +2045,9 @@ func fetchChannelMessages(client *slackclient.Client, channelID string, db *cach
 
 	debuglog.Cache("fetchChannelMessages: channel=%s result %s dur_ms=%d (authoritative replace)",
 		channelID, summarizeMessages(msgItems), time.Since(start).Milliseconds())
+	if err := db.SetChannelSyncedAt(channelID, time.Now().Unix()); err != nil {
+		debuglog.Cache("fetchChannelMessages: SetChannelSyncedAt %s: %v", channelID, err)
+	}
 	return msgItems
 }
 
@@ -2283,6 +2286,9 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 			RawJSON:     string(rawBytes),
 			CreatedAt:   time.Now().Unix(),
 		})
+		if err := h.db.SetChannelSyncedAt(channelID, time.Now().Unix()); err != nil {
+			debuglog.Cache("OnMessage: SetChannelSyncedAt %s: %v", channelID, err)
+		}
 	}
 
 	// Check if this message should trigger a desktop notification.
