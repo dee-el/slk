@@ -791,9 +791,10 @@ func TestApp_BackgroundWorkspaceReadyDoesNotClobberActiveState(t *testing.T) {
 
 	// Make T1 the active workspace by sending the first WorkspaceReadyMsg.
 	app.Update(WorkspaceReadyMsg{
-		TeamID:   "T1",
-		TeamName: "First",
-		Channels: []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
+		TeamID:        "T1",
+		TeamName:      "First",
+		Channels:      []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
+		InitialActive: true,
 	})
 	app.activeTeamID = "T1"
 	app.activeChannelID = "C1"
@@ -966,9 +967,10 @@ func TestApp_WorkspaceReadyAppliesPerWorkspaceTheme(t *testing.T) {
 	beforeVer := styles.Version()
 
 	app.Update(WorkspaceReadyMsg{
-		TeamID:   "T1",
-		TeamName: "team",
-		Theme:    "dracula",
+		TeamID:        "T1",
+		TeamName:      "team",
+		Theme:         "dracula",
+		InitialActive: true,
 	})
 
 	afterVer := styles.Version()
@@ -2846,9 +2848,10 @@ func TestWorkspaceReadyFirstChannelSetsLoading(t *testing.T) {
 	})
 
 	app.Update(WorkspaceReadyMsg{
-		TeamID:   "T1",
-		TeamName: "Acme",
-		Channels: []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
+		TeamID:        "T1",
+		TeamName:      "Acme",
+		Channels:      []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
+		InitialActive: true,
 	})
 
 	if !app.messagepane.IsLoading() {
@@ -3192,5 +3195,58 @@ func TestCtrlKTriggersNavForward(t *testing.T) {
 	}
 	if cs.ID != "C2" || !cs.FromHistory {
 		t.Errorf("want ID=C2 FromHistory=true, got %+v", cs)
+	}
+}
+
+func TestWorkspaceReady_OnlyInitialActiveClaimsChannel(t *testing.T) {
+	app := NewApp()
+
+	// First WorkspaceReady arrives WITHOUT InitialActive — should not
+	// set activeTeamID and should not queue a ChannelSelectedMsg.
+	app.Update(WorkspaceReadyMsg{
+		TeamID:        "T-other",
+		TeamName:      "Other",
+		Channels:      []sidebar.ChannelItem{{ID: "C-other", Name: "general", Type: "channel"}},
+		InitialActive: false,
+	})
+
+	if app.activeTeamID != "" {
+		t.Errorf("non-initial WorkspaceReady should not set activeTeamID; got %q", app.activeTeamID)
+	}
+
+	// Second WorkspaceReady with InitialActive=true claims active.
+	app.Update(WorkspaceReadyMsg{
+		TeamID:        "T-default",
+		TeamName:      "Default",
+		Channels:      []sidebar.ChannelItem{{ID: "C-default", Name: "general", Type: "channel"}},
+		InitialActive: true,
+	})
+
+	if app.activeTeamID != "T-default" {
+		t.Errorf("activeTeamID = %q, want T-default", app.activeTeamID)
+	}
+}
+
+func TestWorkspaceReady_BootstrapClaimIsOneShot(t *testing.T) {
+	app := NewApp()
+
+	app.Update(WorkspaceReadyMsg{
+		TeamID:        "T1",
+		TeamName:      "First",
+		Channels:      []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
+		InitialActive: true,
+	})
+	first := app.activeTeamID
+
+	// A second InitialActive=true (defensive — shouldn't happen) is a no-op.
+	app.Update(WorkspaceReadyMsg{
+		TeamID:        "T2",
+		TeamName:      "Second",
+		Channels:      []sidebar.ChannelItem{{ID: "C2", Name: "general", Type: "channel"}},
+		InitialActive: true,
+	})
+
+	if app.activeTeamID != first {
+		t.Errorf("activeTeamID changed after second InitialActive; got %q, want %q", app.activeTeamID, first)
 	}
 }

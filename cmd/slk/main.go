@@ -1029,6 +1029,7 @@ func run() error {
 				UserID:           wctx.UserID,
 				CustomEmoji:      wctx.CustomEmoji, // empty at this point; filled by the goroutine below
 				SectionsProvider: sectionsProviderAdapter{store: wctx.SectionStore},
+				InitialActive:    claimActive,
 			})
 
 			// Fetch workspace custom emojis in the background. When done,

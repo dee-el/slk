@@ -245,6 +245,13 @@ type (
 		// workspace. Nil means "use config-glob behavior" (the App's
 		// sidebar reverts to its existing name-keyed buckets).
 		SectionsProvider sidebar.SectionsProvider
+		// InitialActive is true for exactly one WorkspaceReadyMsg per
+		// program run: the workspace whose team ID matches the configured
+		// default_workspace, or — if no default is configured — the first
+		// workspace to successfully connect. main.go enforces the uniqueness
+		// via sync.Once + atomic router (Task 14). App's handler treats
+		// InitialActive=false as "workspace is up; threads-list kick only".
+		InitialActive bool
 	}
 	// CustomEmojisLoadedMsg is sent when a workspace's custom emoji list
 	// finishes loading in the background, after WorkspaceReadyMsg has
@@ -667,6 +674,12 @@ type App struct {
 	// Current context
 	activeChannelID string
 	activeTeamID    string // workspace whose data is currently loaded into the side panels
+
+	// bootstrapActiveClaimed flips on the first WorkspaceReadyMsg whose
+	// InitialActive=true is observed. Subsequent InitialActive=true
+	// messages (defensive — main.go's sync.Once should prevent them) are
+	// ignored.
+	bootstrapActiveClaimed bool
 
 	// Callbacks
 	channelFetcher ChannelFetchFunc
@@ -2110,11 +2123,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case WorkspaceReadyMsg:
 		a.MarkWorkspaceReady(msg.TeamName)
-		// If this is the first workspace, set it up as active. Threads-view
-		// state reset only happens here — background workspaces becoming
-		// ready must NOT clobber the active workspace's loaded summaries,
-		// unread badge, or current view.
-		if a.activeChannelID == "" {
+		// Only the workspace flagged InitialActive auto-claims active state.
+		// main.go computes this deterministically (default_workspace match,
+		// else first to connect) so two simultaneous WorkspaceReadyMsgs
+		// can no longer race on (activeChannelID == "") and both claim.
+		// bootstrapActiveClaimed is a defensive one-shot guard against any
+		// future bug that delivers InitialActive=true twice.
+		if msg.InitialActive && !a.bootstrapActiveClaimed {
+			a.bootstrapActiveClaimed = true
 			a.view = ViewChannels
 			a.sidebar.SetThreadsActive(false)
 			a.threadsView.SetSummaries(nil)
