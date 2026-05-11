@@ -27,7 +27,7 @@ type KeyMap struct {
 	HalfPageDown        key.Binding
 	Quit                key.Binding
 	QuitConfirm         key.Binding
-	QuitForce           key.Binding
+	CloseThreadView     key.Binding
 	Reaction            key.Binding
 	ReactionNav         key.Binding
 	Edit                key.Binding
@@ -67,9 +67,9 @@ func DefaultKeyMap() KeyMap {
 		PageDown:            key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("PgDn", "page down")),
 		HalfPageUp:          key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "half page up")),
 		HalfPageDown:        key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "half page down")),
-		Quit:                key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
-		QuitConfirm:         key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit (confirm)")),
-		QuitForce:           key.NewBinding(key.WithKeys("Q"), key.WithHelp("Q", "quit immediately")),
+		Quit:                key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit (confirm)")),
+		QuitConfirm:         key.NewBinding(key.WithKeys("Q"), key.WithHelp("Q", "quit (confirm)")),
+		CloseThreadView:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "close thread view")),
 		Reaction:            key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "add reaction")),
 		ReactionNav:         key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "navigate reactions")),
 		Edit:                key.NewBinding(key.WithKeys("E"), key.WithHelp("E", "edit message")),

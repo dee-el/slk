@@ -2720,8 +2720,15 @@ func (a *App) handleNormalMode(msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, a.keys.MarkUnread):
 		return a.markUnreadOfSelected()
 
-	case key.Matches(msg, a.keys.QuitForce):
-		return tea.Quit
+	case key.Matches(msg, a.keys.CloseThreadView):
+		// Lowercase q is "close thread view" when one is open; if no
+		// thread panel is visible it's a no-op (Q and Ctrl+C are the
+		// quit keys). The vim-style pairing: q closes the transient
+		// pane, Q closes the whole app.
+		if a.threadVisible {
+			a.CloseThread()
+		}
+		return nil
 
 	case key.Matches(msg, a.keys.QuitConfirm):
 		a.openQuitConfirm()
