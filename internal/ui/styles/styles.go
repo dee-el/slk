@@ -145,6 +145,14 @@ var (
 				Bold(true).
 				Padding(0, 1)
 
+	// StatusbarSyncing styles the small "verifying" glyph that appears
+	// adjacent to the channel name while a background cache-verify fetch
+	// is in flight. Muted so it is ignorable but legible against the
+	// status bar's surface_dark background.
+	StatusbarSyncing = lipgloss.NewStyle().
+				Background(SurfaceDark).
+				Foreground(TextMuted)
+
 	StatusModeCommand = lipgloss.NewStyle().
 				Background(Warning).
 				Foreground(lipgloss.Color("#000000")).
@@ -404,6 +412,8 @@ func buildStyles() {
 		Background(Accent).Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Padding(0, 1)
 	StatusModeCommand = lipgloss.NewStyle().
 		Background(Warning).Foreground(lipgloss.Color("#000000")).Bold(true).Padding(0, 1)
+	StatusbarSyncing = lipgloss.NewStyle().
+		Background(SurfaceDark).Foreground(TextMuted)
 	ComposeBox = lipgloss.NewStyle().
 		BorderStyle(thickLeftBorder).BorderLeft(true).BorderForeground(Border).BorderBackground(SurfaceDark).
 		Background(SurfaceDark).Foreground(TextPrimary).Padding(1, 1, 1, 1)

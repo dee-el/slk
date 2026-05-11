@@ -197,6 +197,48 @@ func TestStatusBar_PresenceUnknown_NoSegment(t *testing.T) {
 	}
 }
 
+func TestSetSyncing_ShowsIndicatorInView(t *testing.T) {
+	m := New()
+	m.SetChannel("random")
+
+	if strings.Contains(stripANSI(m.View(120)), "○") {
+		t.Fatal("indicator should NOT be present before SetSyncing(true)")
+	}
+
+	m.SetSyncing(true)
+
+	if !strings.Contains(stripANSI(m.View(120)), "○") {
+		t.Errorf("indicator should appear after SetSyncing(true); got: %q", stripANSI(m.View(120)))
+	}
+
+	m.SetSyncing(false)
+
+	if strings.Contains(stripANSI(m.View(120)), "○") {
+		t.Errorf("indicator should disappear after SetSyncing(false); got: %q", stripANSI(m.View(120)))
+	}
+}
+
+func TestSetSyncing_IdempotentOnNoChange(t *testing.T) {
+	m := New()
+	m.SetSyncing(true)
+	verBefore := m.Version()
+
+	m.SetSyncing(true) // same value
+
+	if m.Version() != verBefore {
+		t.Error("Version should NOT bump when SetSyncing called with same value")
+	}
+}
+
+func TestSetSyncing_BumpsVersionOnChange(t *testing.T) {
+	m := New()
+	v0 := m.Version()
+	m.SetSyncing(true)
+	if m.Version() == v0 {
+		t.Fatal("SetSyncing(true) must bump Version() on change")
+	}
+}
+
 // stripANSI removes ANSI escape sequences for substring assertions.
 func stripANSI(s string) string {
 	var b strings.Builder

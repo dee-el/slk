@@ -89,6 +89,20 @@ const (
 	ViewThreads
 )
 
+const (
+	// cacheFreshThreshold: cache rendered as-is, no network fetch, no
+	// syncing indicator. Channel was visited or WS-updated within this
+	// window so the SQLite snapshot is provably recent.
+	cacheFreshThreshold = 30 * time.Second
+
+	// cacheStaleThreshold: above this age, cache-first render is
+	// suppressed entirely and a spinner is shown until the network
+	// fetch returns. The 30-second...5-minute middle band gets the
+	// cache-first + verify-in-background treatment with the syncing
+	// indicator.
+	cacheStaleThreshold = 5 * time.Minute
+)
+
 // Messages sent between components
 type (
 	ChannelSelectedMsg struct {
@@ -193,6 +207,17 @@ type (
 		// this lands so the row hops into the Apps section live.
 		IsBot bool
 	}
+	// UserResolvedMsg arrives asynchronously after main.go's per-workspace
+	// userResolver completes a users.info round-trip for a previously-
+	// unknown message author. The handler patches the in-memory display
+	// name on the messagepane and threadPanel so rows authored by this
+	// user re-render with the real name on the next View().
+	UserResolvedMsg struct {
+		TeamID      string
+		UserID      string
+		DisplayName string
+		IsBot       bool
+	}
 	WorkspaceSwitchedMsg struct {
 		TeamID      string
 		TeamName    string
@@ -245,6 +270,13 @@ type (
 		// workspace. Nil means "use config-glob behavior" (the App's
 		// sidebar reverts to its existing name-keyed buckets).
 		SectionsProvider sidebar.SectionsProvider
+		// InitialActive is true for exactly one WorkspaceReadyMsg per
+		// program run: the workspace whose team ID matches the configured
+		// default_workspace, or — if no default is configured — the first
+		// workspace to successfully connect. main.go enforces the uniqueness
+		// via sync.Once + atomic router (Task 14). App's handler treats
+		// InitialActive=false as "workspace is up; threads-list kick only".
+		InitialActive bool
 	}
 	// CustomEmojisLoadedMsg is sent when a workspace's custom emoji list
 	// finishes loading in the background, after WorkspaceReadyMsg has
@@ -668,10 +700,29 @@ type App struct {
 	activeChannelID string
 	activeTeamID    string // workspace whose data is currently loaded into the side panels
 
+	// bootstrapActiveClaimed flips on the first WorkspaceReadyMsg whose
+	// InitialActive=true is observed. Subsequent InitialActive=true
+	// messages (defensive — main.go's sync.Once should prevent them) are
+	// ignored.
+	bootstrapActiveClaimed bool
+
 	// Callbacks
-	channelFetcher       ChannelFetchFunc
-	channelCacheReader   ChannelCacheReadFunc
-	olderMessagesFetcher OlderMessagesFetchFunc
+	channelFetcher ChannelFetchFunc
+	// channelReadMarker fires Slack's MarkChannel + cache.UpdateLastReadTS
+	// for the given channel up to ts. Returns a tea.Msg (typically
+	// ChannelMarkedReadMsg). Wired in cmd/slk/main.go's wireCallbacks.
+	// Tier 1 of ChannelSelectedMsg (cache fresh, no GetHistory) uses this
+	// to keep mark-as-read working without firing the full fetcher.
+	channelReadMarker  func(channelID, ts string) tea.Msg
+	channelCacheReader ChannelCacheReadFunc
+	// channelSyncedAtReader returns the unix timestamp (seconds) at which
+	// the channel's cache was last authoritatively replaced from the
+	// network, or 0 if never. Used by ChannelSelectedMsg's three-tier
+	// dispatch to decide between cache-only, cache-and-verify, and
+	// spinner-only render. Nil reader defaults to 0 (spinner-only tier
+	// always).
+	channelSyncedAtReader func(channelID string) int64
+	olderMessagesFetcher  OlderMessagesFetchFunc
 	messageSender        MessageSendFunc
 	messageEditor        MessageEditFunc
 	messageDeleter       MessageDeleteFunc
@@ -1393,41 +1444,77 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.messagepane.SetChannel(msg.Name, "")
 		a.messagepane.SetChannelType(msg.Type)
 
-		// Cache-first render: if a cache reader is wired and returns
-		// items synchronously, paint them immediately without the
-		// spinner. The network fetch below still runs and
-		// MessagesLoadedMsg authoritatively replaces this best-effort
-		// cached render once it arrives.
+		a.compose.SetChannel(msg.Name)
+		a.statusbar.SetChannel(msg.Name)
+		a.statusbar.SetChannelType(msg.Type)
+
 		var cached []messages.MessageItem
 		if a.channelCacheReader != nil {
 			cached = a.channelCacheReader(msg.ID)
 		}
-		debuglog.Cache("ChannelSelectedMsg: channel=%s name=%q cache_hit_count=%d",
-			msg.ID, msg.Name, len(cached))
-		if len(cached) > 0 {
-			a.messagepane.SetLoading(false)
-			a.messagepane.SetMessages(cached)
-		} else {
-			a.messagepane.SetLoading(true)
-			a.messagepane.SetMessages(nil) // clear while loading
-			cmds = append(cmds, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-				return SpinnerTickMsg{}
-			}))
+		var syncedAt int64
+		if a.channelSyncedAtReader != nil {
+			syncedAt = a.channelSyncedAtReader(msg.ID)
 		}
-		a.compose.SetChannel(msg.Name)
-		a.statusbar.SetChannel(msg.Name)
-		a.statusbar.SetChannelType(msg.Type)
-		// Always fetch fresh from the network in the background; the
-		// cached render is best-effort.
-		if a.channelFetcher != nil {
+		age := time.Duration(0)
+		if syncedAt > 0 {
+			age = time.Since(time.Unix(syncedAt, 0))
+		}
+		debuglog.Cache("ChannelSelectedMsg: channel=%s name=%q cache_hit_count=%d synced_at=%d age_ms=%d",
+			msg.ID, msg.Name, len(cached), syncedAt, age.Milliseconds())
+
+		fireFetch := func() {
+			if a.channelFetcher == nil {
+				debuglog.Cache("ChannelSelectedMsg: channel=%s no channelFetcher wired", msg.ID)
+				return
+			}
 			fetcher := a.channelFetcher
 			chID, chName := msg.ID, msg.Name
 			debuglog.Cache("ChannelSelectedMsg: channel=%s firing background network fetch", msg.ID)
-			cmds = append(cmds, func() tea.Msg {
-				return fetcher(chID, chName)
-			})
-		} else {
-			debuglog.Cache("ChannelSelectedMsg: channel=%s no channelFetcher wired", msg.ID)
+			cmds = append(cmds, func() tea.Msg { return fetcher(chID, chName) })
+		}
+
+		switch {
+		case syncedAt > 0 && age < cacheFreshThreshold:
+			// Tier 1: provably fresh (cache was just synced). Render whatever
+			// we have (cached can legitimately be empty here — e.g., a channel
+			// verified empty within the last 30s). Mark-as-read if non-empty.
+			// No fetch.
+			a.messagepane.SetLoading(false)
+			a.messagepane.SetMessages(cached)
+			a.statusbar.SetSyncing(false)
+			if a.channelReadMarker != nil && len(cached) > 0 {
+				marker := a.channelReadMarker
+				chID := msg.ID
+				latestTS := cached[len(cached)-1].TS
+				cmds = append(cmds, func() tea.Msg { return marker(chID, latestTS) })
+			}
+			debuglog.Cache("ChannelSelectedMsg: channel=%s tier=1_fresh", msg.ID)
+
+		case len(cached) > 0:
+			// Tier 2: cache exists, verify in background. Covers
+			// (a) syncedAt > 0 with age >= 30s (any age — we render and verify
+			//     rather than blanking the pane),
+			// (b) syncedAt == 0 (freshness unknown; could be a prior session's
+			//     cache or an un-wired reader). Always render + fire fetch +
+			//     show indicator so the user knows it's being checked.
+			a.messagepane.SetLoading(false)
+			a.messagepane.SetMessages(cached)
+			a.statusbar.SetSyncing(true)
+			fireFetch()
+			debuglog.Cache("ChannelSelectedMsg: channel=%s tier=2_verify", msg.ID)
+
+		default:
+			// Tier 3: no cache at all (genuine cold-start, never-visited
+			// channel). Spinner + fetch.
+			a.messagepane.SetLoading(true)
+			a.messagepane.SetMessages(nil)
+			a.statusbar.SetSyncing(false)
+			cmds = append(cmds, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+				return SpinnerTickMsg{}
+			}))
+			fireFetch()
+			debuglog.Cache("ChannelSelectedMsg: channel=%s tier=3_spinner", msg.ID)
 		}
 
 	case MessagesLoadedMsg:
@@ -1447,6 +1534,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		debuglog.Cache("MessagesLoadedMsg: channel=%s active=%s kind=%s count=%d",
 			msg.ChannelID, a.activeChannelID, kind, len(msg.Messages))
 		if msg.ChannelID == a.activeChannelID {
+			a.statusbar.SetSyncing(false)
 			a.messagepane.SetLoading(false)
 			a.messagepane.SetLastReadTS(msg.LastReadTS)
 			// nil Messages from the fetcher signals network FAILURE, not an
@@ -1969,6 +2057,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.SetChannels(items)
 
+	case UserResolvedMsg:
+		if msg.TeamID != a.activeTeamID {
+			break
+		}
+		a.messagepane.PatchUserName(msg.UserID, msg.DisplayName)
+		a.threadPanel.PatchUserName(msg.UserID, msg.DisplayName)
+		// IsBot affects DM channel-type classification, but that's
+		// orchestrated by DMNameResolvedMsg; this handler is only the
+		// in-history name patch. IsBot is carried for forward
+		// compatibility but not consumed here.
+
 	case WorkspaceSwitchedMsg:
 		if a.compose.Uploading() || a.threadCompose.Uploading() {
 			cmds = append(cmds, a.uploadToastCmd("Upload in progress", 2*time.Second))
@@ -1997,11 +2096,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.CloseThread()
 		a.clearSelections()
 		a.compose.Reset()
-		a.messagepane.SetLoading(true)
-		a.messagepane.SetMessages(nil)
-		cmds = append(cmds, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-			return SpinnerTickMsg{}
-		}))
+		a.statusbar.SetSyncing(false) // defensive: don't carry stale sync state across workspaces
+		// Pane is left as-is — the queued ChannelSelectedMsg below will paint
+		// over it via the three-tier dispatch (Task 10). For empty workspaces
+		// (no Channels) the pane is cleared explicitly in the else branch
+		// below.
 		a.SetMode(ModeNormal)
 		a.compose.Blur()
 		a.sidebar.SetSectionsProvider(msg.SectionsProvider)
@@ -2048,6 +2147,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		} else {
 			a.sidebar.SelectThreadsRow()
+			a.messagepane.SetLoading(false)
+			a.messagepane.SetMessages(nil)
 		}
 		// Kick off an initial threads-list fetch so the sidebar Threads
 		// row badge populates before the user opens the view.
@@ -2097,11 +2198,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case WorkspaceReadyMsg:
 		a.MarkWorkspaceReady(msg.TeamName)
-		// If this is the first workspace, set it up as active. Threads-view
-		// state reset only happens here — background workspaces becoming
-		// ready must NOT clobber the active workspace's loaded summaries,
-		// unread badge, or current view.
-		if a.activeChannelID == "" {
+		// Only the workspace flagged InitialActive auto-claims active state.
+		// main.go computes this deterministically (default_workspace match,
+		// else first to connect) so two simultaneous WorkspaceReadyMsgs
+		// can no longer race on (activeChannelID == "") and both claim.
+		// bootstrapActiveClaimed is a defensive one-shot guard against any
+		// future bug that delivers InitialActive=true twice.
+		if msg.InitialActive && !a.bootstrapActiveClaimed {
+			a.bootstrapActiveClaimed = true
 			a.view = ViewChannels
 			a.sidebar.SetThreadsActive(false)
 			a.threadsView.SetSummaries(nil)
@@ -3941,11 +4045,25 @@ func (a *App) SetChannelFetcher(fn ChannelFetchFunc) {
 	a.channelFetcher = fn
 }
 
+// SetChannelReadMarker installs the mark-as-read callback. Wired in
+// cmd/slk/main.go alongside SetChannelFetcher (the fetcher keeps its
+// own mark-as-read side-effect for Tier 2/3; this callback exists
+// purely so Tier 1 can mark-as-read without GetHistory).
+func (a *App) SetChannelReadMarker(fn func(channelID, ts string) tea.Msg) {
+	a.channelReadMarker = fn
+}
+
 // SetChannelCacheReader sets the callback consulted synchronously on
 // channel selection to render cached messages before the network fetch
 // completes. Pass nil to disable cache-first rendering.
 func (a *App) SetChannelCacheReader(fn ChannelCacheReadFunc) {
 	a.channelCacheReader = fn
+}
+
+// SetChannelSyncedAtReader installs the cache-freshness reader. Wired
+// in cmd/slk/main.go's wireCallbacks to db.GetChannelSyncedAt.
+func (a *App) SetChannelSyncedAtReader(fn func(channelID string) int64) {
+	a.channelSyncedAtReader = fn
 }
 
 // SetOlderMessagesFetcher sets the callback used to load older messages when scrolling up.

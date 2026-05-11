@@ -31,6 +31,7 @@ type Model struct {
 	presence    string    // "active", "away", or "" (unknown — segment hidden)
 	dndEnabled  bool
 	dndEndTS    time.Time // zero if not in DND
+	syncing     bool      // true while a background cache-verify fetch is in flight
 	version     int64
 }
 
@@ -125,6 +126,18 @@ func (m *Model) SetInThread(inThread bool) {
 	}
 }
 
+// SetSyncing toggles a small "verifying" indicator (a single ○ glyph)
+// next to the channel name. Used by App's three-tier ChannelSelectedMsg
+// dispatch to signal that the displayed cache is being verified
+// against the network in the background.
+func (m *Model) SetSyncing(syncing bool) {
+	if m.syncing == syncing {
+		return
+	}
+	m.syncing = syncing
+	m.dirty()
+}
+
 // SetToast displays an arbitrary string in the right-side toast slot. Pass ""
 // to clear. Callers are responsible for clearing the toast (typically via a
 // tea.Tick that delivers CopiedClearMsg).
@@ -169,6 +182,11 @@ func (m Model) View(width int) string {
 		channelLabel = fmt.Sprintf(" %s%s > Thread ", glyph, m.channel)
 	}
 	channelInfo := styles.StatusBar.Render(channelLabel)
+	if m.syncing {
+		// Background-matched syncing glyph sits flush against the channel
+		// segment so the bar reads as a single continuous strip.
+		channelInfo += styles.StatusbarSyncing.Render("○ ")
+	}
 
 	// Workspace
 	wsInfo := styles.StatusBar.Render(fmt.Sprintf(" %s ", m.workspace))

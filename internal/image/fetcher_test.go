@@ -3,6 +3,7 @@ package image
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"image"
 	imgcolor "image/color"
 	imgpng "image/png"
@@ -11,6 +12,16 @@ import (
 	"sync"
 	"testing"
 )
+
+// tinyWebP is a tiny valid WebP image (VP8, 8x8 white) used to verify
+// that the WebP decoder is registered with the stdlib image registry.
+// Regenerate with:
+//
+//	ffmpeg -y -f lavfi -i color=c=white:s=8x8 -frames:v 1 \
+//	    internal/image/testdata/tiny.webp
+//
+//go:embed testdata/tiny.webp
+var tinyWebP []byte
 
 func tinyPNG(t *testing.T, w, h int, c imgcolor.RGBA) []byte {
 	t.Helper()
@@ -235,6 +246,56 @@ func TestFetcher_FetchPopulatesPrerender(t *testing.T) {
 	}
 	if len(r.Lines) != cellTarget.Y {
 		t.Errorf("expected %d lines, got %d", cellTarget.Y, len(r.Lines))
+	}
+}
+
+// TestFetcher_DecodesWebP exercises the WebP decode path that Slack's
+// avatar CDN now serves for many users. Without a registered WebP
+// decoder the download succeeds but image.Decode fails with "image:
+// unknown format" and the avatar is silently evicted from the cache —
+// the user just sees no picture. This regression test guards the blank
+// import of golang.org/x/image/webp in fetcher.go.
+func TestFetcher_DecodesWebP(t *testing.T) {
+	if len(tinyWebP) == 0 {
+		t.Fatal("testdata/tiny.webp missing or empty")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/webp")
+		w.Write(tinyWebP)
+	}))
+	defer srv.Close()
+
+	cache, _ := NewCache(t.TempDir(), 10)
+	f := NewFetcher(cache, http.DefaultClient)
+
+	res, err := f.Fetch(context.Background(), FetchRequest{
+		Key: "avatar-webp", URL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Fetch failed: %v — webp decoder not registered?", err)
+	}
+	if res.Img == nil {
+		t.Fatal("decoded image is nil")
+	}
+	if res.Img.Bounds().Dx() <= 0 || res.Img.Bounds().Dy() <= 0 {
+		t.Errorf("unreasonable dims: %v", res.Img.Bounds())
+	}
+}
+
+// TestWebPDecoderRegistered is a narrower companion to
+// TestFetcher_DecodesWebP: it bypasses the HTTP/cache path and asserts
+// directly that image.Decode recognizes WebP. If this fails, the blank
+// import in fetcher.go is missing or the fixture is corrupt.
+func TestWebPDecoderRegistered(t *testing.T) {
+	img, format, err := image.Decode(bytes.NewReader(tinyWebP))
+	if err != nil {
+		t.Fatalf("image.Decode failed: %v — golang.org/x/image/webp blank import missing?", err)
+	}
+	if format != "webp" {
+		t.Errorf("format = %q, want %q", format, "webp")
+	}
+	if img == nil {
+		t.Error("decoded image is nil")
 	}
 }
 

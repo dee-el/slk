@@ -791,9 +791,10 @@ func TestApp_BackgroundWorkspaceReadyDoesNotClobberActiveState(t *testing.T) {
 
 	// Make T1 the active workspace by sending the first WorkspaceReadyMsg.
 	app.Update(WorkspaceReadyMsg{
-		TeamID:   "T1",
-		TeamName: "First",
-		Channels: []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
+		TeamID:        "T1",
+		TeamName:      "First",
+		Channels:      []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
+		InitialActive: true,
 	})
 	app.activeTeamID = "T1"
 	app.activeChannelID = "C1"
@@ -966,9 +967,10 @@ func TestApp_WorkspaceReadyAppliesPerWorkspaceTheme(t *testing.T) {
 	beforeVer := styles.Version()
 
 	app.Update(WorkspaceReadyMsg{
-		TeamID:   "T1",
-		TeamName: "team",
-		Theme:    "dracula",
+		TeamID:        "T1",
+		TeamName:      "team",
+		Theme:         "dracula",
+		InitialActive: true,
 	})
 
 	afterVer := styles.Version()
@@ -2687,6 +2689,9 @@ func TestChannelSelectedRendersFromCacheWithoutSpinner(t *testing.T) {
 		}
 		return nil
 	})
+	// Land in Tier 2 (cache rendered + fetcher fires): synced 2 minutes
+	// ago is >30s (not Tier 1) and <5min (not Tier 3).
+	app.SetChannelSyncedAtReader(func(string) int64 { return time.Now().Unix() - 120 })
 	fetcherCalled := false
 	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
 		fetcherCalled = true
@@ -2730,6 +2735,9 @@ func TestMessagesLoadedNilDoesNotClobberCachedView(t *testing.T) {
 	app.SetChannelCacheReader(func(channelID string) []messages.MessageItem {
 		return cachedItems
 	})
+	// Tier 2: cache renders + fetcher fires (the network failure path
+	// under test happens after both).
+	app.SetChannelSyncedAtReader(func(string) int64 { return time.Now().Unix() - 120 })
 	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
 		// Simulate a network failure by returning the same shape the
 		// real fetcher uses on error.
@@ -2804,32 +2812,68 @@ func TestChannelSelectedFallsBackToSpinnerOnCacheMiss(t *testing.T) {
 	}
 }
 
-// TestWorkspaceSwitchedSetsLoadingBeforeChannelSelect verifies that the
-// WorkspaceSwitchedMsg handler flips the messagepane to loading=true at
-// the same time it clears the message list, so that the empty-state
-// branch ("No messages yet") cannot flash between the synchronous
-// SetMessages(nil) and the deferred ChannelSelectedMsg cmd that would
-// re-populate it on the next Bubbletea tick.
-func TestWorkspaceSwitchedSetsLoadingBeforeChannelSelect(t *testing.T) {
+// TestWorkspaceSwitchedQueuesChannelSelected verifies that the
+// WorkspaceSwitchedMsg handler queues a ChannelSelectedMsg for the
+// restored (or first) channel rather than wiping the pane itself. The
+// pane is intentionally left as-is so the queued ChannelSelectedMsg
+// (handled by the three-tier dispatch) paints over it without an
+// intermediate empty-state flash.
+func TestWorkspaceSwitchedQueuesChannelSelected(t *testing.T) {
 	app := NewApp()
 	app.SetChannelCacheReader(func(channelID string) []messages.MessageItem { return nil })
 	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
 		return MessagesLoadedMsg{ChannelID: channelID, Messages: nil}
 	})
 
-	// Note: do NOT drain the returned cmd batch — we want to assert the
-	// intermediate post-Update state before the deferred
-	// ChannelSelectedMsg dispatch runs on the next tick.
-	app.Update(WorkspaceSwitchedMsg{
+	_, cmd := app.Update(WorkspaceSwitchedMsg{
 		TeamID:   "T2",
 		Channels: []sidebar.ChannelItem{{ID: "C9", Name: "general", Type: "channel"}},
 	})
 
-	if !app.messagepane.IsLoading() {
-		t.Fatalf("expected messagepane loading=true between ticks, got false")
+	// Walk the returned batch and confirm a ChannelSelectedMsg for the
+	// only channel in the new workspace is queued.
+	found := false
+	var walk func(c tea.Cmd)
+	walk = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		msg := c()
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, child := range batch {
+				walk(child)
+			}
+			return
+		}
+		if cs, ok := msg.(ChannelSelectedMsg); ok && cs.ID == "C9" {
+			found = true
+		}
+	}
+	walk(cmd)
+	if !found {
+		t.Fatalf("expected WorkspaceSwitchedMsg to queue ChannelSelectedMsg{ID:C9}, got none")
+	}
+}
+
+// TestWorkspaceSwitchedEmptyClearsPane verifies that the empty-workspace
+// branch (no Channels) explicitly clears the messagepane, since no
+// ChannelSelectedMsg is queued to repaint it.
+func TestWorkspaceSwitchedEmptyClearsPane(t *testing.T) {
+	app := NewApp()
+	// Seed the pane with a stale message so we can prove it gets cleared.
+	app.messagepane.SetMessages([]messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "stale"}})
+	app.messagepane.SetLoading(true)
+
+	app.Update(WorkspaceSwitchedMsg{
+		TeamID:   "T2",
+		Channels: nil,
+	})
+
+	if app.messagepane.IsLoading() {
+		t.Fatalf("expected loading=false on empty workspace, got true")
 	}
 	if got := app.messagepane.Messages(); len(got) != 0 {
-		t.Fatalf("expected messages cleared, got %d", len(got))
+		t.Fatalf("expected messages cleared on empty workspace, got %d", len(got))
 	}
 }
 
@@ -2846,9 +2890,10 @@ func TestWorkspaceReadyFirstChannelSetsLoading(t *testing.T) {
 	})
 
 	app.Update(WorkspaceReadyMsg{
-		TeamID:   "T1",
-		TeamName: "Acme",
-		Channels: []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
+		TeamID:        "T1",
+		TeamName:      "Acme",
+		Channels:      []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
+		InitialActive: true,
 	})
 
 	if !app.messagepane.IsLoading() {
@@ -3192,5 +3237,225 @@ func TestCtrlKTriggersNavForward(t *testing.T) {
 	}
 	if cs.ID != "C2" || !cs.FromHistory {
 		t.Errorf("want ID=C2 FromHistory=true, got %+v", cs)
+	}
+}
+
+func TestWorkspaceReady_OnlyInitialActiveClaimsChannel(t *testing.T) {
+	app := NewApp()
+
+	// First WorkspaceReady arrives WITHOUT InitialActive — should not
+	// set activeTeamID and should not queue a ChannelSelectedMsg.
+	app.Update(WorkspaceReadyMsg{
+		TeamID:        "T-other",
+		TeamName:      "Other",
+		Channels:      []sidebar.ChannelItem{{ID: "C-other", Name: "general", Type: "channel"}},
+		InitialActive: false,
+	})
+
+	if app.activeTeamID != "" {
+		t.Errorf("non-initial WorkspaceReady should not set activeTeamID; got %q", app.activeTeamID)
+	}
+
+	// Second WorkspaceReady with InitialActive=true claims active.
+	app.Update(WorkspaceReadyMsg{
+		TeamID:        "T-default",
+		TeamName:      "Default",
+		Channels:      []sidebar.ChannelItem{{ID: "C-default", Name: "general", Type: "channel"}},
+		InitialActive: true,
+	})
+
+	if app.activeTeamID != "T-default" {
+		t.Errorf("activeTeamID = %q, want T-default", app.activeTeamID)
+	}
+}
+
+func TestWorkspaceReady_BootstrapClaimIsOneShot(t *testing.T) {
+	app := NewApp()
+
+	app.Update(WorkspaceReadyMsg{
+		TeamID:        "T1",
+		TeamName:      "First",
+		Channels:      []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
+		InitialActive: true,
+	})
+	first := app.activeTeamID
+
+	// A second InitialActive=true (defensive — shouldn't happen) is a no-op.
+	app.Update(WorkspaceReadyMsg{
+		TeamID:        "T2",
+		TeamName:      "Second",
+		Channels:      []sidebar.ChannelItem{{ID: "C2", Name: "general", Type: "channel"}},
+		InitialActive: true,
+	})
+
+	if app.activeTeamID != first {
+		t.Errorf("activeTeamID changed after second InitialActive; got %q, want %q", app.activeTeamID, first)
+	}
+}
+
+func TestUserResolvedMsg_PatchesActiveWorkspace(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.messagepane.SetMessages([]messages.MessageItem{
+		{TS: "1.0", UserID: "U1", UserName: "U1", Text: "hi"},
+	})
+
+	app.Update(UserResolvedMsg{
+		TeamID:      "T1",
+		UserID:      "U1",
+		DisplayName: "alice",
+	})
+
+	got := app.messagepane.Messages()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(got))
+	}
+	if got[0].UserName != "alice" {
+		t.Errorf("UserName = %q, want alice", got[0].UserName)
+	}
+}
+
+func TestUserResolvedMsg_DropsForOtherWorkspace(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.messagepane.SetMessages([]messages.MessageItem{
+		{TS: "1.0", UserID: "U1", UserName: "U1", Text: "hi"},
+	})
+
+	app.Update(UserResolvedMsg{
+		TeamID:      "T-other",
+		UserID:      "U1",
+		DisplayName: "alice",
+	})
+
+	got := app.messagepane.Messages()
+	if got[0].UserName != "U1" {
+		t.Errorf("UserName changed despite wrong team; got %q", got[0].UserName)
+	}
+}
+
+// drainAllCmds recursively executes every cmd inside the tea.BatchMsg
+// tree returned by Update. Used to surface counter side-effects on
+// closure-bound fakes (channelFetcher, channelReadMarker). The
+// resulting tea.Msgs are NOT fed back into Update — these tests only
+// care about whether the fakes were invoked.
+func drainAllCmds(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	if cmd == nil {
+		return
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			drainAllCmds(t, c)
+		}
+	}
+}
+
+func TestChannelSelected_Tier1_RenderCacheNoFetch(t *testing.T) {
+	app := NewApp()
+	now := time.Now().Unix()
+	app.SetChannelSyncedAtReader(func(id string) int64 { return now - 10 })
+	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+		return []messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "hi"}}
+	})
+	fetchCalled := 0
+	app.SetChannelFetcher(func(id, name string) tea.Msg {
+		fetchCalled++
+		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+	})
+	markCalled := 0
+	app.SetChannelReadMarker(func(id, ts string) tea.Msg {
+		markCalled++
+		return nil
+	})
+
+	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+	drainAllCmds(t, cmd)
+
+	if fetchCalled != 0 {
+		t.Errorf("Tier 1: fetcher should NOT fire; got %d calls", fetchCalled)
+	}
+	if markCalled != 1 {
+		t.Errorf("Tier 1: markRead should fire once; got %d calls", markCalled)
+	}
+}
+
+func TestChannelSelected_Tier2_CacheAndFetch(t *testing.T) {
+	app := NewApp()
+	now := time.Now().Unix()
+	app.SetChannelSyncedAtReader(func(id string) int64 { return now - 120 })
+	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+		return []messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "hi"}}
+	})
+	fetchCalled := 0
+	app.SetChannelFetcher(func(id, name string) tea.Msg {
+		fetchCalled++
+		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+	})
+	markCalled := 0
+	app.SetChannelReadMarker(func(id, ts string) tea.Msg {
+		markCalled++
+		return nil
+	})
+
+	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+	drainAllCmds(t, cmd)
+
+	if fetchCalled != 1 {
+		t.Errorf("Tier 2: fetcher should fire once; got %d", fetchCalled)
+	}
+	if markCalled != 0 {
+		t.Errorf("Tier 2: markRead should NOT fire (fetcher's own mark-as-read handles it); got %d", markCalled)
+	}
+}
+
+func TestChannelSelected_Tier3_SpinnerOnly(t *testing.T) {
+	app := NewApp()
+	app.SetChannelSyncedAtReader(func(id string) int64 { return 0 })
+	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+		return nil // no cache at all → genuine Tier 3
+	})
+	fetchCalled := 0
+	app.SetChannelFetcher(func(id, name string) tea.Msg {
+		fetchCalled++
+		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+	})
+
+	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+	drainAllCmds(t, cmd)
+
+	if got := app.messagepane.Messages(); len(got) != 0 {
+		t.Errorf("Tier 3: pane should be empty (spinner); got %d msgs", len(got))
+	}
+	if fetchCalled != 1 {
+		t.Errorf("Tier 3: fetcher should fire once; got %d", fetchCalled)
+	}
+}
+
+func TestChannelSelected_UnknownFreshnessWithCache_FallsToTier2(t *testing.T) {
+	// Production state until Task 15 wires SetChannelSyncedAtReader:
+	// syncedAtReader is nil, cache reader returns rows. Should render
+	// cache + fire fetch + show indicator (Tier 2), NOT blank the
+	// pane with a spinner.
+	app := NewApp()
+	// no SetChannelSyncedAtReader call — leaves it nil
+	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+		return []messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "hi"}}
+	})
+	fetchCalled := 0
+	app.SetChannelFetcher(func(id, name string) tea.Msg {
+		fetchCalled++
+		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+	})
+
+	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+	drainAllCmds(t, cmd)
+
+	if got := app.messagepane.Messages(); len(got) != 1 {
+		t.Errorf("unknown freshness with cache: pane should render cache; got %d msgs", len(got))
+	}
+	if fetchCalled != 1 {
+		t.Errorf("unknown freshness with cache: fetcher should fire once; got %d", fetchCalled)
 	}
 }

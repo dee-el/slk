@@ -20,6 +20,12 @@ import (
 	"github.com/gammons/slk/internal/debuglog"
 
 	"golang.org/x/image/draw"
+	// Register WebP decoder with the stdlib image registry. Slack's
+	// avatar CDN (and increasingly its file CDN) serves many images
+	// as image/webp; without this blank import the download succeeds
+	// but image.Decode returns "image: unknown format" and the cache
+	// entry is evicted, leaving the avatar/attachment blank.
+	_ "golang.org/x/image/webp"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -103,9 +109,9 @@ type Fetcher struct {
 	// fallbacks is the same set as a slice (ordered) for sequential
 	// retry on Slack Connect URLs. learnedAuths caches the foreign-team
 	// -> auth mapping after a successful retry.
-	authsByTeam   map[string]TeamAuth
-	fallbacks     []TeamAuth
-	learnedAuths  sync.Map // string -> TeamAuth
+	authsByTeam  map[string]TeamAuth
+	fallbacks    []TeamAuth
+	learnedAuths sync.Map // string -> TeamAuth
 }
 
 // fetchConcurrencyLimit caps the number of in-flight HTTP fetches.

@@ -118,6 +118,32 @@ func (db *DB) GetLastReadTS(channelID string) (string, error) {
 	return ts, nil
 }
 
+// SetChannelSyncedAt stores the unix timestamp (seconds) at which the
+// channel's message cache was last authoritatively replaced from the
+// network. Implemented as an UPDATE so it only touches existing rows;
+// callers must have UpsertChannel'd the channel first, otherwise this
+// is a silent no-op (rows-affected is not checked).
+func (db *DB) SetChannelSyncedAt(channelID string, unixSec int64) error {
+	_, err := db.conn.Exec(`UPDATE channels SET synced_at = ? WHERE id = ?`, unixSec, channelID)
+	if err != nil {
+		return fmt.Errorf("setting channel synced_at: %w", err)
+	}
+	return nil
+}
+
+// GetChannelSyncedAt returns the unix timestamp recorded by
+// SetChannelSyncedAt, or 0 if the channel row is missing or the column
+// was never set. The zero return doubles as the "never synced" signal
+// the UI layer uses to fall into the spinner-only display tier.
+func (db *DB) GetChannelSyncedAt(channelID string) int64 {
+	var syncedAt int64
+	err := db.conn.QueryRow(`SELECT synced_at FROM channels WHERE id = ?`, channelID).Scan(&syncedAt)
+	if err != nil {
+		return 0
+	}
+	return syncedAt
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
