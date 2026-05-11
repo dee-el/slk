@@ -176,3 +176,103 @@ func TestListInvolvedThreads_PerWorkspaceIsolation(t *testing.T) {
 		t.Errorf("T2 query should return only T2 thread, got %+v", got2)
 	}
 }
+
+func TestThreadInvolvesUser_AuthoredParent(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "USELF", Text: "parent", ThreadTS: "1.000000"})
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !involved {
+		t.Error("self-authored parent should count as involved")
+	}
+}
+
+func TestThreadInvolvesUser_RepliedToThread(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "parent", ThreadTS: "1.000000"})
+	db.UpsertMessage(Message{TS: "2.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "USELF", Text: "my reply", ThreadTS: "1.000000"})
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !involved {
+		t.Error("self reply should count as involved")
+	}
+}
+
+func TestThreadInvolvesUser_MentionedAngleBracket(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "hey <@USELF> ping", ThreadTS: "1.000000"})
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !involved {
+		t.Error("<@USELF> mention should count as involved")
+	}
+}
+
+func TestThreadInvolvesUser_PlainTextNotInvolved(t *testing.T) {
+	// Bare "USELF" without <@…> wrapping must NOT count, matching
+	// ListInvolvedThreads' semantics.
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "discussing USELF in plain text", ThreadTS: "1.000000"})
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if involved {
+		t.Error("plain-text USELF should not count as involved")
+	}
+}
+
+func TestThreadInvolvesUser_NoneMatch(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "parent", ThreadTS: "1.000000"})
+	db.UpsertMessage(Message{TS: "2.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U3", Text: "reply", ThreadTS: "1.000000"})
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if involved {
+		t.Error("no self / no mention thread should not count")
+	}
+}
+
+func TestThreadInvolvesUser_RespectsDeleted(t *testing.T) {
+	// A deleted message should not count as involvement, matching the
+	// is_deleted = 0 clause in ListInvolvedThreads.
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "parent", ThreadTS: "1.000000"})
+	db.UpsertMessage(Message{TS: "2.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "USELF", Text: "my reply", ThreadTS: "1.000000"})
+	if err := db.DeleteMessage("C1", "2.000000"); err != nil {
+		t.Fatal(err)
+	}
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if involved {
+		t.Error("deleted self reply should not count as involved")
+	}
+}
