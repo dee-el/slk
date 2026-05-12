@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/debuglog"
+	"github.com/gammons/slk/internal/ui"
 	"github.com/slack-go/slack"
 )
 
@@ -17,13 +18,18 @@ import (
 // backfiller needs. Defined here rather than in internal/slack so
 // the dependency runs from the caller (cmd/slk) toward the package
 // being depended on (internal/slack), keeping the abstraction owned
-// by its sole consumer. *slackclient.Client implicitly satisfies this
-// interface.
-//
-// Task 7 will extend this interface with GetReplies for the thread
-// phase.
+// by its sole consumer. *slackclient.Client implicitly satisfies
+// this interface.
 type historyFetcher interface {
 	GetHistorySince(ctx context.Context, channelID, oldest string, maxTotal int) ([]slack.Message, error)
+	GetReplies(ctx context.Context, channelID, threadTS string) ([]slack.Message, error)
+}
+
+// teaSender is the subset of *tea.Program the backfiller uses to
+// dispatch a refresh into the UI loop. *tea.Program satisfies it
+// implicitly; tests pass a captureSender.
+type teaSender interface {
+	Send(msg tea.Msg)
 }
 
 // backfiller orchestrates a single reconnect backfill pass for one
@@ -31,21 +37,22 @@ type historyFetcher interface {
 // needs to track timestamps, not in-flight work.
 //
 // Two-phase: runChannelPhase fetches conversations.history for every
-// channel that has cached messages, and runThreadPhase (added in
-// Task 7) fetches conversations.replies for any threads with new
-// activity that the user is involved in.
+// channel that has cached messages, and runThreadPhase fetches
+// conversations.replies for any threads with new activity that the
+// user is involved in. run() executes both phases and dispatches a
+// ThreadsListDirtyMsg.
 type backfiller struct {
 	client        historyFetcher
 	db            *cache.DB
 	workspaceID   string
 	selfUserID    string
-	program       *tea.Program // nil in tests; used by Task 7 for ThreadsListDirtyMsg
+	program       teaSender // nil in tests; used to dispatch ThreadsListDirtyMsg
 	concurrency   int
 	perChannelCap int
 
 	// Threads discovered while iterating channel-phase results.
-	// Populated during runChannelPhase; consumed by runThreadPhase
-	// (Task 7). Stored as a set of (channelID, threadTS) pairs.
+	// Populated during runChannelPhase; consumed by runThreadPhase.
+	// Stored as a set of (channelID, threadTS) pairs.
 	mu                sync.Mutex
 	discoveredThreads map[threadKey]struct{}
 }
@@ -60,7 +67,7 @@ type threadKey struct {
 // newBackfiller constructs a backfiller. concurrency caps simultaneous
 // HTTP calls (use 4 in production); perChannelCap is the maxTotal
 // passed to GetHistorySince (use 500).
-func newBackfiller(client historyFetcher, db *cache.DB, workspaceID, selfUserID string, program *tea.Program, concurrency, perChannelCap int) *backfiller {
+func newBackfiller(client historyFetcher, db *cache.DB, workspaceID, selfUserID string, program teaSender, concurrency, perChannelCap int) *backfiller {
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -173,4 +180,97 @@ func (b *backfiller) backfillOneChannel(ctx context.Context, row cache.ChannelSy
 	debuglog.Backfill("team=%s channel=%s oldest=%s count=%d dur_ms=%d%s",
 		b.workspaceID, row.ChannelID, oldest, len(msgs), time.Since(start).Milliseconds(), capped)
 	return len(msgs), nil
+}
+
+// runThreadPhase iterates b.discoveredThreads, filters to threads
+// where the user is involved per the cache, and fetches replies for
+// each through a bounded worker pool. Failures are logged and
+// skipped — one bad thread does not abort the pass.
+func (b *backfiller) runThreadPhase(ctx context.Context) error {
+	b.mu.Lock()
+	threads := make([]threadKey, 0, len(b.discoveredThreads))
+	for k := range b.discoveredThreads {
+		threads = append(threads, k)
+	}
+	b.mu.Unlock()
+
+	start := time.Now()
+	// Filter to involved threads using the cache (cheap, no network).
+	involved := make([]threadKey, 0, len(threads))
+	for _, k := range threads {
+		ok, err := b.db.ThreadInvolvesUser(b.workspaceID, k.ChannelID, k.ThreadTS, b.selfUserID)
+		if err != nil {
+			debuglog.Backfill("team=%s thread-filter err channel=%s thread_ts=%s err=%v", b.workspaceID, k.ChannelID, k.ThreadTS, err)
+			continue
+		}
+		if ok {
+			involved = append(involved, k)
+		}
+	}
+
+	sem := make(chan struct{}, b.concurrency)
+	var wg sync.WaitGroup
+	for _, k := range involved {
+		wg.Add(1)
+		go func(k threadKey) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if err := b.backfillOneThread(ctx, k); err != nil {
+				debuglog.Backfill("team=%s thread channel=%s thread_ts=%s err=%v", b.workspaceID, k.ChannelID, k.ThreadTS, err)
+			}
+		}(k)
+	}
+	wg.Wait()
+
+	debuglog.Backfill("team=%s thread-phase threads_involved=%d done dur_ms=%d",
+		b.workspaceID, len(involved), time.Since(start).Milliseconds())
+	return nil
+}
+
+// backfillOneThread fetches the full reply list for a thread and
+// upserts every returned message. The Slack response includes the
+// parent at index 0 followed by replies; UpsertMessage is idempotent
+// by (ts, channel_id), so re-upserting the parent is safe.
+func (b *backfiller) backfillOneThread(ctx context.Context, k threadKey) error {
+	replies, err := b.client.GetReplies(ctx, k.ChannelID, k.ThreadTS)
+	if err != nil {
+		return err
+	}
+	for _, m := range replies {
+		raw, _ := json.Marshal(m)
+		b.db.UpsertMessage(cache.Message{
+			TS:          m.Timestamp,
+			ChannelID:   k.ChannelID,
+			WorkspaceID: b.workspaceID,
+			UserID:      m.User,
+			Text:        m.Text,
+			ThreadTS:    m.ThreadTimestamp,
+			ReplyCount:  m.ReplyCount,
+			Subtype:     m.SubType,
+			RawJSON:     string(raw),
+			CreatedAt:   time.Now().Unix(),
+		})
+	}
+	return nil
+}
+
+// run executes the full backfill pass: channel phase, then thread
+// phase, then a ThreadsListDirtyMsg dispatch so the UI re-queries
+// the threads view from the now-current cache. Phase errors are
+// logged but do not abort subsequent work — best-effort overall.
+func (b *backfiller) run(ctx context.Context) error {
+	start := time.Now()
+	if err := b.runChannelPhase(ctx); err != nil {
+		debuglog.Backfill("team=%s channel-phase err=%v", b.workspaceID, err)
+	}
+	if err := b.runThreadPhase(ctx); err != nil {
+		debuglog.Backfill("team=%s thread-phase err=%v", b.workspaceID, err)
+	}
+	if b.program != nil {
+		b.program.Send(ui.ThreadsListDirtyMsg{TeamID: b.workspaceID})
+	}
+	debuglog.Backfill("team=%s trigger=reconnect total_dur_ms=%d status=ok",
+		b.workspaceID, time.Since(start).Milliseconds())
+	return nil
 }

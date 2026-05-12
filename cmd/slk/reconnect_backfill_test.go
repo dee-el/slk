@@ -8,19 +8,24 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/gammons/slk/internal/cache"
+	"github.com/gammons/slk/internal/ui"
 	"github.com/slack-go/slack"
 )
 
-// fakeHistory implements historyFetcher for backfill channel-phase
-// tests. Tracks call count per channel and peak concurrency.
+// fakeHistory implements historyFetcher for backfill tests. Tracks
+// call count per channel and peak concurrency. repliesResponses /
+// repliesCalls support the thread-phase tests.
 type fakeHistory struct {
-	mu          sync.Mutex
-	inFlight    int32
-	maxInFlight int32
-	delay       time.Duration
-	responses   map[string][]*slack.GetConversationHistoryResponse
-	calls       map[string]int
+	mu               sync.Mutex
+	inFlight         int32
+	maxInFlight      int32
+	delay            time.Duration
+	responses        map[string][]*slack.GetConversationHistoryResponse
+	calls            map[string]int
+	repliesResponses map[string][]slack.Message // keyed by threadTS
+	repliesCalls     []struct{ Channel, TS string }
 }
 
 // GetHistorySince satisfies historyFetcher. It looks up the per-channel
@@ -47,6 +52,31 @@ func (f *fakeHistory) GetHistorySince(ctx context.Context, channelID, oldest str
 	resp := resps[0]
 	f.responses[channelID] = resps[1:]
 	return resp.Messages, nil
+}
+
+// GetReplies satisfies historyFetcher. Records the call and returns
+// the preconfigured reply slice for the given threadTS, if any.
+func (f *fakeHistory) GetReplies(ctx context.Context, channelID, threadTS string) ([]slack.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.repliesCalls = append(f.repliesCalls, struct{ Channel, TS string }{channelID, threadTS})
+	if replies, ok := f.repliesResponses[threadTS]; ok {
+		return replies, nil
+	}
+	return nil, nil
+}
+
+// captureSender records every tea.Msg dispatched to it. Substituted
+// for *tea.Program in tests via the teaSender interface.
+type captureSender struct {
+	mu   sync.Mutex
+	sent []tea.Msg
+}
+
+func (c *captureSender) Send(msg tea.Msg) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sent = append(c.sent, msg)
 }
 
 func newTestDB(t *testing.T) *cache.DB {
@@ -128,5 +158,86 @@ func TestBackfillChannels_BoundedConcurrency(t *testing.T) {
 	}
 	if len(fh.calls) != 8 {
 		t.Errorf("expected 8 channels called, got %d", len(fh.calls))
+	}
+}
+
+// TestBackfillThreads_FetchesRepliesForInvolvedThreads verifies that
+// after the channel phase populates discoveredThreads, the thread
+// phase filters to threads where the cache shows the user is involved
+// (parent or any reply authored by selfUserID) and fetches replies
+// only for those.
+func TestBackfillThreads_FetchesRepliesForInvolvedThreads(t *testing.T) {
+	db := newTestDB(t)
+	db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "a", Type: "channel"})
+	// Existing cached parent in thread 100: self authored → involved.
+	db.UpsertMessage(cache.Message{TS: "100.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "USELF", Text: "self parent", ThreadTS: "100.000000"})
+	// Existing cached parent in thread 200: not involved.
+	db.UpsertMessage(cache.Message{TS: "200.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "other parent", ThreadTS: "200.000000"})
+	db.SetChannelSyncedAt("C1", 50)
+
+	fh := &fakeHistory{
+		responses: map[string][]*slack.GetConversationHistoryResponse{
+			"C1": {{Messages: []slack.Message{
+				// New reply on involved thread 100.
+				{Msg: slack.Msg{Timestamp: "150.000000", User: "U2", Text: "reply to self", ThreadTimestamp: "100.000000"}},
+				// New reply on non-involved thread 200.
+				{Msg: slack.Msg{Timestamp: "250.000000", User: "U3", Text: "reply on other", ThreadTimestamp: "200.000000"}},
+			}}},
+		},
+		calls: map[string]int{},
+		repliesResponses: map[string][]slack.Message{
+			"100.000000": {
+				{Msg: slack.Msg{Timestamp: "100.000000", User: "USELF", Text: "self parent", ThreadTimestamp: "100.000000"}},
+				{Msg: slack.Msg{Timestamp: "150.000000", User: "U2", Text: "reply to self", ThreadTimestamp: "100.000000"}},
+			},
+		},
+	}
+
+	bf := newBackfiller(fh, db, "T1", "USELF", nil, 4, 500)
+	if err := bf.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(fh.repliesCalls) != 1 {
+		t.Fatalf("expected 1 replies call (for involved thread 100), got %d: %+v", len(fh.repliesCalls), fh.repliesCalls)
+	}
+	if fh.repliesCalls[0].Channel != "C1" || fh.repliesCalls[0].TS != "100.000000" {
+		t.Errorf("replies call = %+v, want C1/100.000000", fh.repliesCalls[0])
+	}
+}
+
+// TestBackfill_FiresThreadsListDirtyMsg verifies that run() dispatches
+// exactly one ThreadsListDirtyMsg into the program, carrying the
+// workspace ID so the UI knows which team's threads view to re-query.
+func TestBackfill_FiresThreadsListDirtyMsg(t *testing.T) {
+	db := newTestDB(t)
+	db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "a", Type: "channel"})
+	db.UpsertMessage(cache.Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U", Text: "x"})
+	db.SetChannelSyncedAt("C1", 100)
+
+	fh := &fakeHistory{
+		responses: map[string][]*slack.GetConversationHistoryResponse{
+			"C1": {{}},
+		},
+		calls: map[string]int{},
+	}
+
+	captured := &captureSender{}
+	bf := newBackfiller(fh, db, "T1", "USELF", captured, 4, 500)
+	if err := bf.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	captured.mu.Lock()
+	defer captured.mu.Unlock()
+	if len(captured.sent) != 1 {
+		t.Fatalf("expected 1 sent msg, got %d", len(captured.sent))
+	}
+	dirty, ok := captured.sent[0].(ui.ThreadsListDirtyMsg)
+	if !ok {
+		t.Fatalf("expected ThreadsListDirtyMsg, got %T", captured.sent[0])
+	}
+	if dirty.TeamID != "T1" {
+		t.Errorf("TeamID = %s, want T1", dirty.TeamID)
 	}
 }
