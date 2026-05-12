@@ -331,11 +331,10 @@ func (m *Model) ScrollDown(n int) {
 // summary, if any. Returns true when a flag was actually flipped (so callers
 // can refresh dependent state, e.g. the sidebar's threads-row badge). This
 // is a presentation-only update: it does not touch Slack server state and
-// does not advance the parent channel's last_read_ts. The next refresh
-// from cache.ListInvolvedThreads may re-set the flag if its heuristic
-// (LastReplyTS > channel.last_read_ts) still considers the thread unread,
-// but in practice the user opening the parent channel will eventually
-// resolve that.
+// does not advance the thread_subscriptions row's last_read. The next
+// refresh from cache.ListSubscribedThreads will recompute Unread from the
+// persisted per-thread LastRead; a subsequent thread_marked WS echo (or
+// an explicit MarkThreadRead call) is what durably clears it.
 func (m *Model) MarkSelectedRead() bool {
 	if m.selected < 0 || m.selected >= len(m.summaries) {
 		return false
@@ -377,11 +376,11 @@ func (m *Model) MarkByThreadTSRead(channelID, threadTS string) bool {
 // server state. Used by the U-key mark-unread flow and by the inbound
 // thread_marked WS handler.
 //
-// Note: the threads-view's underlying heuristic
-// (LastReplyTS > channel.last_read_ts AND LastReplyBy != self) may
-// re-clear this flag on the next refresh from cache.ListInvolvedThreads
-// if the heuristic considers the thread read. This is the documented
-// v1 limitation; a per-thread last_read_ts column is future work.
+// Note: the next refresh from cache.ListSubscribedThreads recomputes
+// Unread from the thread_subscriptions row's per-thread LastRead. If
+// that value is still ahead of LastReplyTS (e.g. because a stale
+// thread_marked persisted it), the flag may flip back to read on
+// refresh.
 func (m *Model) MarkByThreadTSUnread(channelID, threadTS string) bool {
 	if channelID == "" || threadTS == "" {
 		return false

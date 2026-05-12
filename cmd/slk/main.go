@@ -922,11 +922,13 @@ func run() error {
 				if err != nil {
 					log.Printf("Warning: failed to mark thread %s/%s as unread (boundary %s): %v", channelID, threadTS, boundaryTS, err)
 				}
-				// No SQLite write for thread-level — the schema has no
-				// per-thread last_read_ts column in v1. The UI updates
-				// via applyThreadMark; on next refresh
-				// cache.ListInvolvedThreads will reconcile from the
-				// channel's last_read_ts heuristic.
+				// No SQLite write here for thread-level — the
+				// thread_subscriptions row's last_read is the
+				// source of truth and gets updated when Slack
+				// echoes back a thread_marked event. The UI
+				// updates immediately via applyThreadMark; on
+				// next refresh cache.ListSubscribedThreads will
+				// reconcile from the persisted subscription row.
 			}
 			return ui.MessageMarkedUnreadMsg{
 				ChannelID:   channelID,
