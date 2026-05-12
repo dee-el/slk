@@ -2786,9 +2786,19 @@ func (h *rtmEventHandler) OnChannelMarked(channelID, ts string, unreadCount int)
 
 func (h *rtmEventHandler) OnThreadMarked(channelID, threadTS, ts string, read bool) {
 	if h.isActive != nil && !h.isActive() {
-		// Inactive workspace: skip (no per-thread persistence in v1).
 		return
 	}
+
+	// Persist subscription state. active = !read per the dispatch in
+	// internal/slack/events.go: WS `active` means "subscribed for
+	// unread updates", which corresponds to active=1 in our table.
+	if h.db != nil {
+		if err := h.db.UpsertThreadSubscription(h.workspaceID, channelID, threadTS, ts, !read); err != nil {
+			debuglog.Cache("OnThreadMarked: UpsertThreadSubscription %s/%s: %v",
+				channelID, threadTS, err)
+		}
+	}
+
 	if h.program == nil {
 		return
 	}
@@ -2798,6 +2808,26 @@ func (h *rtmEventHandler) OnThreadMarked(channelID, threadTS, ts string, read bo
 		TS:        ts,
 		Read:      read,
 	})
+}
+
+// OnThreadSubscriptionChanged persists a subscribe/unsubscribe event
+// in the thread_subscriptions table. The threads-view UI refresh is
+// handled by a ThreadsListDirtyMsg dispatch so a new subscription
+// shows up (active=true) or an unsubscribe removes the row
+// (active=false) without per-event UI logic here.
+func (h *rtmEventHandler) OnThreadSubscriptionChanged(channelID, threadTS, lastRead string, active bool) {
+	if h.isActive != nil && !h.isActive() {
+		return
+	}
+	if h.db != nil {
+		if err := h.db.UpsertThreadSubscription(h.workspaceID, channelID, threadTS, lastRead, active); err != nil {
+			debuglog.Cache("OnThreadSubscriptionChanged: UpsertThreadSubscription %s/%s: %v",
+				channelID, threadTS, err)
+		}
+	}
+	if h.program != nil {
+		h.program.Send(ui.ThreadsListDirtyMsg{TeamID: h.workspaceID})
+	}
 }
 
 // OnConversationOpened handles WS events that surface a new or

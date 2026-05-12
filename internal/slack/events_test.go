@@ -27,8 +27,9 @@ type mockEventHandler struct {
 	lastBlocks          slack.Blocks
 	lastAttachments     []slack.Attachment
 
-	channelMarks []channelMarkRecord
-	threadMarks  []threadMarkRecord
+	channelMarks     []channelMarkRecord
+	threadMarks      []threadMarkRecord
+	threadSubChanges []threadSubChangeRecord
 
 	lastConversationOpenedID string
 	lastConversationOpenedCh slack.Channel
@@ -56,6 +57,11 @@ type channelMarkRecord struct {
 type threadMarkRecord struct {
 	channelID, threadTS, ts string
 	read                    bool
+}
+
+type threadSubChangeRecord struct {
+	channelID, threadTS, lastRead string
+	active                        bool
 }
 
 func (m *mockEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subtype string, edited bool, files []slack.File, blocks slack.Blocks, attachments []slack.Attachment) {
@@ -95,6 +101,10 @@ func (m *mockEventHandler) OnChannelMarked(channelID, ts string, unreadCount int
 
 func (m *mockEventHandler) OnThreadMarked(channelID, threadTS, ts string, read bool) {
 	m.threadMarks = append(m.threadMarks, threadMarkRecord{channelID, threadTS, ts, read})
+}
+
+func (m *mockEventHandler) OnThreadSubscriptionChanged(channelID, threadTS, lastRead string, active bool) {
+	m.threadSubChanges = append(m.threadSubChanges, threadSubChangeRecord{channelID, threadTS, lastRead, active})
 }
 
 func (m *mockEventHandler) OnConversationOpened(ch slack.Channel) {

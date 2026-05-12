@@ -200,3 +200,76 @@ func TestOnMessage_InactiveWorkspace_ThreadBroadcastBumpsChannel(t *testing.T) {
 		t.Errorf("thread_broadcast did not bump channel unread; got %d", wctx.Channels[0].UnreadCount)
 	}
 }
+
+func TestOnThreadMarked_UpsertsSubscription(t *testing.T) {
+	db := newTestDB(t)
+	h := &rtmEventHandler{
+		db:          db,
+		workspaceID: "T1",
+		isActive:    func() bool { return true },
+	}
+
+	// read=false means the thread is now unread, which corresponds to
+	// active=true in thread_subscriptions.
+	h.OnThreadMarked("C1", "1700000100.000000", "1700000150.000000", false)
+
+	got, err := db.ListActiveThreadSubscriptions("T1")
+	if err != nil {
+		t.Fatalf("ListActiveThreadSubscriptions: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 active sub after thread_marked, got %d", len(got))
+	}
+	if got[0].ChannelID != "C1" || got[0].ThreadTS != "1700000100.000000" ||
+		got[0].LastRead != "1700000150.000000" || !got[0].Active {
+		t.Fatalf("subscription row mismatch: %+v", got[0])
+	}
+
+	// Marking read flips the row to inactive (tombstone-style).
+	h.OnThreadMarked("C1", "1700000100.000000", "1700000150.000000", true)
+	got, _ = db.ListActiveThreadSubscriptions("T1")
+	if len(got) != 0 {
+		t.Fatalf("expected 0 active after read=true, got %d", len(got))
+	}
+}
+
+func TestOnThreadSubscriptionChanged_UpsertsActive(t *testing.T) {
+	db := newTestDB(t)
+	h := &rtmEventHandler{
+		db:          db,
+		workspaceID: "T1",
+		isActive:    func() bool { return true },
+	}
+
+	h.OnThreadSubscriptionChanged("C1", "1700000100.000000", "1700000150.000000", true)
+
+	got, err := db.ListActiveThreadSubscriptions("T1")
+	if err != nil {
+		t.Fatalf("ListActiveThreadSubscriptions: %v", err)
+	}
+	if len(got) != 1 || got[0].ChannelID != "C1" || !got[0].Active {
+		t.Fatalf("subscription row mismatch: %+v", got)
+	}
+}
+
+func TestOnThreadSubscriptionChanged_TombstonesOnUnsubscribe(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.UpsertThreadSubscription("T1", "C1", "1700000100.000000", "1700000150.000000", true); err != nil {
+		t.Fatalf("UpsertThreadSubscription: %v", err)
+	}
+	h := &rtmEventHandler{
+		db:          db,
+		workspaceID: "T1",
+		isActive:    func() bool { return true },
+	}
+
+	h.OnThreadSubscriptionChanged("C1", "1700000100.000000", "1700000150.000000", false)
+
+	got, err := db.ListActiveThreadSubscriptions("T1")
+	if err != nil {
+		t.Fatalf("ListActiveThreadSubscriptions: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 active after unsubscribe, got %d: %+v", len(got), got)
+	}
+}
