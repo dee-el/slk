@@ -2570,6 +2570,16 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 		if err := h.db.SetChannelSyncedAt(channelID, time.Now().Unix()); err != nil {
 			debuglog.Cache("OnMessage: SetChannelSyncedAt %s: %v", channelID, err)
 		}
+		// Advance the per-channel ts watermark used by reconnect
+		// backfill. Slack delivers WS messages in order, so receipt
+		// of a message with ts=X implies we have no missing messages
+		// with ts <= X on this channel — that is exactly the
+		// invariant latest_synced_ts encodes. AdvanceChannelLatestSyncedTS
+		// is no-regress, so out-of-order replay (e.g., a delayed
+		// duplicate after reconnect) won't move the cursor backward.
+		if _, err := h.db.AdvanceChannelLatestSyncedTS(channelID, ts); err != nil {
+			debuglog.Cache("OnMessage: AdvanceChannelLatestSyncedTS %s ts=%s: %v", channelID, ts, err)
+		}
 	}
 
 	// Check if this message should trigger a desktop notification.
