@@ -638,6 +638,18 @@ func TestBackfill_OvernightSuspendScenario(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// D: a channel the user had unreads in pre-suspend, then read in the
+	// official Slack client during the offline window. The reconnect
+	// catch-up must reflect that — HasUnread=false and the newer LastRead.
+	// This is the regression test for Symptom 2 from the read-state-sync
+	// spec.
+	if err := db.UpsertChannel(cache.Channel{ID: "D", WorkspaceID: "T1", Name: "team-product", Type: "channel", IsMember: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateChannelReadState("D", "1700000050.000000", true); err != nil {
+		t.Fatal(err)
+	}
+
 	// --- Server state at wake-up ---
 
 	fh := &fakeHistory{
@@ -661,6 +673,10 @@ func TestBackfill_OvernightSuspendScenario(t *testing.T) {
 			// C is not in unreads → must still be backfilled because
 			// it's in the cached-channels set, even though the result
 			// will be empty.
+			// D was read in the official client during the offline window: server
+			// returns HasUnread=false and the new LastRead. Catch-up must clear
+			// slk's local has_unread and advance last_read_ts.
+			{ChannelID: "D", HasUnread: false, LastRead: "1700008600.000000"},
 		},
 	}
 
@@ -722,6 +738,21 @@ func TestBackfill_OvernightSuspendScenario(t *testing.T) {
 	// synced_at would still be 0 (never set by this test's setup).
 	if got := db.GetChannelSyncedAt("C"); got == 0 {
 		t.Errorf("C: synced_at not bumped — channel was skipped by candidate set, not visited")
+	}
+
+	// --- D assertions: Symptom 2 catch-up ---
+
+	// D had has_unread=true pre-suspend; the catch-up batch write should
+	// have cleared it because client.counts returned HasUnread=false.
+	sD, err := db.GetChannelReadState("D")
+	if err != nil {
+		t.Fatalf("GetChannelReadState D: %v", err)
+	}
+	if sD.HasUnread {
+		t.Errorf("D HasUnread = true after catch-up; Symptom 2 not fixed")
+	}
+	if sD.LastReadTS != "1700008600.000000" {
+		t.Errorf("D LastReadTS = %q, want %q", sD.LastReadTS, "1700008600.000000")
 	}
 }
 
