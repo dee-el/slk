@@ -2614,30 +2614,39 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 		}
 	}
 
+	// Read-state: mark the channel has_unread=true when a message
+	// arrives in a channel the user is NOT actively viewing. Mirrors
+	// Slack's channel-unread semantics — non-broadcast thread replies
+	// do not mark the parent channel unread (only top-level messages
+	// and thread_broadcast subtypes do). See internal/ui/app.go's
+	// thread-reply guard for the matching active-path treatment.
+	//
+	// This write runs for BOTH active and inactive workspaces; the
+	// active/inactive split below only governs the UI dispatch path,
+	// not durable read state. Task 10 of the read-state-sync plan
+	// consolidated the previously duplicated paths into this single
+	// gated write.
+	isThreadReply := threadTS != "" && threadTS != ts
+	isBroadcast := subtype == "thread_broadcast"
+	shouldMarkChannel := !isThreadReply || isBroadcast
+	activeChIDForRead := ""
+	if h.activeChannelID != nil {
+		activeChIDForRead = h.activeChannelID()
+	}
+	if h.db != nil && shouldMarkChannel && activeChIDForRead != channelID {
+		if err := h.db.UpdateChannelReadState(channelID, "", true); err != nil {
+			log.Printf("Warning: failed to set has_unread for %s: %v", channelID, err)
+		}
+	}
+
 	if h.isActive != nil && !h.isActive() {
-		// Inactive workspace — persist per-channel unread so a later
-		// workspace switch reflects the activity, then notify the rail.
-		//
-		// Skip thread replies that aren't broadcasts: per Slack's
-		// channel-unread semantics they don't mark the parent channel
-		// as unread (only top-level messages and thread_broadcast
-		// subtypes do). Mirrors the active-branch guard at
-		// internal/ui/app.go:1430-1431.
-		isThreadReply := threadTS != "" && threadTS != ts
-		isBroadcast := subtype == "thread_broadcast"
-		if !isThreadReply || isBroadcast {
-			countAfter := -1
-			if h.wsCtx != nil {
-				for i := range h.wsCtx.Channels {
-					if h.wsCtx.Channels[i].ID == channelID {
-						h.wsCtx.Channels[i].UnreadCount++
-						countAfter = h.wsCtx.Channels[i].UnreadCount
-						break
-					}
-				}
-			}
-			debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=bumped_inactive_workspace count_after=%d",
-				h.workspaceID, channelID, ts, subtype, threadTS, countAfter)
+		// Inactive workspace — read state was already persisted above.
+		// The rail still needs to know an inactive workspace has new
+		// activity; that signal lives in WorkspaceUnreadMsg until the
+		// rail is rewired to derive from DB read state (Task 16).
+		if shouldMarkChannel {
+			debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=inactive_workspace_persisted",
+				h.workspaceID, channelID, ts, subtype, threadTS)
 		} else {
 			debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=skipped_thread_reply_inactive",
 				h.workspaceID, channelID, ts, subtype, threadTS)
@@ -2660,22 +2669,24 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 	}
 	debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=dispatched_to_app",
 		h.workspaceID, channelID, ts, subtype, threadTS)
-	h.program.Send(ui.NewMessageMsg{
-		ChannelID: channelID,
-		Message: messages.MessageItem{
-			TS:                ts,
-			UserID:            userID,
-			UserName:          userName,
-			Text:              text,
-			Timestamp:         formatTimestamp(ts, h.tsFormat),
-			ThreadTS:          threadTS,
-			Subtype:           subtype,
-			IsEdited:          edited,
-			Attachments:       extractAttachments(files),
-			Blocks:            extractBlocks(blocks),
-			LegacyAttachments: extractLegacyAttachments(attachments),
-		},
-	})
+	if h.program != nil {
+		h.program.Send(ui.NewMessageMsg{
+			ChannelID: channelID,
+			Message: messages.MessageItem{
+				TS:                ts,
+				UserID:            userID,
+				UserName:          userName,
+				Text:              text,
+				Timestamp:         formatTimestamp(ts, h.tsFormat),
+				ThreadTS:          threadTS,
+				Subtype:           subtype,
+				IsEdited:          edited,
+				Attachments:       extractAttachments(files),
+				Blocks:            extractBlocks(blocks),
+				LegacyAttachments: extractLegacyAttachments(attachments),
+			},
+		})
+	}
 }
 
 func (h *rtmEventHandler) OnMessageDeleted(channelID, ts string) {
