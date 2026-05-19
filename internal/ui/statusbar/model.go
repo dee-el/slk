@@ -32,6 +32,7 @@ type Model struct {
 	dndEnabled  bool
 	dndEndTS    time.Time // zero if not in DND
 	syncing     bool      // true while a background cache-verify fetch is in flight
+	helpHint    string    // muted text rendered in the gap area; empty disables
 	version     int64
 }
 
@@ -136,6 +137,16 @@ func (m *Model) SetSyncing(syncing bool) {
 	}
 	m.syncing = syncing
 	m.dirty()
+}
+
+// SetHelpHint sets a muted hint string rendered in the unused space between
+// the left segments and the right pills. Pass "" to clear. The hint is
+// dropped silently when the bar lacks room for it plus 4 columns of padding.
+func (m *Model) SetHelpHint(s string) {
+	if m.helpHint != s {
+		m.helpHint = s
+		m.dirty()
+	}
 }
 
 // SetToast displays an arbitrary string in the right-side toast slot. Pass ""
@@ -271,7 +282,28 @@ func (m Model) View(width int) string {
 	if gap < 0 {
 		gap = 0
 	}
-	filler := styles.StatusBar.Render(fmt.Sprintf("%*s", gap, ""))
+
+	// Render the help hint into the gap when there's room for it plus a
+	// small breathing margin. Drops silently when narrow.
+	var filler string
+	if m.helpHint != "" {
+		hint := styles.StatusBar.
+			Italic(true).
+			Foreground(styles.TextMuted).
+			Render(m.helpHint)
+		hintW := lipgloss.Width(hint)
+		const hintPadding = 4 // 2 cols of breathing room on each side
+		if gap >= hintW+hintPadding {
+			leftPad := (gap - hintW) / 2
+			rightPad := gap - hintW - leftPad
+			filler = styles.StatusBar.Render(strings.Repeat(" ", leftPad)) +
+				hint +
+				styles.StatusBar.Render(strings.Repeat(" ", rightPad))
+		}
+	}
+	if filler == "" {
+		filler = styles.StatusBar.Render(fmt.Sprintf("%*s", gap, ""))
+	}
 	rightPad := styles.StatusBar.Render(strings.Repeat(" ", rightGutter))
 
 	return lipgloss.JoinHorizontal(lipgloss.Center, left, filler, rightContent, rightPad)

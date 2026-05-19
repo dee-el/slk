@@ -42,6 +42,7 @@ type KeyMap struct {
 	ToggleSection       key.Binding
 	NavBack             key.Binding
 	NavForward          key.Binding
+	Help                key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
@@ -59,8 +60,8 @@ func DefaultKeyMap() KeyMap {
 		ShiftTab:            key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev panel")),
 		ToggleSidebar:       key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "toggle sidebar")),
 		ToggleThread:        key.NewBinding(key.WithKeys("ctrl+]"), key.WithHelp("ctrl+]", "toggle thread")),
-		FuzzyFinder:         key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "fuzzy find")),
-		FuzzyFinderAlt:      key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "fuzzy find")),
+		FuzzyFinder:         key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "switch channel")),
+		FuzzyFinderAlt:      key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "switch channel")),
 		Top:                 key.NewBinding(key.WithKeys("g"), key.WithHelp("gg", "top")),
 		Bottom:              key.NewBinding(key.WithKeys("G"), key.WithHelp("G", "bottom")),
 		PageUp:              key.NewBinding(key.WithKeys("pgup"), key.WithHelp("PgUp", "page up")),
@@ -84,5 +85,6 @@ func DefaultKeyMap() KeyMap {
 		ToggleSection:       key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle section")),
 		NavBack:             key.NewBinding(key.WithKeys("ctrl+h"), key.WithHelp("ctrl+h", "navigate back")),
 		NavForward:          key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "navigate forward")),
+		Help:                key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "show keybindings")),
 	}
 }

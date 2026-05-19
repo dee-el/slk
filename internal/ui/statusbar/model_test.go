@@ -239,6 +239,56 @@ func TestSetSyncing_BumpsVersionOnChange(t *testing.T) {
 	}
 }
 
+func TestHelpHintRendersOnWideBar(t *testing.T) {
+	m := New()
+	m.SetMode(testMode("NORMAL"))
+	m.SetChannel("general")
+	m.SetWorkspace("Acme")
+	m.SetHelpHint("? for keybindings")
+
+	view := stripANSI(m.View(120))
+	if !strings.Contains(view, "? for keybindings") {
+		t.Errorf("expected hint in wide status bar, got: %q", view)
+	}
+}
+
+func TestHelpHintHiddenWhenNarrow(t *testing.T) {
+	m := New()
+	m.SetMode(testMode("NORMAL"))
+	m.SetChannel("a-long-channel-name-that-eats-space")
+	m.SetWorkspace("A Workspace With A Long Name")
+	m.SetHelpHint("? for keybindings")
+
+	view := stripANSI(m.View(50))
+	if strings.Contains(view, "? for keybindings") {
+		t.Errorf("hint should drop when no room, got: %q", view)
+	}
+}
+
+func TestHelpHintEmptyByDefault(t *testing.T) {
+	m := New()
+	m.SetMode(testMode("NORMAL"))
+	m.SetChannel("general")
+	view := stripANSI(m.View(120))
+	if strings.Contains(view, "for keybindings") {
+		t.Error("no hint should appear when unset")
+	}
+}
+
+func TestSetHelpHint_BumpsVersionOnChange(t *testing.T) {
+	m := New()
+	v0 := m.Version()
+	m.SetHelpHint("? for keybindings")
+	if m.Version() == v0 {
+		t.Fatal("SetHelpHint must bump Version on change")
+	}
+	v1 := m.Version()
+	m.SetHelpHint("? for keybindings") // same value
+	if m.Version() != v1 {
+		t.Fatal("SetHelpHint must not bump Version when value unchanged")
+	}
+}
+
 // stripANSI removes ANSI escape sequences for substring assertions.
 func stripANSI(s string) string {
 	var b strings.Builder

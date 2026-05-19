@@ -29,6 +29,7 @@ import (
 	"github.com/gammons/slk/internal/ui/channelpicker"
 	"github.com/gammons/slk/internal/ui/compose"
 	"github.com/gammons/slk/internal/ui/confirmprompt"
+	"github.com/gammons/slk/internal/ui/help"
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/mentionpicker"
 	"github.com/gammons/slk/internal/ui/messages"
@@ -668,6 +669,7 @@ type App struct {
 	workspaceFinder workspacefinder.Model
 	themeSwitcher   themeswitcher.Model
 	presenceMenu    presencemenu.Model
+	help            help.Model
 	threadPanel     *thread.Model
 	threadCompose   compose.Model
 	threadsView     threadsview.Model
@@ -947,6 +949,7 @@ func NewApp() *App {
 		workspaceFinder:      workspacefinder.New(),
 		themeSwitcher:        themeswitcher.New(),
 		presenceMenu:         presencemenu.New(),
+		help:                 help.New(),
 		threadPanel:          thread.New(),
 		threadCompose:        compose.New("thread"),
 		threadsView:          threadsview.New(nil, ""),
@@ -971,6 +974,11 @@ func NewApp() *App {
 	// before the first workspace finishes loading customs.
 	app.compose.SetEmojiEntries(emoji.BuildEntries(nil))
 	app.threadCompose.SetEmojiEntries(emoji.BuildEntries(nil))
+	// Seed the statusbar hint with the configured help key label so it
+	// stays accurate if the binding is ever changed.
+	if helpKey := app.keys.Help.Help().Key; helpKey != "" {
+		app.statusbar.SetHelpHint(helpKey + " for keybindings")
+	}
 	return app
 }
 
@@ -2490,6 +2498,8 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return a.handlePresenceMenuMode(msg)
 	case ModePresenceCustomSnooze:
 		return a.handlePresenceCustomSnoozeMode(msg)
+	case ModeHelp:
+		return a.handleHelpMode(msg)
 	default:
 		return a.handleNormalMode(msg)
 	}
@@ -2725,6 +2735,11 @@ func (a *App) handleNormalMode(msg tea.KeyMsg) tea.Cmd {
 
 	case key.Matches(msg, a.keys.HalfPageDown):
 		a.scrollFocusedPanel(a.halfPageSize())
+
+	case key.Matches(msg, a.keys.Help):
+		a.help.SetEntries(help.FromKeyMap(a.keys))
+		a.help.Open()
+		a.SetMode(ModeHelp)
 
 	case key.Matches(msg, a.keys.WorkspaceFinder):
 		a.workspaceFinder.Open()
@@ -3140,6 +3155,29 @@ func (a *App) handleThemeSwitcherMode(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	if !a.themeSwitcher.IsVisible() {
+		a.SetMode(ModeNormal)
+	}
+	return nil
+}
+
+// handleHelpMode dispatches key events to the help overlay and tears down
+// the mode when the overlay closes itself (esc/q/?).
+func (a *App) handleHelpMode(msg tea.KeyMsg) tea.Cmd {
+	keyStr := msg.String()
+	switch msg.Key().Code {
+	case tea.KeyEnter:
+		keyStr = "enter"
+	case tea.KeyEscape:
+		keyStr = "esc"
+	case tea.KeyUp:
+		keyStr = "up"
+	case tea.KeyDown:
+		keyStr = "down"
+	case tea.KeyBackspace:
+		keyStr = "backspace"
+	}
+	a.help.HandleKey(keyStr)
+	if !a.help.IsVisible() {
 		a.SetMode(ModeNormal)
 	}
 	return nil
@@ -5302,6 +5340,11 @@ func (a *App) View() tea.View {
 	if a.presenceMenu.IsVisible() {
 		screen = a.presenceMenu.ViewOverlay(a.width, a.height, screen)
 	}
+
+	if a.help.IsVisible() {
+		screen = a.help.ViewOverlay(a.width, a.height, screen)
+	}
+
 	if a.mode == ModePresenceCustomSnooze {
 		screen = presencemenu.CustomSnoozeView(a.width, a.height, screen, a.presenceCustomBuf)
 	}
