@@ -9,6 +9,7 @@ import (
 )
 
 func TestKitty_UploadEscapeFormat(t *testing.T) {
+	t.Setenv("TMUX", "")
 	src := makeSolid(64, 64, imgcolor.RGBA{1, 2, 3, 255})
 	r := NewKittyRenderer(NewRegistry())
 	out := r.Render(src, image.Pt(10, 5))
@@ -45,7 +46,35 @@ func TestKitty_UploadEscapeFormat(t *testing.T) {
 	}
 }
 
+func TestKitty_WrapForTmux(t *testing.T) {
+	inner := "\x1b_Ga=T;payload\x1b\\"
+	want := "\x1bPtmux;\x1b\x1b_Ga=T;payload\x1b\x1b\\\x1b\\"
+	if got := wrapForTmux(inner); got != want {
+		t.Fatalf("wrapForTmux() = %q, want %q", got, want)
+	}
+}
+
+func TestKitty_UploadEscapeWrappedInTmux(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux")
+
+	var buf bytes.Buffer
+	if err := emitKittyUpload(&buf, 42, "abcd", 10, 5); err != nil {
+		t.Fatal(err)
+	}
+	s := buf.String()
+	if !strings.HasPrefix(s, "\x1bPtmux;\x1b\x1b_G") {
+		t.Fatalf("expected tmux-wrapped kitty upload, got %q", s[:minInt(20, len(s))])
+	}
+	if !strings.HasSuffix(s, "\x1b\x1b\\\x1b\\") {
+		t.Fatalf("expected doubled inner ST plus tmux ST suffix, got %q", s)
+	}
+	if !strings.Contains(s, "a=T") || !strings.Contains(s, "U=1") {
+		t.Fatalf("wrapped upload missing kitty parameters: %q", s)
+	}
+}
+
 func TestKitty_SecondRenderSameImageNoFlush(t *testing.T) {
+	t.Setenv("TMUX", "")
 	reg := NewRegistry()
 	r := NewKittyRenderer(reg)
 	src := makeSolid(8, 8, imgcolor.RGBA{1, 2, 3, 255})
@@ -75,12 +104,12 @@ func TestKitty_SecondRenderSameImageNoFlush(t *testing.T) {
 // TestKitty_RerenderBeforeUploadStillFlushes captures the messages-pane
 // cache-rebuild race that previously dropped images on the floor:
 //
-//   1. buildCache calls RenderKey → fresh=true, OnFlush closure captured
-//      in a viewEntry. View() hasn't run yet, so the closure has NOT
-//      fired (no bytes on the wire).
-//   2. SetMessages is called again (e.g. network-verify after a cache hit)
-//      → m.cache = nil, discarding the viewEntry and its closure.
-//   3. buildCache runs again → RenderKey for the same (key, target).
+//  1. buildCache calls RenderKey → fresh=true, OnFlush closure captured
+//     in a viewEntry. View() hasn't run yet, so the closure has NOT
+//     fired (no bytes on the wire).
+//  2. SetMessages is called again (e.g. network-verify after a cache hit)
+//     → m.cache = nil, discarding the viewEntry and its closure.
+//  3. buildCache runs again → RenderKey for the same (key, target).
 //
 // Under the buggy semantic, step 3 would return OnFlush=nil because the
 // registry had already minted an ID — even though no bytes were ever
@@ -92,6 +121,7 @@ func TestKitty_SecondRenderSameImageNoFlush(t *testing.T) {
 // the first render WITHOUT firing it, then asserts the second render
 // also hands back a fireable OnFlush.
 func TestKitty_RerenderBeforeUploadStillFlushes(t *testing.T) {
+	t.Setenv("TMUX", "")
 	reg := NewRegistry()
 	r := NewKittyRenderer(reg)
 	src := makeSolid(8, 8, imgcolor.RGBA{1, 2, 3, 255})

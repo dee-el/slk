@@ -24,7 +24,7 @@ func ProbeKittyGraphics(w io.Writer, r io.Reader, timeout time.Duration) bool {
 	const tinyPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFhAJ/wlseKgAAAABJRU5ErkJggg=="
 	const probeID = 9999
 	header := fmt.Sprintf("a=T,f=100,t=d,i=%d,q=0", probeID)
-	if _, err := fmt.Fprintf(w, "\x1b_G%s;%s\x1b\\", header, tinyPNG); err != nil {
+	if err := writeKittySequence(w, fmt.Sprintf("\x1b_G%s;%s\x1b\\", header, tinyPNG)); err != nil {
 		return false
 	}
 

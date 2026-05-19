@@ -7,6 +7,7 @@ import (
 	"image"
 	imgpng "image/png"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,22 @@ var kittyDiacritics = []rune{
 }
 
 const placeholderRune = '\U0010EEEE'
+
+func inTmux() bool {
+	return os.Getenv("TMUX") != ""
+}
+
+func wrapForTmux(seq string) string {
+	return "\x1bPtmux;" + strings.ReplaceAll(seq, "\x1b", "\x1b\x1b") + "\x1b\\"
+}
+
+func writeKittySequence(w io.Writer, seq string) error {
+	if inTmux() {
+		seq = wrapForTmux(seq)
+	}
+	_, err := io.WriteString(w, seq)
+	return err
+}
 
 // KittyRenderer encodes images via the kitty graphics protocol with
 // unicode-placeholder placement.
@@ -184,7 +201,8 @@ func emitKittyUpload(w io.Writer, id uint32, payload string, cols, rows int) err
 		} else {
 			hdr = fmt.Sprintf("m=%d", more)
 		}
-		if _, err := fmt.Fprintf(w, "\x1b_G%s;%s\x1b\\", hdr, payload[i:end]); err != nil {
+		seq := fmt.Sprintf("\x1b_G%s;%s\x1b\\", hdr, payload[i:end])
+		if err := writeKittySequence(w, seq); err != nil {
 			return err
 		}
 	}

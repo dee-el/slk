@@ -8,6 +8,7 @@ import (
 )
 
 func TestProbeKittyGraphics_TimeoutFails(t *testing.T) {
+	t.Setenv("TMUX", "")
 	r := blockingReader{}
 	var w bytes.Buffer
 	ok := ProbeKittyGraphics(&w, r, 50*time.Millisecond)
@@ -16,6 +17,19 @@ func TestProbeKittyGraphics_TimeoutFails(t *testing.T) {
 	}
 	if !strings.Contains(w.String(), "\x1b_G") {
 		t.Errorf("expected \\e_G in probe output, got %q", w.String())
+	}
+}
+
+func TestProbeKittyGraphics_WrapsProbeInTmux(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux")
+	r := blockingReader{}
+	var w bytes.Buffer
+	ok := ProbeKittyGraphics(&w, r, 50*time.Millisecond)
+	if ok {
+		t.Error("expected probe to fail on timeout")
+	}
+	if !strings.HasPrefix(w.String(), "\x1bPtmux;\x1b\x1b_G") {
+		t.Errorf("expected tmux-wrapped kitty probe, got %q", w.String())
 	}
 }
 

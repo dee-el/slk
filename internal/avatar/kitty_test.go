@@ -26,6 +26,7 @@ import (
 //   - the rendered string contains the placeholder rune,
 //   - the rendered string spans exactly AvatarRows lines.
 func TestRender_KittyAvatarUploadsAndPlaceholders(t *testing.T) {
+	t.Setenv("TMUX", "")
 	src := image.NewRGBA(image.Rect(0, 0, 32, 32))
 	for y := 0; y < 32; y++ {
 		for x := 0; x < 32; x++ {
