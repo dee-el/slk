@@ -227,6 +227,14 @@ type (
 		DisplayName string
 		IsBot       bool
 	}
+	// UserExternalMsg flags a single user as external (Slack Connect /
+	// shared-channel guest). Emitted by the user-resolution path when a
+	// users.info response shows team_id != workspace TeamID. The App
+	// updates externalUsers and re-pushes user-list state to the pickers.
+	UserExternalMsg struct {
+		UserID     string
+		IsExternal bool
+	}
 	WorkspaceSwitchedMsg struct {
 		TeamID      string
 		TeamName    string
@@ -2308,6 +2316,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// orchestrated by DMNameResolvedMsg; this handler is only the
 		// in-history name patch. IsBot is carried for forward
 		// compatibility but not consumed here.
+
+	case UserExternalMsg:
+		if a.externalUsers == nil {
+			a.externalUsers = map[string]bool{}
+		}
+		if msg.IsExternal {
+			a.externalUsers[msg.UserID] = true
+		} else {
+			delete(a.externalUsers, msg.UserID)
+		}
+		if len(a.userNames) > 0 {
+			a.SetUserNames(a.userNames)
+		}
+		return a, nil
 
 	case WorkspaceSwitchedMsg:
 		if a.compose.Uploading() || a.threadCompose.Uploading() {

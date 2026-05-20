@@ -260,6 +260,12 @@ func (r *userResolver) Request(userID string) {
 			name = u.Name
 		}
 		isBot := u.IsBot || u.IsAppUser
+		// r.teamID is the workspace's home TeamID; u.TeamID is the
+		// user's home TeamID. If they differ (and u.TeamID is set),
+		// the user is a Slack Connect / shared-channel guest. Treat
+		// an empty u.TeamID as internal — better to under-detect than
+		// to falsely flag.
+		isExternal := u.TeamID != "" && u.TeamID != r.teamID
 		// Persist to the cache DB (its own goroutine-safe SQLite
 		// connection) and the avatar cache (internal RWMutex), but
 		// do NOT write r.userNames[userID] from this goroutine —
@@ -282,6 +288,7 @@ func (r *userResolver) Request(userID string) {
 			AvatarURL:   u.Profile.Image32,
 			Presence:    "away",
 			IsBot:       isBot,
+			IsExternal:  isExternal,
 		})
 		if r.send != nil {
 			r.send(ui.UserResolvedMsg{
@@ -290,6 +297,9 @@ func (r *userResolver) Request(userID string) {
 				DisplayName: name,
 				IsBot:       isBot,
 			})
+		}
+		if isExternal && r.send != nil {
+			r.send(ui.UserExternalMsg{UserID: userID, IsExternal: true})
 		}
 	}()
 }

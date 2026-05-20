@@ -3863,6 +3863,23 @@ func TestUserResolvedMsg_DropsForOtherWorkspace(t *testing.T) {
 	}
 }
 
+func TestUserExternalMsgFlagsPickerEntry(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.activeChannelID = "C1"
+	app.compose.SetActiveChannel("C1")
+	app.threadCompose.SetActiveChannel("C1")
+	app.SetUserNames(map[string]string{"U1": "alice"})
+
+	_, _ = app.Update(UserExternalMsg{UserID: "U1", IsExternal: true})
+
+	for _, u := range app.compose.MentionUsers() {
+		if u.ID == "U1" && !u.IsExternal {
+			t.Error("U1 should be marked IsExternal after UserExternalMsg")
+		}
+	}
+}
+
 // drainAllCmds recursively executes every cmd inside the tea.BatchMsg
 // tree returned by Update. Used to surface counter side-effects on
 // closure-bound fakes (channelFetcher, channelReadMarker). The
