@@ -2970,13 +2970,14 @@ func (h *rtmEventHandler) OnChannelMarked(channelID, ts string, unreadCount int)
 }
 
 func (h *rtmEventHandler) OnThreadMarked(channelID, threadTS, ts string, read bool) {
-	if h.isActive != nil && !h.isActive() {
-		return
-	}
-
-	// Persist subscription state. active = !read per the dispatch in
-	// internal/slack/events.go: WS `active` means "subscribed for
-	// unread updates", which corresponds to active=1 in our table.
+	// Persist subscription state regardless of active-workspace state.
+	// Mirrors OnChannelMarked / OnMessage: durable cache must reflect
+	// every WS event, otherwise switching to an inactive workspace
+	// would surface stale read state and (worse) miss newly-unread
+	// threads until the next reconnect-driven reconcile. active =
+	// !read per the dispatch in internal/slack/events.go: WS `active`
+	// means "subscribed for unread updates", which corresponds to
+	// active=1 in our table.
 	if h.db != nil {
 		if err := h.db.UpsertThreadSubscription(h.workspaceID, channelID, threadTS, ts, !read); err != nil {
 			debuglog.Cache("OnThreadMarked: UpsertThreadSubscription %s/%s: %v",
@@ -2984,6 +2985,12 @@ func (h *rtmEventHandler) OnThreadMarked(channelID, threadTS, ts string, read bo
 		}
 	}
 
+	// UI dispatch is active-only: the threads-view list and sidebar
+	// badge live on the active workspace; inactive workspaces pick up
+	// fresh state on the next switch via threadsListFetcher.
+	if h.isActive != nil && !h.isActive() {
+		return
+	}
 	if h.program == nil {
 		return
 	}
@@ -3001,14 +3008,26 @@ func (h *rtmEventHandler) OnThreadMarked(channelID, threadTS, ts string, read bo
 // shows up (active=true) or an unsubscribe removes the row
 // (active=false) without per-event UI logic here.
 func (h *rtmEventHandler) OnThreadSubscriptionChanged(channelID, threadTS, lastRead string, active bool) {
-	if h.isActive != nil && !h.isActive() {
-		return
-	}
+	// Persist subscribe/unsubscribe regardless of active-workspace
+	// state. Mirrors OnChannelMarked / OnMessage: dropping the DB
+	// write on inactive workspaces means a thread the user just got
+	// @-mentioned in (auto-subscribed) would never enter the local
+	// thread_subscriptions table, and the threads view would silently
+	// omit it on next workspace switch until the next reconnect's
+	// ReconcileThreadSubscriptions catches up.
 	if h.db != nil {
 		if err := h.db.UpsertThreadSubscription(h.workspaceID, channelID, threadTS, lastRead, active); err != nil {
 			debuglog.Cache("OnThreadSubscriptionChanged: UpsertThreadSubscription %s/%s: %v",
 				channelID, threadTS, err)
 		}
+	}
+	// UI refresh is filtered by team in the App.Update handler, so
+	// it's safe (and harmless) to dispatch for inactive workspaces
+	// too — but we still skip it when isActive is wired and false to
+	// avoid waking the UI loop for no-op refreshes. The DB write
+	// above ensures correctness on the eventual switch.
+	if h.isActive != nil && !h.isActive() {
+		return
 	}
 	if h.program != nil {
 		h.program.Send(ui.ThreadsListDirtyMsg{TeamID: h.workspaceID})

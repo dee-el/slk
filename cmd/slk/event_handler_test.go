@@ -304,3 +304,66 @@ func TestOnThreadSubscriptionChanged_TombstonesOnUnsubscribe(t *testing.T) {
 		t.Fatalf("expected 0 active after unsubscribe, got %d: %+v", len(got), got)
 	}
 }
+
+// TestOnThreadMarked_PersistsOnInactiveWorkspace guards against the
+// "missing unread thread" bug: when slk is connected to multiple
+// workspaces and the user is focused on another one, an incoming
+// thread_marked event on the inactive workspace must STILL be
+// persisted to the local thread_subscriptions cache. Without this,
+// switching to the inactive workspace later would show stale read
+// state (and, for newly-unread threads, no unread indicator at all
+// until the next reconnect-driven reconcile).
+//
+// This mirrors OnMessage / OnChannelMarked which both persist to the
+// cache regardless of active-workspace state and only gate the UI
+// dispatch on isActive.
+func TestOnThreadMarked_PersistsOnInactiveWorkspace(t *testing.T) {
+	db := newTestDB(t)
+	h := &rtmEventHandler{
+		db:          db,
+		workspaceID: "T1",
+		isActive:    func() bool { return false }, // inactive workspace
+		// program intentionally nil: the handler must not need it to
+		// persist the DB row.
+	}
+
+	// read=false → thread is now unread → row should be active=true.
+	h.OnThreadMarked("C1", "1700000100.000000", "1700000150.000000", false)
+
+	got, err := db.ListActiveThreadSubscriptions("T1")
+	if err != nil {
+		t.Fatalf("ListActiveThreadSubscriptions: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("inactive workspace must still persist thread_marked; got %d active rows, want 1", len(got))
+	}
+	if got[0].ChannelID != "C1" || got[0].ThreadTS != "1700000100.000000" ||
+		got[0].LastRead != "1700000150.000000" || !got[0].Active {
+		t.Fatalf("subscription row mismatch on inactive workspace: %+v", got[0])
+	}
+}
+
+// TestOnThreadSubscriptionChanged_PersistsOnInactiveWorkspace guards
+// against the same class of bug for thread_subscribed /
+// thread_unsubscribed events. Without this, a thread the user just
+// got @-mentioned in on an inactive workspace would never make it
+// into the local thread_subscriptions table, and the threads view
+// would silently omit it on next workspace switch.
+func TestOnThreadSubscriptionChanged_PersistsOnInactiveWorkspace(t *testing.T) {
+	db := newTestDB(t)
+	h := &rtmEventHandler{
+		db:          db,
+		workspaceID: "T1",
+		isActive:    func() bool { return false }, // inactive workspace
+	}
+
+	h.OnThreadSubscriptionChanged("C1", "1700000100.000000", "1700000150.000000", true)
+
+	got, err := db.ListActiveThreadSubscriptions("T1")
+	if err != nil {
+		t.Fatalf("ListActiveThreadSubscriptions: %v", err)
+	}
+	if len(got) != 1 || got[0].ChannelID != "C1" || !got[0].Active {
+		t.Fatalf("inactive workspace must still persist thread_subscribed; got %+v, want 1 active row", got)
+	}
+}
