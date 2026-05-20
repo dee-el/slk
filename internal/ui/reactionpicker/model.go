@@ -9,6 +9,7 @@ import (
 	"github.com/muesli/reflow/truncate"
 
 	slkemoji "github.com/gammons/slk/internal/emoji"
+	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/overlay"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -138,14 +139,14 @@ func (m *Model) filter() {
 		return
 	}
 
-	q := strings.ToLower(m.query)
+	q := text.Fold(m.query)
 	m.filtered = m.filtered[:0]
 
 	var substringMatches []EmojiEntry
 	for _, e := range m.allEmoji {
-		if strings.HasPrefix(e.Name, q) {
+		if strings.HasPrefix(text.Fold(e.Name), q) {
 			m.filtered = append(m.filtered, e)
-		} else if strings.Contains(e.Name, q) {
+		} else if strings.Contains(text.Fold(e.Name), q) {
 			substringMatches = append(substringMatches, e)
 		}
 		if len(m.filtered)+len(substringMatches) >= 50 {
