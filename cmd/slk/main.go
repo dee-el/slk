@@ -8,7 +8,6 @@ import (
 	"image"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,6 +26,7 @@ import (
 	"github.com/gammons/slk/internal/notify"
 	"github.com/gammons/slk/internal/service"
 	slackclient "github.com/gammons/slk/internal/slack"
+	"github.com/gammons/slk/internal/slackhttp"
 	"github.com/gammons/slk/internal/ui"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/compose"
@@ -550,7 +550,8 @@ func run() error {
 		})
 		log.Printf("image fetcher: registered team %q (%s) for file auth", t.TeamName, t.TeamID)
 	}
-	imageHTTPClient := &http.Client{Timeout: 10 * time.Second}
+	imageHTTPClient := slackhttp.NewBrowserHTTPClient(nil)
+	imageHTTPClient.Timeout = 10 * time.Second
 	imageFetcher := imgpkg.NewFetcher(imageCache, imageHTTPClient)
 	imageFetcher.SetAuths(auths)
 
