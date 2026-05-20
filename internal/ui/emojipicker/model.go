@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/gammons/slk/internal/emoji"
+	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui/styles"
 )
 
@@ -88,10 +89,10 @@ func (m *Model) SelectedEntry() (emoji.EmojiEntry, bool) {
 // matches. Callers must pass alphabetically-sorted entries
 // (emoji.BuildEntries already does); the picker preserves that order.
 func (m *Model) filter() {
-	q := strings.ToLower(m.query)
+	q := text.Fold(m.query)
 	var results []emoji.EmojiEntry
 	for _, e := range m.entries {
-		if q == "" || strings.HasPrefix(strings.ToLower(e.Name), q) {
+		if q == "" || strings.HasPrefix(text.Fold(e.Name), q) {
 			results = append(results, e)
 			if len(results) >= MaxVisible {
 				break
