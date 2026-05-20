@@ -1028,6 +1028,111 @@ func TestGetChannelSections_UsesAPIBaseURL(t *testing.T) {
 	}
 }
 
+// TestHandRolledEndpoints_FormBodyTokenNoBearer verifies that every
+// undocumented endpoint slk calls directly sends the xoxc token in the
+// form body (the browser-client convention) rather than as Authorization:
+// Bearer (an OAuth pattern). Mixing Bearer with the browser-like headers
+// BrowserTransport injects is a contradictory request signature that
+// triggers Enterprise Grid anomaly detection (issue #5).
+//
+// One test, multiple endpoints — each subtest is one hand-rolled endpoint.
+func TestHandRolledEndpoints_FormBodyTokenNoBearer(t *testing.T) {
+	type capture struct {
+		auth    string
+		bodyTok string
+		path    string
+	}
+
+	cases := []struct {
+		name string
+		// Body the test server returns. Must be valid for the parser
+		// inside the endpoint we're calling, otherwise the call errors
+		// before our assertions run.
+		respBody string
+		// Drive the endpoint through Client.
+		call func(t *testing.T, c *Client)
+	}{
+		{
+			name:     "GetUnreadCounts",
+			respBody: `{"ok":true,"channels":[],"mpims":[],"ims":[],"threads":{"has_unreads":false}}`,
+			call: func(t *testing.T, c *Client) {
+				if _, _, err := c.GetUnreadCounts(); err != nil {
+					t.Fatalf("GetUnreadCounts: %v", err)
+				}
+			},
+		},
+		{
+			name:     "MarkChannel",
+			respBody: `{"ok":true}`,
+			call: func(t *testing.T, c *Client) {
+				if err := c.MarkChannel(context.Background(), "C1", "1700000000.000100"); err != nil {
+					t.Fatalf("MarkChannel: %v", err)
+				}
+			},
+		},
+		{
+			name:     "MarkThread",
+			respBody: `{"ok":true}`,
+			call: func(t *testing.T, c *Client) {
+				if err := c.MarkThread(context.Background(), "C1", "1700000000.000100", "1700000001.000200"); err != nil {
+					t.Fatalf("MarkThread: %v", err)
+				}
+			},
+		},
+		{
+			name:     "GetMutedChannels",
+			respBody: `{"ok":true,"prefs":{"muted_channels":""}}`,
+			call: func(t *testing.T, c *Client) {
+				if _, err := c.GetMutedChannels(context.Background()); err != nil {
+					t.Fatalf("GetMutedChannels: %v", err)
+				}
+			},
+		},
+		{
+			name:     "GetChannelSections",
+			respBody: `{"ok":true,"channel_sections":[],"count":0,"cursor":""}`,
+			call: func(t *testing.T, c *Client) {
+				if _, err := c.GetChannelSections(context.Background()); err != nil {
+					t.Fatalf("GetChannelSections: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var got capture
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got.auth = r.Header.Get("Authorization")
+				got.path = r.URL.Path
+				if err := r.ParseForm(); err != nil {
+					t.Errorf("ParseForm: %v", err)
+				}
+				got.bodyTok = r.PostForm.Get("token")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.respBody))
+			}))
+			defer srv.Close()
+
+			c := &Client{
+				token:      "xoxc-test",
+				cookie:     "d-cookie",
+				apiBaseURL: srv.URL + "/api/",
+				httpClient: srv.Client(),
+			}
+			tc.call(t, c)
+
+			if got.auth != "" {
+				t.Errorf("Authorization header present: %q; want empty (browser clients don't send Bearer to app.slack.com)", got.auth)
+			}
+			if got.bodyTok != "xoxc-test" {
+				t.Errorf("form body token = %q; want xoxc-test (token must be in form body, not Authorization header)", got.bodyTok)
+			}
+		})
+	}
+}
+
 func TestGetChannelSections_FollowsTopLevelCursor(t *testing.T) {
 	var calls int
 	var capturedCursors []string
@@ -1151,13 +1256,21 @@ func TestMarkChannel_PostsCorrectForm(t *testing.T) {
 	if !strings.HasSuffix(gotPath, "/conversations.mark") {
 		t.Errorf("path: got %q, want suffix /conversations.mark", gotPath)
 	}
-	if gotAuth != "Bearer xoxc-test" {
-		t.Errorf("auth: got %q", gotAuth)
+	// The hand-rolled endpoints used to send Authorization: Bearer; that's
+	// an OAuth/server-side pattern browsers never use against app.slack.com.
+	// Combined with the browser-shaped headers BrowserTransport injects it
+	// looks contradictory to Slack's anomaly detector and was logging
+	// Enterprise Grid users out (issue #5). Token now goes in the form body.
+	if gotAuth != "" {
+		t.Errorf("auth: got %q, want empty (token belongs in form body)", gotAuth)
 	}
 	if gotContentType != "application/x-www-form-urlencoded" {
 		t.Errorf("content-type: got %q", gotContentType)
 	}
 	form, _ := url.ParseQuery(gotBody)
+	if form.Get("token") != "xoxc-test" {
+		t.Errorf("token: got %q, want xoxc-test", form.Get("token"))
+	}
 	if form.Get("channel") != "C123" {
 		t.Errorf("channel: got %q", form.Get("channel"))
 	}
@@ -1314,10 +1427,14 @@ func TestGetMutedChannels_FromAllNotificationsPrefs(t *testing.T) {
 	// Real-world: Slack ships mute state inside the JSON-string
 	// `all_notifications_prefs` pref under channels[id].muted.
 	respBody := `{"ok":true,"prefs":{"all_notifications_prefs":"{\"channels\":{\"C1\":{\"muted\":true},\"C2\":{\"muted\":false},\"C3\":{\"muted\":true}},\"global\":{}}"}}`
-	var gotPath, gotAuth string
+	var gotPath, gotAuth, gotTokenInBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+		}
+		gotTokenInBody = r.PostForm.Get("token")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(respBody))
 	}))
@@ -1331,8 +1448,14 @@ func TestGetMutedChannels_FromAllNotificationsPrefs(t *testing.T) {
 	if !strings.HasSuffix(gotPath, "/users.prefs.get") {
 		t.Errorf("path: got %q, want suffix /users.prefs.get", gotPath)
 	}
-	if gotAuth != "Bearer xoxc-test" {
-		t.Errorf("auth: got %q", gotAuth)
+	// Hand-rolled endpoints used to send Authorization: Bearer — an OAuth
+	// pattern browsers never use against app.slack.com. Now token rides in
+	// the form body (issue #5).
+	if gotAuth != "" {
+		t.Errorf("auth: got %q, want empty (token belongs in form body)", gotAuth)
+	}
+	if gotTokenInBody != "xoxc-test" {
+		t.Errorf("form body token: got %q, want xoxc-test", gotTokenInBody)
 	}
 	gotSet := map[string]bool{}
 	for _, id := range got {
