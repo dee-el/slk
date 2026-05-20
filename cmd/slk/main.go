@@ -558,6 +558,7 @@ func run() error {
 	// cache so the cache can pick the right rendering path (kitty
 	// graphics for sharp pixels, halfblock otherwise).
 	proto := imgpkg.Detect(imgpkg.CaptureEnv(), cfg.Appearance.ImageProtocol)
+	debuglog.ImgRender("image protocol detect: cfg=%q result=%s", cfg.Appearance.ImageProtocol, proto)
 
 	// Optional: run kitty version probe if detected as kitty AND stdin is a TTY.
 	// Must happen BEFORE bubbletea takes over the terminal.
