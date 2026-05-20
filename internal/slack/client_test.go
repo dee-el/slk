@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/gammons/slk/internal/slackhttp"
+	"github.com/gorilla/websocket"
 	"github.com/slack-go/slack"
 )
 
@@ -1828,5 +1829,53 @@ func TestNewClient_UsesBrowserTransport(t *testing.T) {
 	}
 	if gotHeaders == nil {
 		t.Fatal("server never received a request")
+	}
+}
+
+func TestStartWebSocket_SendsBrowserHeaders(t *testing.T) {
+	// Spin up an httptest server that completes the WS upgrade and
+	// captures the upgrade request's headers.
+	var gotHeaders http.Header
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			gotHeaders = r.Header.Clone()
+			return true
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Logf("upgrade failed: %v", err)
+			return
+		}
+		conn.Close()
+	}))
+	defer srv.Close()
+
+	// Drive the dialer directly with the same headers StartWebSocket
+	// builds. We can't easily exercise StartWebSocket end-to-end because
+	// it dials wss-primary.slack.com — but we CAN test the header-merging
+	// helper. To make that helper independently testable, Step 3 extracts
+	// it into wsUpgradeHeaders.
+	headers := wsUpgradeHeaders()
+	wsURL := strings.Replace(srv.URL, "http://", "ws://", 1)
+	dialer := websocket.DefaultDialer
+	conn, _, err := dialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	conn.Close()
+
+	if got := gotHeaders.Get("User-Agent"); !strings.HasPrefix(got, "Mozilla/5.0") {
+		t.Errorf("upgrade User-Agent = %q; want Mozilla-prefixed", got)
+	}
+	if got := gotHeaders.Get("Origin"); got != "https://app.slack.com" {
+		t.Errorf("upgrade Origin = %q; want https://app.slack.com", got)
+	}
+	if got := gotHeaders.Get("Accept-Language"); got == "" {
+		t.Errorf("upgrade missing Accept-Language")
+	}
+	if got := gotHeaders.Get("Sec-Fetch-Dest"); got != "websocket" {
+		t.Errorf("upgrade Sec-Fetch-Dest = %q; want websocket", got)
 	}
 }

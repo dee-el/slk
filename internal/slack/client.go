@@ -202,6 +202,22 @@ func deriveAPIBaseURL(authTestURL string) string {
 	return "https://" + host + "/api/"
 }
 
+// wsUpgradeHeaders returns the HTTP headers slk attaches to the WebSocket
+// upgrade request. These match the Chrome-like headers BrowserTransport
+// adds to ordinary HTTP requests, with Sec-Fetch-Dest narrowed to
+// "websocket" — the value a real browser sends when opening a WS to
+// app.slack.com.
+//
+// gorilla/websocket's Dialer.Dial accepts arbitrary headers (except for
+// the protocol-managed Sec-WebSocket-* set, which it owns), so this is
+// the right injection point. We can't reuse BrowserTransport here because
+// the dialer doesn't go through http.RoundTripper.
+func wsUpgradeHeaders() http.Header {
+	h := slackhttp.BrowserHeaders()
+	h.Set("Sec-Fetch-Dest", "websocket")
+	return h
+}
+
 // StartWebSocket connects to Slack's internal WebSocket using the xoxc token
 // and d cookie, matching the protocol used by the browser client.
 // Events are dispatched to the provided handler in a goroutine.
@@ -216,10 +232,7 @@ func (c *Client) StartWebSocket(handler EventHandler) error {
 	jar := newCookieJar(c.cookie)
 	dialer := &websocket.Dialer{Jar: jar}
 
-	headers := http.Header{}
-	headers.Add("Origin", "https://app.slack.com")
-
-	conn, _, err := dialer.Dial(wsURL, headers)
+	conn, _, err := dialer.Dial(wsURL, wsUpgradeHeaders())
 	if err != nil {
 		return fmt.Errorf("websocket connect failed: %w", err)
 	}
