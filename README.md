@@ -70,6 +70,29 @@ slk --add-workspace
 
 Full walkthrough: [Setup wiki page](https://github.com/gammons/slk/wiki/Setup).
 
+## Inline images in tmux
+
+If you run `slk` inside tmux on a Kitty-capable terminal (Kitty, Ghostty,
+WezTerm), images render natively as long as tmux passthrough is enabled:
+
+```tmux
+set -g allow-passthrough on
+```
+
+Reload tmux for the setting to take effect (`tmux kill-server`, then
+reattach). Verify with:
+
+```bash
+tmux show -gv allow-passthrough
+```
+
+Expected output: `on` (or `all`).
+
+If passthrough is off, `slk` detects this at startup and falls back to
+half-block rendering automatically — no config change needed. To force a
+specific renderer regardless of detection, set `image_protocol` in
+`config.toml` to `kitty`, `sixel`, `halfblock`, or `off`.
+
 ## Debugging
 
 Set `SLK_DEBUG=1` to enable a comprehensive debug log written to
