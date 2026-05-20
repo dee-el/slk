@@ -25,6 +25,7 @@ import (
 	"github.com/gammons/slk/internal/debuglog"
 	"github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
+	"github.com/gammons/slk/internal/slack/mrkdwn"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/channelpicker"
 	"github.com/gammons/slk/internal/ui/compose"
@@ -150,7 +151,16 @@ type (
 	ThreadReplySentMsg struct {
 		ChannelID string
 		ThreadTS  string
+		LocalTS   string // optimistic-placeholder id; see MessageSentMsg.LocalTS
 		Message   messages.MessageItem
+	}
+	// ThreadReplySendFailedMsg is returned when chat.postMessage for a
+	// thread reply fails. Mirrors MessageSendFailedMsg.
+	ThreadReplySendFailedMsg struct {
+		ChannelID string
+		ThreadTS  string
+		LocalTS   string
+		Reason    string
 	}
 	// ThreadsViewActivatedMsg is dispatched when the user picks the
 	// synthetic Threads sidebar row. The App switches the message pane to
@@ -440,9 +450,24 @@ type OlderMessagesFetchFunc func(channelID, oldestTS string) tea.Msg
 type MessageSendFunc func(channelID, text string) tea.Msg
 
 // MessageSentMsg is returned after a message is successfully sent.
+// LocalTS, if non-empty, identifies the optimistic placeholder added
+// when the user pressed Enter. The handler uses it to swap the
+// placeholder for the authoritative Message in place. LocalTS may be
+// empty for legacy/test callers that fire this message without a
+// preceding SendMessageMsg.
 type MessageSentMsg struct {
 	ChannelID string
+	LocalTS   string
 	Message   messages.MessageItem
+}
+
+// MessageSendFailedMsg is returned when chat.postMessage fails. The
+// App's handler removes the optimistic placeholder identified by
+// LocalTS (if any) and shows a toast.
+type MessageSendFailedMsg struct {
+	ChannelID string
+	LocalTS   string
+	Reason    string
 }
 
 // EditMessageMsg is emitted when the user submits an edit. App.Update
@@ -850,6 +875,23 @@ type App struct {
 	// while slk is open) do NOT update this map and continue to
 	// display via the normal WS-echo path.
 	lastSelfSendByChannel map[string]time.Time
+
+	// localTSCounter is incremented per optimistic-placeholder message
+	// so each one carries a unique TS-shaped ("local:<counter>") id.
+	// SendMessageMsg / SendThreadReplyMsg use this to mint a placeholder
+	// id, then MessageSentMsg / ThreadReplySentMsg uses it to swap the
+	// placeholder for the authoritative Slack-assigned TS once the
+	// chat.postMessage HTTP response arrives.
+	localTSCounter uint64
+
+	// nowTimestampFormatter renders "now" using the same format used
+	// for message timestamps elsewhere (configured via
+	// cfg.Appearance.TimestampFormat in main.go). Used by the optimistic
+	// instant-display path to populate the Timestamp field of a
+	// placeholder MessageItem so it renders identically to messages
+	// that arrived via the normal HTTP-response / WS-echo paths.
+	// Falls back to time.Now().Format("3:04 PM") when unset.
+	nowTimestampFormatter func() string
 
 	// Loading overlay
 	loading       bool
@@ -1422,6 +1464,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return statusbar.CopiedClearMsg{}
 		}))
 
+	case statusbar.SendFailedMsg:
+		a.statusbar.SetToast("Send failed: " + truncateReason(msg.Reason, 40))
+		cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+			return statusbar.CopiedClearMsg{}
+		}))
+
 	case statusbar.EditNotOwnMsg:
 		a.statusbar.SetToast("Can only edit your own messages")
 		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
@@ -1814,30 +1862,90 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the user's send intent is what controls WS-echo suppression
 		// for self-user messages on this channel.
 		a.markSelfSendInFlight(msg.ChannelID)
+		// Instant-display: append an optimistic placeholder for the
+		// active channel immediately, before the chat.postMessage HTTP
+		// round-trip. The placeholder carries a "local:<n>" TS so the
+		// MessageSentMsg / MessageSendFailedMsg handler can find and
+		// swap (or remove) it once the HTTP result lands.
+		//
+		// We only render the placeholder when the send is for the
+		// channel currently in view. For background sends (rare —
+		// would require sending while in a different view) we skip
+		// the placeholder; the HTTP response will fall back to
+		// UpsertSelfSent's append path.
+		//
+		// Convert the user-typed CommonMark to Slack mrkdwn before
+		// rendering so the placeholder picks up bold / italic / code /
+		// link styling immediately. Without this, "**bold**" would
+		// render literally until the chat.postMessage HTTP response
+		// landed and the swap dropped in Slack's converted form. The
+		// converter is the same one used by client.SendMessage, so
+		// the placeholder and the swapped message render identically
+		// for the common case (no rich_text_block paragraph quirks).
+		localTS := a.nextLocalTS()
+		optimisticText, _ := mrkdwn.Convert(msg.Text)
+		if msg.ChannelID == a.activeChannelID {
+			a.messagepane.AppendMessage(messages.MessageItem{
+				TS:        localTS,
+				UserID:    a.currentUserID,
+				UserName:  a.userNameFor(a.currentUserID),
+				Text:      optimisticText,
+				Timestamp: a.nowFormatted(),
+			})
+		}
 		if a.messageSender != nil {
 			sender := a.messageSender
 			chID, text := msg.ChannelID, msg.Text
 			cmds = append(cmds, func() tea.Msg {
-				return sender(chID, text)
+				result := sender(chID, text)
+				// Attach LocalTS so the receiving handler can swap or
+				// remove the placeholder. Senders shouldn't need to
+				// know about LocalTS themselves.
+				switch r := result.(type) {
+				case MessageSentMsg:
+					r.LocalTS = localTS
+					return r
+				case MessageSendFailedMsg:
+					r.LocalTS = localTS
+					return r
+				}
+				return result
 			})
 		}
 
 	case MessageSentMsg:
-		// Optimistic add using the chat.postMessage HTTP response. The
-		// matching WS echo (if it arrives) is filtered in NewMessageMsg
-		// via isSelfSent so we don't double-render. We use UpsertSelfSent
-		// rather than AppendMessage so that the optimistic text wins
-		// even when the WS echo races ahead and was already stored
-		// (Slack may normalise wire-form text — e.g. flatten paragraph
-		// breaks for rich_text_block messages — but our renderer only
-		// reads the Text field; without upserting, multi-line composed
-		// messages render horizontally when the echo arrives first).
+		// The chat.postMessage HTTP response landed. If a "local:..."
+		// placeholder is in the pane from the instant-display path
+		// (SendMessageMsg above), swap it for the authoritative
+		// message. Otherwise — e.g. test paths firing MessageSentMsg
+		// directly, or the user navigated away and back between
+		// Enter and the HTTP response — fall back to UpsertSelfSent
+		// which appends-or-replaces by Slack TS.
+		//
+		// UpsertSelfSent is also the fallback for any racing WS echo
+		// that managed to slip past selfSendInFlight: if AppendMessage
+		// stored the echo's normalised text first, UpsertSelfSent
+		// replaces it with our converted-mrkdwn text. See
+		// internal/ui/messages/model.go for both methods' contracts.
 		if msg.Message.TS != "" {
 			a.recordSelfSent(msg.Message.TS)
 			if msg.ChannelID == a.activeChannelID {
-				a.messagepane.UpsertSelfSent(msg.Message)
+				if !a.messagepane.SwapLocalSent(msg.LocalTS, msg.Message) {
+					a.messagepane.UpsertSelfSent(msg.Message)
+				}
 			}
 		}
+
+	case MessageSendFailedMsg:
+		// The chat.postMessage HTTP call failed; roll back the
+		// optimistic placeholder so the user can see the send didn't
+		// go through. A toast surfaces the reason.
+		if msg.ChannelID == a.activeChannelID && msg.LocalTS != "" {
+			a.messagepane.RemoveLocalSent(msg.LocalTS)
+		}
+		cmds = append(cmds, func() tea.Msg {
+			return statusbar.SendFailedMsg{Reason: msg.Reason}
+		})
 
 	case EditMessageMsg:
 		a.markSelfSendInFlight(msg.ChannelID)
@@ -2018,24 +2126,52 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SendThreadReplyMsg:
 		a.markSelfSendInFlight(msg.ChannelID)
+		// Instant-display: append an optimistic placeholder to the
+		// thread panel immediately, before the chat.postMessage HTTP
+		// round-trip. Mirrors the SendMessageMsg path; see there for
+		// the LocalTS / swap-or-remove contract and the mrkdwn.Convert
+		// rationale.
+		localTS := a.nextLocalTS()
+		optimisticText, _ := mrkdwn.Convert(msg.Text)
+		if a.threadVisible && msg.ThreadTS == a.threadPanel.ThreadTS() && msg.ChannelID == a.threadPanel.ChannelID() {
+			a.threadPanel.AddReply(messages.MessageItem{
+				TS:        localTS,
+				UserID:    a.currentUserID,
+				UserName:  a.userNameFor(a.currentUserID),
+				Text:      optimisticText,
+				Timestamp: a.nowFormatted(),
+				ThreadTS:  msg.ThreadTS,
+			})
+		}
 		if a.threadReplySender != nil {
 			sender := a.threadReplySender
 			chID, ts, text := msg.ChannelID, msg.ThreadTS, msg.Text
 			cmds = append(cmds, func() tea.Msg {
-				return sender(chID, ts, text)
+				result := sender(chID, ts, text)
+				switch r := result.(type) {
+				case ThreadReplySentMsg:
+					r.LocalTS = localTS
+					return r
+				case ThreadReplySendFailedMsg:
+					r.LocalTS = localTS
+					return r
+				}
+				return result
 			})
 		}
 
 	case ThreadReplySentMsg:
-		// Optimistic add using the chat.postMessage HTTP response. The
-		// internal Slack flannel WebSocket does not always echo
-		// self-posted thread replies as a plain "message" event the
-		// dispatcher recognizes, so relying on the echo alone meant the
-		// user's own thread reply wouldn't appear until the next time
-		// they reopened the app (whereupon GetReplies would pull it via
-		// HTTP). Optimistically applying all the side effects here makes
-		// the panel update immediately. If the echo does arrive it is
-		// filtered out via isSelfSent in NewMessageMsg.
+		// chat.postMessage for the thread reply landed. If a "local:..."
+		// placeholder is in the thread panel from the instant-display
+		// path (SendThreadReplyMsg above), swap it for the
+		// authoritative message; otherwise fall back to
+		// UpsertSelfSentReply.
+		//
+		// Note: the internal Slack flannel WebSocket does not always
+		// echo self-posted thread replies as a plain "message" event,
+		// so we cannot rely on the WS echo alone — the HTTP response
+		// must apply all the side effects (parent reply count, threads
+		// dirty) here.
 		if msg.Message.TS != "" {
 			a.recordSelfSent(msg.Message.TS)
 			// Update the thread panel whenever the visible thread matches,
@@ -2044,12 +2180,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// thread's channel, so gating on it here meant the user's own
 			// reply was sent to Slack but never appended locally -- they
 			// had to leave and re-enter the thread to see it.
-			//
-			// UpsertSelfSentReply (rather than AddReply) ensures the
-			// optimistic, locally-converted-mrkdwn text wins even when
-			// the WS echo races ahead and was already stored.
 			if a.threadVisible && msg.ThreadTS == a.threadPanel.ThreadTS() && msg.ChannelID == a.threadPanel.ChannelID() {
-				a.threadPanel.UpsertSelfSentReply(msg.Message)
+				if !a.threadPanel.SwapLocalSentReply(msg.LocalTS, msg.Message) {
+					a.threadPanel.UpsertSelfSentReply(msg.Message)
+				}
 			}
 			if msg.ChannelID == a.activeChannelID {
 				a.messagepane.IncrementReplyCount(msg.ThreadTS, msg.Message.TS)
@@ -2058,6 +2192,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, c)
 			}
 		}
+
+	case ThreadReplySendFailedMsg:
+		// chat.postMessage for the thread reply failed; roll back the
+		// optimistic placeholder. Mirrors MessageSendFailedMsg.
+		if a.threadVisible && msg.ThreadTS == a.threadPanel.ThreadTS() && msg.ChannelID == a.threadPanel.ChannelID() && msg.LocalTS != "" {
+			a.threadPanel.RemoveLocalSentReply(msg.LocalTS)
+		}
+		cmds = append(cmds, func() tea.Msg {
+			return statusbar.SendFailedMsg{Reason: msg.Reason}
+		})
 
 	case ConnectionStateMsg:
 		a.statusbar.SetConnectionState(statusbar.ConnectionState(msg.State))
@@ -4666,6 +4810,33 @@ func (a *App) SetPermalinkFetcher(fn PermalinkFetchFunc) {
 func (a *App) SetCurrentUserID(userID string) {
 	a.currentUserID = userID
 	a.threadsView.SetSelfUserID(userID)
+}
+
+// SetNowTimestampFormatter wires the formatter used to render the
+// Timestamp field of an optimistic instant-display message. main.go
+// passes a closure that uses cfg.Appearance.TimestampFormat so the
+// placeholder's time renders identically to the surrounding messages.
+func (a *App) SetNowTimestampFormatter(fn func() string) {
+	a.nowTimestampFormatter = fn
+}
+
+// nowFormatted returns the current time rendered via the configured
+// formatter, falling back to a sensible default when none is wired
+// (e.g. in tests).
+func (a *App) nowFormatted() string {
+	if a.nowTimestampFormatter != nil {
+		return a.nowTimestampFormatter()
+	}
+	return time.Now().Format("3:04 PM")
+}
+
+// nextLocalTS mints a unique placeholder id for an optimistic instant-
+// display message. The "local:" prefix makes it trivially
+// distinguishable from a Slack-assigned TS (which is always of the
+// form "<seconds>.<microseconds>").
+func (a *App) nextLocalTS() string {
+	a.localTSCounter++
+	return fmt.Sprintf("local:%d", a.localTSCounter)
 }
 
 func (a *App) SetFrecentFuncs(load FrecentLoadFunc, record FrecentRecordFunc) {

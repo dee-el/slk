@@ -515,6 +515,14 @@ func run() error {
 	ctx := context.Background()
 	tsFormat := cfg.Appearance.TimestampFormat
 
+	// Used by the optimistic instant-display path on send: the App
+	// mints a placeholder MessageItem before the chat.postMessage HTTP
+	// round-trip and needs a Timestamp string that renders identically
+	// to messages arriving through the normal load path.
+	app.SetNowTimestampFormatter(func() string {
+		return time.Now().Format(tsFormat)
+	})
+
 	// Initialize shared image cache (used for avatars and inline images).
 	imagesDir := filepath.Join(cacheDir, "images")
 	imageCache, err := imgpkg.NewCache(imagesDir, cfg.Cache.MaxImageCacheMB)
@@ -924,7 +932,7 @@ func run() error {
 		app.SetMessageSender(func(channelID, text string) tea.Msg {
 			wctx := router.Active()
 			if wctx == nil {
-				return nil
+				return ui.MessageSendFailedMsg{ChannelID: channelID, Reason: "no active workspace"}
 			}
 			client := wctx.Client
 			userNames := wctx.UserNames
@@ -932,7 +940,7 @@ func run() error {
 			ts, sentMrkdwn, err := client.SendMessage(ctx, channelID, text)
 			if err != nil {
 				log.Printf("Warning: failed to send message: %v", err)
-				return nil
+				return ui.MessageSendFailedMsg{ChannelID: channelID, Reason: err.Error()}
 			}
 			userName := "you"
 			if resolved, ok := userNames[client.UserID()]; ok {
@@ -1140,7 +1148,7 @@ func run() error {
 		app.SetThreadReplySender(func(channelID, threadTS, text string) tea.Msg {
 			wctx := router.Active()
 			if wctx == nil {
-				return nil
+				return ui.ThreadReplySendFailedMsg{ChannelID: channelID, ThreadTS: threadTS, Reason: "no active workspace"}
 			}
 			client := wctx.Client
 			userNames := wctx.UserNames
@@ -1148,7 +1156,7 @@ func run() error {
 			ts, sentMrkdwn, err := client.SendReply(ctx, channelID, threadTS, text)
 			if err != nil {
 				log.Printf("Warning: failed to send thread reply: %v", err)
-				return nil
+				return ui.ThreadReplySendFailedMsg{ChannelID: channelID, ThreadTS: threadTS, Reason: err.Error()}
 			}
 			userName := "you"
 			if resolved, ok := userNames[client.UserID()]; ok {

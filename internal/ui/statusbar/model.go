@@ -360,6 +360,11 @@ type DNDTickMsg struct{}
 // showing the toast and scheduling a CopiedClearMsg.
 type EditFailedMsg struct{ Reason string }
 
+// SendFailedMsg is delivered when chat.postMessage fails (either for a
+// top-level send or a thread reply). App handles by showing the toast
+// and scheduling a CopiedClearMsg.
+type SendFailedMsg struct{ Reason string }
+
 // DeleteFailedMsg is delivered when chat.delete fails.
 type DeleteFailedMsg struct{ Reason string }
 

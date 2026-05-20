@@ -622,6 +622,61 @@ func (m *Model) AppendMessage(msg MessageItem) {
 	m.selected = len(m.messages) - 1
 }
 
+// SwapLocalSent replaces an optimistic placeholder identified by
+// localTS (an internal "local:..." id assigned when the user pressed
+// Enter, before the chat.postMessage HTTP response carried back the
+// authoritative Slack TS) with the authoritative msg. The placeholder
+// keeps its position in the list so the rendered order matches what
+// the user saw when they hit Enter, but the entry's contents are
+// fully replaced (text, real TS, attachments, etc.).
+//
+// Returns true if a row matching localTS was found and swapped, false
+// otherwise. Callers that get false should typically fall back to
+// UpsertSelfSent so the message still lands (e.g. the user navigated
+// away from the channel between Enter and the HTTP response, so the
+// placeholder isn't in the current model).
+func (m *Model) SwapLocalSent(localTS string, msg MessageItem) bool {
+	if localTS == "" {
+		return false
+	}
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].TS == localTS {
+			m.messages[i] = msg
+			m.cache = nil
+			m.dirty()
+			// Same rationale as UpsertSelfSent's replace branch: the
+			// authoritative entry may differ in height (e.g. server-
+			// rendered blocks) and the snap anchor needs to refresh.
+			m.hasSnapped = false
+			return true
+		}
+	}
+	return false
+}
+
+// RemoveLocalSent removes an optimistic placeholder identified by
+// localTS. Used when the chat.postMessage HTTP call fails and we want
+// to roll back the instant-display add. Returns true if a row was
+// removed.
+func (m *Model) RemoveLocalSent(localTS string) bool {
+	if localTS == "" {
+		return false
+	}
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].TS == localTS {
+			m.messages = append(m.messages[:i], m.messages[i+1:]...)
+			m.cache = nil
+			m.dirty()
+			m.hasSnapped = false
+			if m.selected >= len(m.messages) && len(m.messages) > 0 {
+				m.selected = len(m.messages) - 1
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // UpsertSelfSent is the optimistic-add variant of AppendMessage for
 // messages we just sent ourselves. If a message with the same TS
 // already exists (e.g. a WS echo arrived faster than the HTTP

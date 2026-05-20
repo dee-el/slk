@@ -297,6 +297,47 @@ func (m *Model) AddReply(msg messages.MessageItem) {
 	m.selected = len(m.replies) - 1
 }
 
+// SwapLocalSentReply replaces an optimistic placeholder identified
+// by localTS (an internal "local:..." id assigned when the user
+// pressed Enter on a thread reply, before chat.postMessage returned
+// the real Slack TS) with the authoritative msg. Returns true if a
+// row matching localTS was found and swapped, false otherwise.
+// Mirrors messages.Model.SwapLocalSent.
+func (m *Model) SwapLocalSentReply(localTS string, msg messages.MessageItem) bool {
+	if localTS == "" {
+		return false
+	}
+	for i := len(m.replies) - 1; i >= 0; i-- {
+		if m.replies[i].TS == localTS {
+			m.replies[i] = msg
+			m.InvalidateCache()
+			return true
+		}
+	}
+	return false
+}
+
+// RemoveLocalSentReply removes an optimistic placeholder reply
+// identified by localTS. Used when the chat.postMessage HTTP call
+// fails and we want to roll back the instant-display add. Returns
+// true if a row was removed.
+func (m *Model) RemoveLocalSentReply(localTS string) bool {
+	if localTS == "" {
+		return false
+	}
+	for i := len(m.replies) - 1; i >= 0; i-- {
+		if m.replies[i].TS == localTS {
+			m.replies = append(m.replies[:i], m.replies[i+1:]...)
+			m.InvalidateCache()
+			if m.selected >= len(m.replies) && len(m.replies) > 0 {
+				m.selected = len(m.replies) - 1
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // UpsertSelfSentReply is the optimistic-add variant of AddReply for
 // thread replies the user just sent themselves. If a reply with the
 // same TS already exists (e.g. a WS echo arrived faster than the

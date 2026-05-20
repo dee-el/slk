@@ -1174,6 +1174,52 @@ func TestApp_ThreadReplySentOptimisticallyAddsToThreadPanel(t *testing.T) {
 	}
 }
 
+// TestSendThreadReply_InstantDisplay asserts that a thread reply
+// appears in the thread panel the moment SendThreadReplyMsg is
+// dispatched, before any HTTP round-trip. The placeholder is
+// swapped in place when ThreadReplySentMsg lands.
+func TestSendThreadReply_InstantDisplay(t *testing.T) {
+	app := NewApp()
+	app.SetCurrentUserID("USELF")
+	app.activeChannelID = "C1"
+	parent := messages.MessageItem{TS: "1700000000.000100"}
+	app.threadPanel.SetThread(parent, nil, "C1", "1700000000.000100")
+	app.threadVisible = true
+
+	app.Update(SendThreadReplyMsg{
+		ChannelID: "C1",
+		ThreadTS:  "1700000000.000100",
+		Text:      "instant reply",
+	})
+
+	if got := app.threadPanel.ReplyCount(); got != 1 {
+		t.Fatalf("instant-display: expected 1 placeholder reply, got %d", got)
+	}
+
+	// Capture the placeholder's local TS for the swap.
+	localTS := app.threadPanel.Replies()[0].TS
+	if !strings.HasPrefix(localTS, "local:") {
+		t.Errorf("placeholder reply TS = %q, want local:... id", localTS)
+	}
+
+	app.Update(ThreadReplySentMsg{
+		ChannelID: "C1",
+		ThreadTS:  "1700000000.000100",
+		LocalTS:   localTS,
+		Message: messages.MessageItem{
+			TS: "1700000050.000400", UserID: "USELF", UserName: "you",
+			Text: "instant reply", ThreadTS: "1700000000.000100",
+		},
+	})
+
+	if got := app.threadPanel.ReplyCount(); got != 1 {
+		t.Fatalf("post-swap: expected 1 reply, got %d", got)
+	}
+	if got := app.threadPanel.Replies()[0].TS; got != "1700000050.000400" {
+		t.Errorf("post-swap TS = %q, want real Slack TS", got)
+	}
+}
+
 func TestApp_NewMessageEchoOfSelfSentIsSkipped(t *testing.T) {
 	app := NewApp()
 	app.SetCurrentUserID("USELF")
@@ -2930,8 +2976,8 @@ func TestConversationOpenedMsg_InactiveWorkspaceIgnored(t *testing.T) {
 // TestSelfSendInFlight_SuppressesEarlyWSEcho asserts that when a slk-
 // originated send has been marked in-flight for a channel, an
 // arriving WS echo from the same user is dropped. Without this guard,
-// the WS echo (with Slack's normalised text) would render briefly,
-// then flicker-replace with the optimistic version.
+// the WS echo (with Slack's normalised text) would render alongside
+// the instant-display placeholder, double-rendering the same message.
 //
 // Cross-session messages (where lastSelfSendByChannel is NOT updated
 // for that channel because the user sent from another tool) must
@@ -2941,28 +2987,40 @@ func TestSelfSendInFlight_SuppressesEarlyWSEcho(t *testing.T) {
 	app.SetCurrentUserID("USELF")
 	app.activeChannelID = "C1"
 
-	// User submits a slk-originated send. SendMessageMsg dispatch
-	// records the in-flight timestamp.
+	// User submits a slk-originated send. SendMessageMsg appends an
+	// optimistic placeholder (instant-display) AND records the
+	// in-flight timestamp.
 	app.Update(SendMessageMsg{ChannelID: "C1", Text: "Hello\nWorld"})
 
+	// Instant-display placeholder is in the pane immediately.
+	if got := len(app.messagepane.Messages()); got != 1 {
+		t.Fatalf("expected 1 optimistic placeholder after SendMessageMsg, got %d", got)
+	}
+	if got := app.messagepane.Messages()[0].Text; got != "Hello\nWorld" {
+		t.Errorf("placeholder Text = %q, want %q", got, "Hello\nWorld")
+	}
+
 	// Slack's WS echo arrives BEFORE chat.postMessage HTTP responds.
-	// Currently no MessageSentMsg has fired, so isSelfSent(ts) is false.
+	// selfSendInFlight must drop it so we don't double-render.
 	app.Update(NewMessageMsg{
 		ChannelID: "C1",
 		Message: messages.MessageItem{
 			TS: "1700000999.000001", UserID: "USELF", Text: "Hello World",
 		},
 	})
-
-	// The echo must NOT have been added yet — the optimistic path
-	// will add it later via UpsertSelfSent with the correct text.
-	if got := len(app.messagepane.Messages()); got != 0 {
-		t.Errorf("WS echo added before optimistic; got %d messages, want 0", got)
+	if got := len(app.messagepane.Messages()); got != 1 {
+		t.Errorf("WS echo double-rendered alongside placeholder; got %d messages, want 1", got)
 	}
 
-	// Now MessageSentMsg arrives with the converted-mrkdwn text.
+	// MessageSentMsg arrives with the converted-mrkdwn text. The
+	// LocalTS field — assigned in the SendMessageMsg handler and
+	// threaded through the sender closure — lets the handler swap the
+	// placeholder for the authoritative message in place. The
+	// test simulates that wiring by reading the placeholder's TS.
+	localTS := app.messagepane.Messages()[0].TS
 	app.Update(MessageSentMsg{
 		ChannelID: "C1",
+		LocalTS:   localTS,
 		Message: messages.MessageItem{
 			TS: "1700000999.000001", UserID: "USELF", Text: "Hello\nWorld",
 		},
@@ -2970,10 +3028,114 @@ func TestSelfSendInFlight_SuppressesEarlyWSEcho(t *testing.T) {
 
 	got := app.messagepane.Messages()
 	if len(got) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(got))
+		t.Fatalf("expected 1 message after swap, got %d", len(got))
+	}
+	if got[0].TS != "1700000999.000001" {
+		t.Errorf("after swap TS = %q, want real Slack TS", got[0].TS)
 	}
 	if got[0].Text != "Hello\nWorld" {
 		t.Errorf("Text = %q, want %q", got[0].Text, "Hello\nWorld")
+	}
+}
+
+// TestSendMessage_InstantDisplay asserts the quality-of-life
+// guarantee: the user's message must appear in the active channel
+// pane the moment SendMessageMsg is dispatched — before any HTTP
+// round-trip. The placeholder is replaced in place when MessageSentMsg
+// lands; its position in the list is preserved.
+func TestSendMessage_InstantDisplay(t *testing.T) {
+	app := NewApp()
+	app.SetCurrentUserID("USELF")
+	app.activeChannelID = "C1"
+	app.userNames = map[string]string{"USELF": "you"}
+
+	app.Update(SendMessageMsg{ChannelID: "C1", Text: "hello"})
+
+	msgs := app.messagepane.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("instant-display: expected 1 message after SendMessageMsg, got %d", len(msgs))
+	}
+	if msgs[0].Text != "hello" {
+		t.Errorf("placeholder Text = %q, want %q", msgs[0].Text, "hello")
+	}
+	if msgs[0].UserID != "USELF" {
+		t.Errorf("placeholder UserID = %q, want USELF", msgs[0].UserID)
+	}
+	if msgs[0].UserName != "you" {
+		t.Errorf("placeholder UserName = %q, want you", msgs[0].UserName)
+	}
+	if !strings.HasPrefix(msgs[0].TS, "local:") {
+		t.Errorf("placeholder TS = %q, want a local:... id", msgs[0].TS)
+	}
+
+	// Once the HTTP response arrives, the placeholder is swapped for
+	// the authoritative message. The list length stays at 1; the TS
+	// changes from local:... to the real Slack TS.
+	localTS := msgs[0].TS
+	app.Update(MessageSentMsg{
+		ChannelID: "C1",
+		LocalTS:   localTS,
+		Message: messages.MessageItem{
+			TS: "1700000999.000003", UserID: "USELF", UserName: "you", Text: "hello",
+		},
+	})
+
+	msgs = app.messagepane.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("post-swap: expected 1 message, got %d", len(msgs))
+	}
+	if msgs[0].TS != "1700000999.000003" {
+		t.Errorf("post-swap TS = %q, want real Slack TS", msgs[0].TS)
+	}
+}
+
+// TestSendMessage_InstantDisplayConvertsCommonMarkToSlackMrkdwn locks
+// in the bug fix where the optimistic placeholder was storing the
+// user's raw CommonMark text. The slk renderer expects Slack mrkdwn
+// (single-asterisk bold, single-underscore italic, single-backtick
+// code), so without conversion the placeholder rendered "**bold**"
+// literally and then re-rendered with proper styling once the HTTP
+// response brought back the converted text. We now convert in the
+// App before storing.
+func TestSendMessage_InstantDisplayConvertsCommonMarkToSlackMrkdwn(t *testing.T) {
+	app := NewApp()
+	app.SetCurrentUserID("USELF")
+	app.activeChannelID = "C1"
+
+	app.Update(SendMessageMsg{ChannelID: "C1", Text: "**bold** and _italic_"})
+
+	msgs := app.messagepane.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 placeholder, got %d", len(msgs))
+	}
+	// mrkdwn.Convert("**bold** and _italic_") => "*bold* and _italic_"
+	if got, want := msgs[0].Text, "*bold* and _italic_"; got != want {
+		t.Errorf("placeholder Text = %q, want %q (CommonMark should be converted to Slack mrkdwn)", got, want)
+	}
+}
+
+// TestSendMessage_FailureRollsBackPlaceholder asserts that when
+// MessageSendFailedMsg arrives, the optimistic placeholder is removed
+// so the user can see the send did not go through.
+func TestSendMessage_FailureRollsBackPlaceholder(t *testing.T) {
+	app := NewApp()
+	app.SetCurrentUserID("USELF")
+	app.activeChannelID = "C1"
+
+	app.Update(SendMessageMsg{ChannelID: "C1", Text: "oops"})
+	if got := len(app.messagepane.Messages()); got != 1 {
+		t.Fatalf("setup: expected 1 placeholder, got %d", got)
+	}
+	localTS := app.messagepane.Messages()[0].TS
+
+	app.Update(MessageSendFailedMsg{
+		ChannelID: "C1",
+		LocalTS:   localTS,
+		Reason:    "network error",
+	})
+
+	if got := len(app.messagepane.Messages()); got != 0 {
+		t.Errorf("after failure expected placeholder removed, got %d messages", got)
 	}
 }
 
