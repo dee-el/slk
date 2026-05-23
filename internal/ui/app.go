@@ -923,21 +923,7 @@ func (a *App) handleInsertMode(msg tea.KeyMsg) tea.Cmd {
 
 // handleReactionPickerMode moved to mode_reaction_picker.go (Phase 5i).
 
-func (a *App) handleConfirmMode(msg tea.KeyMsg) tea.Cmd {
-	keyStr := msg.String()
-	switch msg.Key().Code {
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyEnter:
-		keyStr = "enter"
-	}
-
-	res := a.confirmPrompt.HandleKey(keyStr)
-	if !a.confirmPrompt.IsVisible() {
-		a.SetMode(ModeNormal)
-	}
-	return res.Cmd
-}
+// handleConfirmMode moved to mode_confirm.go (Phase 5j).
 
 func (a *App) updateReactionOnMessage(channelID, messageTS, emojiName, userID string, remove bool) {
 	a.messagepane.UpdateReaction(messageTS, emojiName, userID, remove)

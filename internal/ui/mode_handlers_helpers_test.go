@@ -21,3 +21,7 @@ import tea "charm.land/bubbletea/v2"
 func (a *App) handleChannelFinderMode(msg tea.KeyMsg) tea.Cmd {
 	return handleChannelFinderMode(a, msg)
 }
+
+func (a *App) handleConfirmMode(msg tea.KeyMsg) tea.Cmd {
+	return handleConfirmMode(a, msg)
+}
