@@ -368,6 +368,24 @@ func (a *App) Init() tea.Cmd {
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
+	// Phase 4 reducer chain (extension point — see internal/ui/reducers.go).
+	// Each reducer owns a cohesive family of message types and either
+	// claims the message (returning its cmd, true) or passes (nil,
+	// false). The first claimant short-circuits the rest of Update;
+	// unclaimed messages fall through to the residual switch below.
+	// Reducers are added to this chain one family at a time as the
+	// switch shrinks. Order doesn't matter semantically — message
+	// types are disjoint across reducers — but stable order keeps
+	// the trace predictable.
+	if cmd, handled := dispatchReducers(a, msg,
+		a.presence,
+	); handled {
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return a, tea.Batch(cmds...)
+	}
+
 	// While the full-screen image preview overlay is open, route close
 	// and cycle keys directly:
 	//   - Esc/q: dismiss
@@ -1876,48 +1894,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}))
 		}
 
-	case PresenceChangeMsg:
-		a.sidebar.UpdatePresenceByUser(msg.UserID, msg.Presence)
-
-	case StatusChangeMsg:
-		st := a.presence.Set(msg.TeamID, msg.Presence, msg.DNDEnabled, msg.DNDEndTS)
-		if msg.TeamID == a.activeTeamID {
-			a.statusbar.SetStatus(st.Presence, st.DNDEnabled, st.DNDEndTS)
-			// Start the once-a-minute countdown tick if DND is active.
-			// ClaimTicker returns true once until ClearTicker is called,
-			// guarding against parallel tick chains accumulating across
-			// repeated StatusChangeMsgs.
-			if st.DNDEnabled && !st.DNDEndTS.IsZero() && time.Now().Before(st.DNDEndTS) && a.presence.ClaimTicker() {
-				cmds = append(cmds, tea.Tick(time.Minute, func(time.Time) tea.Msg {
-					return statusbar.DNDTickMsg{}
-				}))
-			}
-		}
-
-	case statusbar.DNDTickMsg:
-		pres, dndEnabled, dndEnd, ok := a.presence.Status(a.activeTeamID)
-		if !ok {
-			a.presence.ClearTicker()
-			break
-		}
-		if dndEnabled && !dndEnd.IsZero() && !time.Now().Before(dndEnd) {
-			// DND expired locally — flip the flag so the segment falls back to presence.
-			st := a.presence.ClearDNDFor(a.activeTeamID)
-			a.statusbar.SetStatus(st.Presence, false, time.Time{})
-			a.presence.ClearTicker()
-			break
-		}
-		a.statusbar.SetStatus(pres, dndEnabled, dndEnd)
-		if dndEnabled && !dndEnd.IsZero() {
-			// still in DND — reschedule the tick (dndTickerOn stays true)
-			cmds = append(cmds, tea.Tick(time.Minute, func(time.Time) tea.Msg {
-				return statusbar.DNDTickMsg{}
-			}))
-		} else {
-			// Active workspace no longer in DND (e.g. user switched away
-			// from a DND'd workspace). Stop the chain.
-			a.presence.ClearTicker()
-		}
+	// PresenceChangeMsg, StatusChangeMsg, statusbar.DNDTickMsg moved
+	// to presenceController.Handle (Phase 4a, see reducers.go).
 
 	case ToastMsg:
 		a.statusbar.SetToast(msg.Text)
