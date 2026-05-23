@@ -25,3 +25,7 @@ func (a *App) handleChannelFinderMode(msg tea.KeyMsg) tea.Cmd {
 func (a *App) handleConfirmMode(msg tea.KeyMsg) tea.Cmd {
 	return handleConfirmMode(a, msg)
 }
+
+func (a *App) handleNormalMode(msg tea.KeyMsg) tea.Cmd {
+	return handleNormalMode(a, msg)
+}

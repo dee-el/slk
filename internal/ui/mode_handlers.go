@@ -48,7 +48,7 @@ type modeHandler func(a *App, msg tea.KeyMsg) tea.Cmd
 // live on App; Phases 5b-5l replace each entry with a free
 // function as the body moves to its own file.
 var modeHandlers = map[Mode]modeHandler{
-	ModeNormal:               (*App).handleNormalMode,
+	ModeNormal:               handleNormalMode,
 	ModeInsert:               (*App).handleInsertMode,
 	ModeCommand:              handleCommandMode,
 	ModeChannelFinder:        handleChannelFinderMode,
@@ -68,13 +68,13 @@ func dispatchModeKey(a *App, msg tea.KeyMsg) tea.Cmd {
 	if h, ok := modeHandlers[a.mode]; ok {
 		return h(a, msg)
 	}
-	return a.handleNormalMode(msg)
+	return handleNormalMode(a, msg)
 }
 
-// Compile-time assertion: every method-value entry in
-// modeHandlers above matches the modeHandler signature. If a
-// future change to handle*Mode's signature drifts, the map
-// literal would still compile but this single anchor catches
-// it. (One assertion is enough; the map values themselves are
-// already type-checked against modeHandler.)
-var _ modeHandler = (*App).handleNormalMode
+// Compile-time assertion: the free-function form of every
+// per-mode handler satisfies the modeHandler signature. If a
+// future change to a handler's signature drifts, the map literal
+// would still compile but this single anchor catches it. (One
+// assertion is enough; the map values themselves are already
+// type-checked against modeHandler.)
+var _ modeHandler = handleNormalMode
