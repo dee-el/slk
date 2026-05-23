@@ -1821,57 +1821,33 @@ func (a *App) View() tea.View {
 			a.focusedPanel = PanelMessages
 		}
 	}
-	contentHeight := frame.ContentHeight
-	railWidth := frame.RailWidth
-	sidebarWidth := frame.SidebarWidth
-	sidebarBorder := frame.SidebarBorder
-	msgWidth := frame.MsgWidth
-	msgBorder := frame.MsgBorder
-	threadWidth := frame.ThreadWidth
-	threadBorder := frame.ThreadBorder
-
-	// exactSize / exactSizeBg moved to view_helpers.go (Phase 6a).
-
 	themeVer := styles.Version()
 
-	var panels []string
-	panels = append(panels, a.renderRail(railWidth, contentHeight, themeVer))
-
-	if a.sidebarVisible {
-		panels = append(panels, a.renderSidebar(sidebarWidth, sidebarBorder, contentHeight, themeVer))
-	}
-
-	// If the full-screen image preview is open, render a single panel
-	// covering the combined messages + thread region instead of the
-	// usual two-pane layout. The sidebar, rail, and status bar still
-	// render normally so the user can see context. The flag below
-	// guards the messages-pane and thread-pane render blocks and is
-	// also checked to substitute a single preview panel after them.
+	// If the full-screen image preview is open, the messages and
+	// thread regions are skipped (renderMessagesRegion returns ""
+	// and the thread-region gate below short-circuits); the
+	// preview panel takes their place as a single overlay
+	// spanning the combined width. Rail, sidebar, and status row
+	// still render normally so the user can see context.
 	previewActive := a.preview.Active()
+
+	var panels []string
+	panels = append(panels, a.renderRail(frame.RailWidth, frame.ContentHeight, themeVer))
+	if a.sidebarVisible {
+		panels = append(panels, a.renderSidebar(frame.SidebarWidth, frame.SidebarBorder, frame.ContentHeight, themeVer))
+	}
 	if s := a.renderMessagesRegion(frame, themeVer, previewActive); s != "" {
 		panels = append(panels, s)
 	}
-
-	if a.threadVisible && threadWidth > 0 && !previewActive {
+	if a.threadVisible && frame.ThreadWidth > 0 && !previewActive {
 		panels = append(panels, a.renderThreadRegion(frame, themeVer))
 	}
-
-	// Substitute the preview panel for the messages+thread region.
-	// Both branches above were skipped when previewActive was true, so
-	// the panels slice currently has rail (+sidebar) and we now append
-	// a single overlay panel that spans the combined width.
 	if previewActive {
-		overlayW := msgWidth + msgBorder
-		if a.threadVisible && threadWidth > 0 {
-			overlayW += threadWidth + threadBorder
-		}
-		overlayContent := a.preview.Overlay().View(overlayW, contentHeight, a.imgProtocol)
-		overlayPanel := exactSize(overlayContent, overlayW, contentHeight)
-		panels = append(panels, overlayPanel)
+		panels = append(panels, a.renderPreviewPanel(frame))
 	}
 
 	content := lipgloss.JoinHorizontal(lipgloss.Top, panels...)
-	status := a.renderStatusRow(railWidth, a.width-railWidth, themeVer)
+	status := a.renderStatusRow(frame.RailWidth, a.width-frame.RailWidth, themeVer)
 	screen := lipgloss.JoinVertical(lipgloss.Left, content, status)
 	screen = a.applyOverlays(screen)
 	v := tea.NewView(a.maybeWrapFinalScreen(screen))
