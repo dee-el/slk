@@ -42,7 +42,7 @@ type ChannelCacheReadFunc func(channelID string) []messages.MessageItem
 type OlderMessagesFetchFunc func(channelID, oldestTS string) tea.Msg
 
 // MessageSendFunc is called when the user sends a message. Returns a tea.Msg with the result.
-type MessageSendFunc func(channelID, text string) tea.Msg
+type MessageSendFunc func(channelID ids.ChannelID, text string) tea.Msg
 
 // UploadFunc performs an upload of one or more files to a channel
 // (with optional thread). It returns a tea.Cmd whose terminal
@@ -52,18 +52,18 @@ type UploadFunc func(channelID, threadTS, caption string, attachments []compose.
 
 // MessageEditFunc performs the chat.update API call. Returns a tea.Msg
 // (typically MessageEditedMsg) describing the result.
-type MessageEditFunc func(channelID, ts, newText string) tea.Msg
+type MessageEditFunc func(channelID ids.ChannelID, ts ids.MessageTS, newText string) tea.Msg
 
 // MessageDeleteFunc performs the chat.delete API call. Returns a tea.Msg
 // (typically MessageDeletedMsg) describing the result.
-type MessageDeleteFunc func(channelID, ts string) tea.Msg
+type MessageDeleteFunc func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg
 
 // MarkUnreadFunc performs the conversations.mark or
 // subscriptions.thread.mark HTTP call (with the rolled-back ts /
 // read=0 form), updates SQLite + in-memory caches if the call
 // succeeded, and returns a tea.Msg (typically MessageMarkedUnreadMsg)
 // describing the result. ThreadTS == "" means channel-level.
-type MarkUnreadFunc func(channelID, threadTS, boundaryTS string, unreadCount int) tea.Msg
+type MarkUnreadFunc func(channelID ids.ChannelID, threadTS ids.ThreadTS, boundaryTS ids.MessageTS, unreadCount int) tea.Msg
 
 // ThreadFetchFunc is called when the user opens a thread.
 type ThreadFetchFunc func(channelID, threadTS string) tea.Msg
@@ -93,7 +93,7 @@ type ReactionRemoveFunc func(channelID ids.ChannelID, messageTS ids.MessageTS, e
 
 // PermalinkFetchFunc is called to fetch the Slack permalink for a message.
 // For thread replies, pass the reply's ts; Slack returns a thread-aware URL.
-type PermalinkFetchFunc func(ctx context.Context, channelID, ts string) (string, error)
+type PermalinkFetchFunc func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error)
 type FrecentLoadFunc func(limit int) []reactionpicker.EmojiEntry
 type FrecentRecordFunc func(emoji string)
 

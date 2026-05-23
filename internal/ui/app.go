@@ -715,10 +715,12 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 		return nil
 	}
 	messageSvc := a.messageSvc
+	cID := ids.ChannelID(channelID)
+	mTS := ids.MessageTS(ts)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		url, err := messageSvc.Permalink(ctx, channelID, ts)
+		url, err := messageSvc.Permalink(ctx, cID, mTS)
 		if err != nil {
 			log.Printf("copy permalink: %v", err)
 			return statusbar.PermalinkCopyFailedMsg{}

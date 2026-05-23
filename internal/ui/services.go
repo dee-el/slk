@@ -245,29 +245,29 @@ type MessageService interface {
 	// Send dispatches chat.postMessage for channelID with text.
 	// Returns a tea.Msg (typically MessageSentMsg or
 	// MessageSendFailedMsg).
-	Send(channelID, text string) tea.Msg
+	Send(channelID ids.ChannelID, text string) tea.Msg
 
 	// Edit dispatches chat.update for the message identified by
 	// (channelID, ts), replacing its text with newText.
 	// Returns a tea.Msg (typically MessageEditedMsg).
-	Edit(channelID, ts, newText string) tea.Msg
+	Edit(channelID ids.ChannelID, ts ids.MessageTS, newText string) tea.Msg
 
 	// Delete dispatches chat.delete for the message identified by
 	// (channelID, ts). Returns a tea.Msg (typically MessageDeletedMsg).
-	Delete(channelID, ts string) tea.Msg
+	Delete(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg
 
 	// MarkUnread dispatches conversations.mark (channel-level) or
 	// subscriptions.thread.mark (when threadTS != "") with the
 	// rolled-back boundaryTS. unreadCount is forwarded to the result
 	// for the sidebar's badge update. Returns a tea.Msg (typically
 	// MessageMarkedUnreadMsg).
-	MarkUnread(channelID, threadTS, boundaryTS string, unreadCount int) tea.Msg
+	MarkUnread(channelID ids.ChannelID, threadTS ids.ThreadTS, boundaryTS ids.MessageTS, unreadCount int) tea.Msg
 
 	// Permalink resolves the Slack permalink URL for the message
 	// identified by (channelID, ts). Used by the copy-permalink
 	// keybind. Synchronous (HTTP); callers wrap in a goroutine to
 	// avoid blocking the Update loop.
-	Permalink(ctx context.Context, channelID, ts string) (string, error)
+	Permalink(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error)
 }
 
 // MessageServiceFuncs is the closure bundle accepted by
@@ -296,35 +296,35 @@ type messageAdapter struct {
 	fns MessageServiceFuncs
 }
 
-func (m messageAdapter) Send(channelID, text string) tea.Msg {
+func (m messageAdapter) Send(channelID ids.ChannelID, text string) tea.Msg {
 	if m.fns.Send == nil {
 		return nil
 	}
 	return m.fns.Send(channelID, text)
 }
 
-func (m messageAdapter) Edit(channelID, ts, newText string) tea.Msg {
+func (m messageAdapter) Edit(channelID ids.ChannelID, ts ids.MessageTS, newText string) tea.Msg {
 	if m.fns.Edit == nil {
 		return nil
 	}
 	return m.fns.Edit(channelID, ts, newText)
 }
 
-func (m messageAdapter) Delete(channelID, ts string) tea.Msg {
+func (m messageAdapter) Delete(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
 	if m.fns.Delete == nil {
 		return nil
 	}
 	return m.fns.Delete(channelID, ts)
 }
 
-func (m messageAdapter) MarkUnread(channelID, threadTS, boundaryTS string, unreadCount int) tea.Msg {
+func (m messageAdapter) MarkUnread(channelID ids.ChannelID, threadTS ids.ThreadTS, boundaryTS ids.MessageTS, unreadCount int) tea.Msg {
 	if m.fns.MarkUnread == nil {
 		return nil
 	}
 	return m.fns.MarkUnread(channelID, threadTS, boundaryTS, unreadCount)
 }
 
-func (m messageAdapter) Permalink(ctx context.Context, channelID, ts string) (string, error) {
+func (m messageAdapter) Permalink(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
 	if m.fns.Permalink == nil {
 		return "", nil
 	}

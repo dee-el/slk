@@ -49,6 +49,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gammons/slk/internal/debuglog"
+	"github.com/gammons/slk/internal/ids"
 	"github.com/gammons/slk/internal/slack/mrkdwn"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/statusbar"
@@ -104,7 +105,7 @@ var reduceSend reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 	case EditMessageMsg:
 		a.selfSend.MarkInFlight(m.ChannelID)
 		messageSvc := a.messageSvc
-		chID, ts, text := m.ChannelID, m.TS, m.NewText
+		chID, ts, text := ids.ChannelID(m.ChannelID), ids.MessageTS(m.TS), m.NewText
 		return func() tea.Msg {
 			return messageSvc.Edit(chID, ts, text)
 		}, true
@@ -127,16 +128,19 @@ var reduceSend reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 
 	case DeleteMessageMsg:
 		messageSvc := a.messageSvc
-		chID, ts := m.ChannelID, m.TS
+		chID, ts := ids.ChannelID(m.ChannelID), ids.MessageTS(m.TS)
 		return func() tea.Msg {
 			return messageSvc.Delete(chID, ts)
 		}, true
 
 	case MarkUnreadMsg:
 		messageSvc := a.messageSvc
-		chID, threadTS, ts, n := m.ChannelID, m.ThreadTS, m.BoundaryTS, m.UnreadCount
+		chID := ids.ChannelID(m.ChannelID)
+		threadTS := ids.ThreadTS(m.ThreadTS)
+		boundaryTS := ids.MessageTS(m.BoundaryTS)
+		n := m.UnreadCount
 		return func() tea.Msg {
-			return messageSvc.MarkUnread(chID, threadTS, ts, n)
+			return messageSvc.MarkUnread(chID, threadTS, boundaryTS, n)
 		}, true
 
 	case MessageDeletedMsg:
@@ -345,7 +349,7 @@ func reduceSendMessage(a *App, m SendMessageMsg) tea.Cmd {
 		})
 	}
 	messageSvc := a.messageSvc
-	chID, text := m.ChannelID, m.Text
+	chID, text := ids.ChannelID(m.ChannelID), m.Text
 	return func() tea.Msg {
 		result := messageSvc.Send(chID, text)
 		// Attach LocalTS so the receiving handler can swap or

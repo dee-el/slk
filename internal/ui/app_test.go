@@ -18,6 +18,7 @@ import (
 	"github.com/gammons/slk/internal/cache"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/compose"
+	"github.com/gammons/slk/internal/ids"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/sidebar"
 	"github.com/gammons/slk/internal/ui/statusbar"
@@ -448,9 +449,9 @@ func TestCopyPermalink_FromMessagesPane(t *testing.T) {
 	})
 
 	var gotCh, gotTS string
-	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID, ts string) (string, error) {
-		gotCh = channelID
-		gotTS = ts
+	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
+		gotCh = string(channelID)
+		gotTS = string(ts)
 		return "https://example.slack.com/archives/C123/p1700000001000200", nil
 	})
 
@@ -496,9 +497,9 @@ func TestCopyPermalink_FromThreadPane(t *testing.T) {
 	}
 
 	var gotCh, gotTS string
-	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID, ts string) (string, error) {
-		gotCh = channelID
-		gotTS = ts
+	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
+		gotCh = string(channelID)
+		gotTS = string(ts)
 		return "https://example.slack.com/archives/C999/p1700000050000400?thread_ts=1700000000.000100&cid=C999", nil
 	})
 
@@ -522,7 +523,7 @@ func TestCopyPermalink_NothingSelectedNoop(t *testing.T) {
 	app.activeChannelID = "C123"
 	app.focusedPanel = PanelMessages
 	// No messages set.
-	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID, ts string) (string, error) {
+	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
 		t.Fatal("fetcher must not be called when nothing is selected")
 		return "", nil
 	})
@@ -540,7 +541,7 @@ func TestCopyPermalink_FetcherErrorEmitsFailedMsg(t *testing.T) {
 	app.messagepane.SetMessages([]messages.MessageItem{
 		{TS: "1.0", UserName: "alice", Text: "hi"},
 	})
-	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID, ts string) (string, error) {
+	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
 		return "", errors.New("boom")
 	})
 
@@ -603,10 +604,10 @@ func TestCopyPermalink_ShiftYTriggersCopy(t *testing.T) {
 
 	called := 0
 	var gotCh, gotTS string
-	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID, ts string) (string, error) {
+	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
 		called++
-		gotCh = channelID
-		gotTS = ts
+		gotCh = string(channelID)
+		gotTS = string(ts)
 		return "https://example.slack.com/x", nil
 	})
 
