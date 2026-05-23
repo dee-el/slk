@@ -17,3 +17,7 @@ func (a *App) setThreadFetcherForTest(fn ThreadFetchFunc) {
 func (a *App) setThreadsListFetcherForTest(fn ThreadsListFetchFunc) {
 	a.SetThreadService(NewThreadService(ThreadServiceFuncs{ListFetch: fn}))
 }
+
+func (a *App) setPermalinkFetcherForTest(fn PermalinkFetchFunc) {
+	a.SetMessageService(NewMessageService(MessageServiceFuncs{Permalink: fn}))
+}

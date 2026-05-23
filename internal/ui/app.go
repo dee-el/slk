@@ -134,11 +134,13 @@ type App struct {
 	// always).
 	channelSyncedAtReader func(channelID string) int64
 	olderMessagesFetcher  OlderMessagesFetchFunc
-	messageSender        MessageSendFunc
-	messageEditor        MessageEditFunc
-	messageDeleter       MessageDeleteFunc
-	messageMarkUnreader  MarkUnreadFunc
-	uploader             UploadFunc
+	// messages is the App's MessageService collaborator (send / edit /
+	// delete / mark-unread / permalink). See internal/ui/services.go.
+	// Defaulted to a no-op adapter in NewApp so call sites can dispatch
+	// without nil-checks.
+	messageSvc MessageService
+
+	uploader UploadFunc
 
 	// clipboardAvailable is set at startup based on the result of
 	// clipboard.Init(). When false, Ctrl+V smart-paste is a no-op.
@@ -206,9 +208,6 @@ type App struct {
 	// editing tracks in-progress message edit state. See
 	// internal/ui/edit.go.
 	editing *editController
-
-	// Permalink copying
-	permalinkFetchFn PermalinkFetchFunc
 
 	// Channel visit recording (persists SQLite + WorkspaceContext map)
 	channelVisitRecorder ChannelVisitRecorder
@@ -340,6 +339,7 @@ func NewApp() *App {
 		layout:               newPanelLayout(),
 		reactions:            noopReactionService,
 		threads:              noopThreadService,
+		messageSvc:           noopMessageService,
 		lastChannelByTeam:    map[string]string{},
 		navHistory:           newNavHistoryStore(),
 		clipboardRead:        defaultClipboardReader,
@@ -1281,25 +1281,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Timestamp: a.nowFormatted(),
 			})
 		}
-		if a.messageSender != nil {
-			sender := a.messageSender
-			chID, text := msg.ChannelID, msg.Text
-			cmds = append(cmds, func() tea.Msg {
-				result := sender(chID, text)
-				// Attach LocalTS so the receiving handler can swap or
-				// remove the placeholder. Senders shouldn't need to
-				// know about LocalTS themselves.
-				switch r := result.(type) {
-				case MessageSentMsg:
-					r.LocalTS = localTS
-					return r
-				case MessageSendFailedMsg:
-					r.LocalTS = localTS
-					return r
-				}
-				return result
-			})
-		}
+		messageSvc := a.messageSvc
+		chID, text := msg.ChannelID, msg.Text
+		cmds = append(cmds, func() tea.Msg {
+			result := messageSvc.Send(chID, text)
+			// Attach LocalTS so the receiving handler can swap or
+			// remove the placeholder. Senders shouldn't need to
+			// know about LocalTS themselves.
+			switch r := result.(type) {
+			case MessageSentMsg:
+				r.LocalTS = localTS
+				return r
+			case MessageSendFailedMsg:
+				r.LocalTS = localTS
+				return r
+			}
+			return result
+		})
 
 	case MessageSentMsg:
 		// The chat.postMessage HTTP response landed. If a "local:..."
@@ -1337,13 +1335,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case EditMessageMsg:
 		a.selfSend.MarkInFlight(msg.ChannelID)
-		if a.messageEditor != nil {
-			editor := a.messageEditor
-			chID, ts, text := msg.ChannelID, msg.TS, msg.NewText
-			cmds = append(cmds, func() tea.Msg {
-				return editor(chID, ts, text)
-			})
-		}
+		messageSvc := a.messageSvc
+		chID, ts, text := msg.ChannelID, msg.TS, msg.NewText
+		cmds = append(cmds, func() tea.Msg {
+			return messageSvc.Edit(chID, ts, text)
+		})
 
 	case MessageEditedMsg:
 		// Only exit edit mode if this result matches the edit that's
@@ -1359,22 +1355,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case DeleteMessageMsg:
-		if a.messageDeleter != nil {
-			deleter := a.messageDeleter
-			chID, ts := msg.ChannelID, msg.TS
-			cmds = append(cmds, func() tea.Msg {
-				return deleter(chID, ts)
-			})
-		}
+		messageSvc := a.messageSvc
+		chID, ts := msg.ChannelID, msg.TS
+		cmds = append(cmds, func() tea.Msg {
+			return messageSvc.Delete(chID, ts)
+		})
 
 	case MarkUnreadMsg:
-		if a.messageMarkUnreader != nil {
-			marker := a.messageMarkUnreader
-			chID, threadTS, ts, n := msg.ChannelID, msg.ThreadTS, msg.BoundaryTS, msg.UnreadCount
-			cmds = append(cmds, func() tea.Msg {
-				return marker(chID, threadTS, ts, n)
-			})
-		}
+		messageSvc := a.messageSvc
+		chID, threadTS, ts, n := msg.ChannelID, msg.ThreadTS, msg.BoundaryTS, msg.UnreadCount
+		cmds = append(cmds, func() tea.Msg {
+			return messageSvc.MarkUnread(chID, threadTS, ts, n)
+		})
 
 	case MessageDeletedMsg:
 		if msg.Err != nil {
@@ -2919,9 +2911,6 @@ func (a *App) toggleReactionOnMessageItem(channelID string, msg messages.Message
 // reply, calls the permalink fetcher, and returns a tea.Cmd that writes the
 // URL to the clipboard and emits a status-bar toast.
 func (a *App) copyPermalinkOfSelected() tea.Cmd {
-	if a.permalinkFetchFn == nil {
-		return nil
-	}
 	var channelID, ts string
 	switch a.focusedPanel {
 	case PanelMessages:
@@ -2944,14 +2933,20 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 	if channelID == "" || ts == "" {
 		return nil
 	}
-	fetch := a.permalinkFetchFn
+	messageSvc := a.messageSvc
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		url, err := fetch(ctx, channelID, ts)
+		url, err := messageSvc.Permalink(ctx, channelID, ts)
 		if err != nil {
 			log.Printf("copy permalink: %v", err)
 			return statusbar.PermalinkCopyFailedMsg{}
+		}
+		if url == "" {
+			// No permalink wired (noop service) or Slack returned an
+			// empty URL. Silent no-op rather than copying "" with a
+			// false success toast.
+			return nil
 		}
 		return tea.BatchMsg{
 			tea.SetClipboard(url),
@@ -3547,28 +3542,14 @@ func (a *App) SetOlderMessagesFetcher(fn OlderMessagesFetchFunc) {
 	a.olderMessagesFetcher = fn
 }
 
-// SetMessageSender sets the callback used to send messages.
-func (a *App) SetMessageSender(fn MessageSendFunc) {
-	a.messageSender = fn
-}
-
-// SetMessageEditor wires the chat.update callback used by edit submit.
-func (a *App) SetMessageEditor(fn MessageEditFunc) {
-	a.messageEditor = fn
-}
-
-// SetMessageDeleter wires the chat.delete callback used by delete confirm.
-func (a *App) SetMessageDeleter(fn MessageDeleteFunc) {
-	a.messageDeleter = fn
-}
-
-// SetMessageMarkUnreader wires the conversations.mark / subscriptions.thread.mark
-// callback used by the U key. Implementations should perform the HTTP call
-// best-effort, persist the new last_read_ts to SQLite via
-// cache.UpdateChannelReadState for channel-level marks (no-op for
-// thread-level until per-thread state lands), and return MessageMarkedUnreadMsg.
-func (a *App) SetMessageMarkUnreader(fn MarkUnreadFunc) {
-	a.messageMarkUnreader = fn
+// SetMessageService wires the App's MessageService collaborator
+// (send / edit / delete / mark-unread / permalink). Build one via
+// NewMessageService from a MessageServiceFuncs bundle.
+func (a *App) SetMessageService(s MessageService) {
+	if s == nil {
+		s = noopMessageService
+	}
+	a.messageSvc = s
 }
 
 // SetUploader wires the upload callback used by Ctrl+V smart-paste
@@ -3949,12 +3930,6 @@ func (a *App) SetReactionService(r ReactionService) {
 		r = noopReactionService
 	}
 	a.reactions = r
-}
-
-// SetPermalinkFetcher sets the callback used to look up message permalinks
-// for the copy-permalink action.
-func (a *App) SetPermalinkFetcher(fn PermalinkFetchFunc) {
-	a.permalinkFetchFn = fn
 }
 
 func (a *App) SetCurrentUserID(userID string) {

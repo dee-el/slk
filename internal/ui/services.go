@@ -25,6 +25,8 @@
 package ui
 
 import (
+	"context"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gammons/slk/internal/ui/messages"
@@ -228,4 +230,102 @@ func (t threadAdapter) ChannelLastRead(channelID string) string {
 		return ""
 	}
 	return t.fns.ChannelLastRead(channelID)
+}
+
+// MessageService is the App's interface to Slack's per-message
+// operations: send, edit, delete, mark-unread, and permalink lookup.
+// Implementations are wired by cmd/slk/main.go.
+//
+// All methods are best-effort and nil-safe at the adapter level: an
+// implementation built via NewMessageService with a nil component
+// silently no-ops that operation (returning nil tea.Msg or
+// ("", nil) for Permalink).
+type MessageService interface {
+	// Send dispatches chat.postMessage for channelID with text.
+	// Returns a tea.Msg (typically MessageSentMsg or
+	// MessageSendFailedMsg).
+	Send(channelID, text string) tea.Msg
+
+	// Edit dispatches chat.update for the message identified by
+	// (channelID, ts), replacing its text with newText.
+	// Returns a tea.Msg (typically MessageEditedMsg).
+	Edit(channelID, ts, newText string) tea.Msg
+
+	// Delete dispatches chat.delete for the message identified by
+	// (channelID, ts). Returns a tea.Msg (typically MessageDeletedMsg).
+	Delete(channelID, ts string) tea.Msg
+
+	// MarkUnread dispatches conversations.mark (channel-level) or
+	// subscriptions.thread.mark (when threadTS != "") with the
+	// rolled-back boundaryTS. unreadCount is forwarded to the result
+	// for the sidebar's badge update. Returns a tea.Msg (typically
+	// MessageMarkedUnreadMsg).
+	MarkUnread(channelID, threadTS, boundaryTS string, unreadCount int) tea.Msg
+
+	// Permalink resolves the Slack permalink URL for the message
+	// identified by (channelID, ts). Used by the copy-permalink
+	// keybind. Synchronous (HTTP); callers wrap in a goroutine to
+	// avoid blocking the Update loop.
+	Permalink(ctx context.Context, channelID, ts string) (string, error)
+}
+
+// MessageServiceFuncs is the closure bundle accepted by
+// NewMessageService. Any field may be nil; the resulting service
+// no-ops that operation.
+type MessageServiceFuncs struct {
+	Send       MessageSendFunc
+	Edit       MessageEditFunc
+	Delete     MessageDeleteFunc
+	MarkUnread MarkUnreadFunc
+	Permalink  PermalinkFetchFunc
+}
+
+// NewMessageService builds a MessageService from a MessageServiceFuncs
+// bundle. Used by cmd/slk/main.go (production wiring) and tests.
+func NewMessageService(fns MessageServiceFuncs) MessageService {
+	return messageAdapter{fns: fns}
+}
+
+// noopMessageService is the default MessageService wired into App by
+// NewApp so call sites can dispatch without nil-checks even when
+// SetMessageService hasn't been called.
+var noopMessageService MessageService = messageAdapter{}
+
+type messageAdapter struct {
+	fns MessageServiceFuncs
+}
+
+func (m messageAdapter) Send(channelID, text string) tea.Msg {
+	if m.fns.Send == nil {
+		return nil
+	}
+	return m.fns.Send(channelID, text)
+}
+
+func (m messageAdapter) Edit(channelID, ts, newText string) tea.Msg {
+	if m.fns.Edit == nil {
+		return nil
+	}
+	return m.fns.Edit(channelID, ts, newText)
+}
+
+func (m messageAdapter) Delete(channelID, ts string) tea.Msg {
+	if m.fns.Delete == nil {
+		return nil
+	}
+	return m.fns.Delete(channelID, ts)
+}
+
+func (m messageAdapter) MarkUnread(channelID, threadTS, boundaryTS string, unreadCount int) tea.Msg {
+	if m.fns.MarkUnread == nil {
+		return nil
+	}
+	return m.fns.MarkUnread(channelID, threadTS, boundaryTS, unreadCount)
+}
+
+func (m messageAdapter) Permalink(ctx context.Context, channelID, ts string) (string, error) {
+	if m.fns.Permalink == nil {
+		return "", nil
+	}
+	return m.fns.Permalink(ctx, channelID, ts)
 }

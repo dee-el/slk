@@ -947,108 +947,113 @@ func run() error {
 			return nil // ChannelMarkedReadMsg is emitted from inside the goroutine
 		})
 
-		app.SetMessageSender(func(channelID, text string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return ui.MessageSendFailedMsg{ChannelID: channelID, Reason: "no active workspace"}
-			}
-			client := wctx.Client
-			userNames := wctx.UserNames
-			ctx := context.Background()
-			ts, sentMrkdwn, err := client.SendMessage(ctx, channelID, text)
-			if err != nil {
-				log.Printf("Warning: failed to send message: %v", err)
-				return ui.MessageSendFailedMsg{ChannelID: channelID, Reason: err.Error()}
-			}
-			userName := "you"
-			if resolved, ok := userNames[client.UserID()]; ok {
-				userName = resolved
-			}
-			return ui.MessageSentMsg{
-				ChannelID: channelID,
-				Message: messages.MessageItem{
-					TS:        ts,
-					UserID:    client.UserID(),
-					UserName:  userName,
-					Text:      sentMrkdwn,
-					Timestamp: formatTimestamp(ts, tsFormat),
-				},
-			}
-		})
+		app.SetMessageService(ui.NewMessageService(ui.MessageServiceFuncs{
+			Send: func(channelID, text string) tea.Msg {
+				wctx := router.Active()
+				if wctx == nil {
+					return ui.MessageSendFailedMsg{ChannelID: channelID, Reason: "no active workspace"}
+				}
+				client := wctx.Client
+				userNames := wctx.UserNames
+				ctx := context.Background()
+				ts, sentMrkdwn, err := client.SendMessage(ctx, channelID, text)
+				if err != nil {
+					log.Printf("Warning: failed to send message: %v", err)
+					return ui.MessageSendFailedMsg{ChannelID: channelID, Reason: err.Error()}
+				}
+				userName := "you"
+				if resolved, ok := userNames[client.UserID()]; ok {
+					userName = resolved
+				}
+				return ui.MessageSentMsg{
+					ChannelID: channelID,
+					Message: messages.MessageItem{
+						TS:        ts,
+						UserID:    client.UserID(),
+						UserName:  userName,
+						Text:      sentMrkdwn,
+						Timestamp: formatTimestamp(ts, tsFormat),
+					},
+				}
+			},
+			Edit: func(channelID, ts, text string) tea.Msg {
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				// EditMessage returns the converted mrkdwn but we ignore
+				// it here: the message_changed WS echo updates the local
+				// copy with the server-stored text via UpdateMessageInPlace.
+				// MessageEditedMsg only carries success/fail status.
+				_, err := wctx.Client.EditMessage(ctx, channelID, ts, text)
+				if err != nil {
+					log.Printf("Warning: failed to edit message %s/%s: %v", channelID, ts, err)
+				}
+				return ui.MessageEditedMsg{ChannelID: channelID, TS: ts, Err: err}
+			},
+			Delete: func(channelID, ts string) tea.Msg {
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				err := wctx.Client.RemoveMessage(ctx, channelID, ts)
+				if err != nil {
+					log.Printf("Warning: failed to delete message %s/%s: %v", channelID, ts, err)
+				}
+				return ui.MessageDeletedMsg{ChannelID: channelID, TS: ts, Err: err}
+			},
+			MarkUnread: func(channelID, threadTS, boundaryTS string, unreadCount int) tea.Msg {
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				client := wctx.Client
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
 
-		app.SetMessageEditor(func(channelID, ts, text string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			// EditMessage returns the converted mrkdwn but we ignore
-			// it here: the message_changed WS echo updates the local
-			// copy with the server-stored text via UpdateMessageInPlace
-			// (internal/ui/app.go:1382). MessageEditedMsg only carries
-			// success/fail status.
-			_, err := wctx.Client.EditMessage(ctx, channelID, ts, text)
-			if err != nil {
-				log.Printf("Warning: failed to edit message %s/%s: %v", channelID, ts, err)
-			}
-			return ui.MessageEditedMsg{ChannelID: channelID, TS: ts, Err: err}
-		})
-
-		app.SetMessageDeleter(func(channelID, ts string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			err := wctx.Client.RemoveMessage(ctx, channelID, ts)
-			if err != nil {
-				log.Printf("Warning: failed to delete message %s/%s: %v", channelID, ts, err)
-			}
-			return ui.MessageDeletedMsg{ChannelID: channelID, TS: ts, Err: err}
-		})
-
-		app.SetMessageMarkUnreader(func(channelID, threadTS, boundaryTS string, unreadCount int) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			client := wctx.Client
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			var err error
-			if threadTS == "" {
-				err = client.MarkChannelUnread(ctx, channelID, boundaryTS)
-				if err == nil {
-					if dbErr := db.UpdateChannelReadState(channelID, boundaryTS, true); dbErr != nil {
-						log.Printf("Warning: failed to update read state on mark-unread %s/%s: %v", channelID, boundaryTS, dbErr)
+				var err error
+				if threadTS == "" {
+					err = client.MarkChannelUnread(ctx, channelID, boundaryTS)
+					if err == nil {
+						if dbErr := db.UpdateChannelReadState(channelID, boundaryTS, true); dbErr != nil {
+							log.Printf("Warning: failed to update read state on mark-unread %s/%s: %v", channelID, boundaryTS, dbErr)
+						}
+					} else {
+						log.Printf("Warning: failed to mark channel %s as unread (boundary %s): %v", channelID, boundaryTS, err)
 					}
 				} else {
-					log.Printf("Warning: failed to mark channel %s as unread (boundary %s): %v", channelID, boundaryTS, err)
+					err = client.MarkThreadUnread(ctx, channelID, threadTS, boundaryTS)
+					if err != nil {
+						log.Printf("Warning: failed to mark thread %s/%s as unread (boundary %s): %v", channelID, threadTS, boundaryTS, err)
+					}
+					// No SQLite write here for thread-level — the
+					// thread_subscriptions row's last_read is the
+					// source of truth and gets updated when Slack
+					// echoes back a thread_marked event. The UI
+					// updates immediately via applyThreadMark; on
+					// next refresh cache.ListSubscribedThreads will
+					// reconcile from the persisted subscription row.
 				}
-			} else {
-				err = client.MarkThreadUnread(ctx, channelID, threadTS, boundaryTS)
-				if err != nil {
-					log.Printf("Warning: failed to mark thread %s/%s as unread (boundary %s): %v", channelID, threadTS, boundaryTS, err)
+				return ui.MessageMarkedUnreadMsg{
+					ChannelID:   channelID,
+					ThreadTS:    threadTS,
+					BoundaryTS:  boundaryTS,
+					UnreadCount: unreadCount,
+					Err:         err,
 				}
-				// No SQLite write here for thread-level — the
-				// thread_subscriptions row's last_read is the
-				// source of truth and gets updated when Slack
-				// echoes back a thread_marked event. The UI
-				// updates immediately via applyThreadMark; on
-				// next refresh cache.ListSubscribedThreads will
-				// reconcile from the persisted subscription row.
-			}
-			return ui.MessageMarkedUnreadMsg{
-				ChannelID:   channelID,
-				ThreadTS:    threadTS,
-				BoundaryTS:  boundaryTS,
-				UnreadCount: unreadCount,
-				Err:         err,
-			}
-		})
+			},
+			Permalink: func(ctx context.Context, channelID, ts string) (string, error) {
+				wctx := router.Active()
+				if wctx == nil {
+					return "", nil
+				}
+				return wctx.Client.GetPermalink(ctx, channelID, ts)
+			},
+		}))
 
 		app.SetUploader(func(channelID, threadTS, caption string, attachments []compose.PendingAttachment) tea.Cmd {
 			return func() tea.Msg {
@@ -1239,14 +1244,6 @@ func run() error {
 				_ = db.RecordEmojiUse(emojiName)
 			},
 		))
-
-		app.SetPermalinkFetcher(func(ctx context.Context, channelID, ts string) (string, error) {
-			wctx := router.Active()
-			if wctx == nil {
-				return "", nil
-			}
-			return wctx.Client.GetPermalink(ctx, channelID, ts)
-		})
 
 		app.SetTypingSender(func(channelID string) {
 			wctx := router.Active()
