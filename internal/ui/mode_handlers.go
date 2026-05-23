@@ -49,7 +49,7 @@ type modeHandler func(a *App, msg tea.KeyMsg) tea.Cmd
 // function as the body moves to its own file.
 var modeHandlers = map[Mode]modeHandler{
 	ModeNormal:               handleNormalMode,
-	ModeInsert:               (*App).handleInsertMode,
+	ModeInsert:               handleInsertMode,
 	ModeCommand:              handleCommandMode,
 	ModeChannelFinder:        handleChannelFinderMode,
 	ModeReactionPicker:       handleReactionPickerMode,

@@ -29,3 +29,7 @@ func (a *App) handleConfirmMode(msg tea.KeyMsg) tea.Cmd {
 func (a *App) handleNormalMode(msg tea.KeyMsg) tea.Cmd {
 	return handleNormalMode(a, msg)
 }
+
+func (a *App) handleInsertMode(msg tea.KeyMsg) tea.Cmd {
+	return handleInsertMode(a, msg)
+}
