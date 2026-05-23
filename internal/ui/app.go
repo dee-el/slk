@@ -1130,9 +1130,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.loading {
 			break
 		}
-		// Wheel notches move the selection like j/k rather than scrolling the
-		// viewport directly. Targets the panel under the cursor regardless of
-		// which panel currently has keyboard focus.
+		// Wheel notches scroll the viewport of the panel under the cursor
+		// WITHOUT changing the current selection -- decoupled from j/k so a
+		// user can read past a long message or browse history without losing
+		// the selected/active item. Targets the panel under the cursor
+		// regardless of which panel currently has keyboard focus.
 		up := false
 		switch msg.Button {
 		case tea.MouseWheelUp:
@@ -1142,53 +1144,47 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			break
 		}
+		// Lines moved per wheel notch -- matches typical terminal behavior.
+		// Single-row panes (sidebar) still feel fine because real-world
+		// workspace lists are short and the snap-back on the next j/k
+		// restores the previously-selected channel.
+		const wheelLinesPerNotch = 3
 		x := msg.X
 		switch {
 		case x < a.layoutRailWidth:
-			// Workspace rail: no selection navigation here.
+			// Workspace rail: no scroll here.
 		case a.sidebarVisible && x < a.layoutSidebarEnd:
 			if up {
-				a.sidebar.MoveUp()
+				a.sidebar.ScrollUp(wheelLinesPerNotch)
 			} else {
-				a.sidebar.MoveDown()
+				a.sidebar.ScrollDown(wheelLinesPerNotch)
 			}
 		case x < a.layoutMsgEnd:
 			if a.view == ViewThreads {
 				if up {
-					a.threadsView.MoveUp()
+					a.threadsView.ScrollUp(wheelLinesPerNotch)
 				} else {
-					a.threadsView.MoveDown()
+					a.threadsView.ScrollDown(wheelLinesPerNotch)
 				}
-				cmds = append(cmds, a.openSelectedThreadCmd(true))
+				// No openSelectedThreadCmd here: pure viewport scroll
+				// does not change the highlighted thread card.
 			} else {
 				if up {
-					a.messagepane.MoveUp()
-					// Mirror j/k: when selection hits the top, backfill older history.
-					if a.messagepane.AtTop() && !a.fetchingOlder && a.olderMessagesFetcher != nil {
-						a.fetchingOlder = true
-						a.messagepane.SetLoading(true)
-						chID := a.activeChannelID
-						oldestTS := a.messagepane.OldestTS()
-						fetcher := a.olderMessagesFetcher
-						// Kick the spinner tick: if a.loading is already
-						// false (workspace fully loaded), no tick is alive
-						// and the glyph would freeze on its last frame.
-						cmds = append(cmds, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-							return SpinnerTickMsg{}
-						}))
-						cmds = append(cmds, func() tea.Msg {
-							return fetcher(chID, oldestTS)
-						})
+					a.messagepane.ScrollUp(wheelLinesPerNotch)
+					// Backfill older history when the viewport hits the
+					// top (selection-based AtTop check moved to handleUp).
+					if cmd := a.maybeFetchOlderHistory(a.messagepane.ViewportAtTop()); cmd != nil {
+						cmds = append(cmds, cmd)
 					}
 				} else {
-					a.messagepane.MoveDown()
+					a.messagepane.ScrollDown(wheelLinesPerNotch)
 				}
 			}
 		case a.threadVisible && x < a.layoutThreadEnd:
 			if up {
-				a.threadPanel.MoveUp()
+				a.threadPanel.ScrollUp(wheelLinesPerNotch)
 			} else {
-				a.threadPanel.MoveDown()
+				a.threadPanel.ScrollDown(wheelLinesPerNotch)
 			}
 		}
 
@@ -2967,16 +2963,24 @@ func (a *App) handleNormalMode(msg tea.KeyMsg) tea.Cmd {
 		}
 
 	case key.Matches(msg, a.keys.PageUp):
-		a.scrollFocusedPanel(-a.pageSize())
+		if cmd := a.scrollFocusedPanel(-a.pageSize()); cmd != nil {
+			return cmd
+		}
 
 	case key.Matches(msg, a.keys.PageDown):
-		a.scrollFocusedPanel(a.pageSize())
+		if cmd := a.scrollFocusedPanel(a.pageSize()); cmd != nil {
+			return cmd
+		}
 
 	case key.Matches(msg, a.keys.HalfPageUp):
-		a.scrollFocusedPanel(-a.halfPageSize())
+		if cmd := a.scrollFocusedPanel(-a.halfPageSize()); cmd != nil {
+			return cmd
+		}
 
 	case key.Matches(msg, a.keys.HalfPageDown):
-		a.scrollFocusedPanel(a.halfPageSize())
+		if cmd := a.scrollFocusedPanel(a.halfPageSize()); cmd != nil {
+			return cmd
+		}
 
 	case key.Matches(msg, a.keys.Help):
 		a.help.SetEntries(help.FromKeyMap(a.keys))
@@ -3862,24 +3866,11 @@ func (a *App) handleUp() tea.Cmd {
 			return a.openSelectedThreadCmd(true)
 		}
 		a.messagepane.MoveUp()
-		// If at top, fetch older messages
-		if a.messagepane.AtTop() && !a.fetchingOlder && a.olderMessagesFetcher != nil {
-			a.fetchingOlder = true
-			a.messagepane.SetLoading(true)
-			chID := a.activeChannelID
-			oldestTS := a.messagepane.OldestTS()
-			fetcher := a.olderMessagesFetcher
-			// Kick the spinner tick: if a.loading is already false
-			// (workspace fully loaded), no tick is alive and the glyph
-			// would freeze on its last frame.
-			return tea.Batch(
-				tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-					return SpinnerTickMsg{}
-				}),
-				func() tea.Msg {
-					return fetcher(chID, oldestTS)
-				},
-			)
+		// If selection reached the top, fetch older messages. The
+		// viewport-based path (wheel / PageUp) is handled by
+		// scrollFocusedPanel via the same helper.
+		if cmd := a.maybeFetchOlderHistory(a.messagepane.AtTop()); cmd != nil {
+			return cmd
 		}
 	case PanelThread:
 		a.threadPanel.MoveUp()
@@ -3957,65 +3948,79 @@ func (a *App) panelAt(x, y int) (panel Panel, paneX, paneY int, ok bool) {
 	return PanelWorkspace, 0, 0, false
 }
 
-// scrollFocusedPanel scrolls the focused panel by delta lines (negative = up).
-// Half-page scrolls (ctrl+u / ctrl+d) advance the SELECTION as well as the
-// viewport: previously they moved only the viewport, leaving `selected`
-// behind, so the next j/k snapped the viewport back to where the user
-// started -- effectively undoing the page jump. Moving by N selection
-// steps fixes that and also exercises sidebar's threads-row transition
-// logic naturally.
-func (a *App) scrollFocusedPanel(delta int) {
+// scrollFocusedPanel scrolls the focused panel by delta lines (negative = up)
+// WITHOUT advancing selection. This is the keyboard equivalent of the mouse
+// wheel: PageUp/PageDown/Ctrl+U/Ctrl+D move the viewport only; the selected
+// message/channel stays put (and may scroll off-screen). The next j/k will
+// snap the viewport back to keep the (still-)selected item visible because
+// hasSnapped == true but snappedSelection != selected once selection moves.
+//
+// On a scroll-up that lands the messages-pane viewport at the very top, this
+// also triggers a fetch of older channel history -- the same UX the
+// selection-based AtTop path provides via handleUp.
+func (a *App) scrollFocusedPanel(delta int) tea.Cmd {
 	if delta == 0 {
-		return
+		return nil
 	}
-	steps := delta
-	if steps < 0 {
-		steps = -steps
+	n := delta
+	if n < 0 {
+		n = -n
 	}
 	switch a.focusedPanel {
 	case PanelSidebar:
 		if delta < 0 {
-			for i := 0; i < steps; i++ {
-				a.sidebar.MoveUp()
-			}
+			a.sidebar.ScrollUp(n)
 		} else {
-			for i := 0; i < steps; i++ {
-				a.sidebar.MoveDown()
-			}
+			a.sidebar.ScrollDown(n)
 		}
 	case PanelMessages:
 		if a.view == ViewThreads {
 			if delta < 0 {
-				for i := 0; i < steps; i++ {
-					a.threadsView.MoveUp()
-				}
+				a.threadsView.ScrollUp(n)
 			} else {
-				for i := 0; i < steps; i++ {
-					a.threadsView.MoveDown()
-				}
+				a.threadsView.ScrollDown(n)
 			}
 		} else {
 			if delta < 0 {
-				for i := 0; i < steps; i++ {
-					a.messagepane.MoveUp()
-				}
-			} else {
-				for i := 0; i < steps; i++ {
-					a.messagepane.MoveDown()
-				}
+				a.messagepane.ScrollUp(n)
+				return a.maybeFetchOlderHistory(a.messagepane.ViewportAtTop())
 			}
+			a.messagepane.ScrollDown(n)
 		}
 	case PanelThread:
 		if delta < 0 {
-			for i := 0; i < steps; i++ {
-				a.threadPanel.MoveUp()
-			}
+			a.threadPanel.ScrollUp(n)
 		} else {
-			for i := 0; i < steps; i++ {
-				a.threadPanel.MoveDown()
-			}
+			a.threadPanel.ScrollDown(n)
 		}
 	}
+	return nil
+}
+
+// maybeFetchOlderHistory kicks off a backfill of older channel history when
+// `atTop` is true, no fetch is already in flight, and a fetcher is wired up.
+// Returns nil otherwise. Centralizes the spinner-tick + fetch-cmd batching
+// previously duplicated across handleUp / the mouse-wheel handler / page-up.
+func (a *App) maybeFetchOlderHistory(atTop bool) tea.Cmd {
+	if !atTop || a.fetchingOlder || a.olderMessagesFetcher == nil {
+		return nil
+	}
+	a.fetchingOlder = true
+	a.messagepane.SetLoading(true)
+	chID := a.activeChannelID
+	oldestTS := a.messagepane.OldestTS()
+	fetcher := a.olderMessagesFetcher
+	// Kick the spinner tick: if a.loading is already false (workspace
+	// fully loaded), no tick is alive and the glyph would freeze on its
+	// last frame.
+	return tea.Batch(
+		tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+			return SpinnerTickMsg{}
+		}),
+		func() tea.Msg {
+			return fetcher(chID, oldestTS)
+		},
+	)
 }
 
 // openQuitConfirm raises the centered "Quit slk?" overlay. Called from

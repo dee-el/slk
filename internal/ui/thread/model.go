@@ -174,6 +174,13 @@ type Model struct {
 	// at the moment the thread is opened.
 	unreadBoundaryTS string
 
+	// snappedSelection lets View() avoid re-snapping vp.YOffset back to the
+	// selected reply on every render. While snappedSelection == selected,
+	// mouse-wheel / programmatic scrolls (ScrollUp/ScrollDown) are preserved
+	// across renders -- mirrors the same convention used by messages.Model.
+	snappedSelection int
+	hasSnapped       bool
+
 	// version increments on every state change that could alter View() output.
 	version int64
 
@@ -593,21 +600,34 @@ func (m *Model) SelectByIndex(i int) {
 
 // MoveUp moves the selection cursor up one reply.
 // ScrollUp scrolls the thread viewport up by n lines without changing the
-// selected reply.
+// selected reply. Marks the current selection as already-snapped so View()
+// won't pull the viewport back to keep selection visible on the next render.
 func (m *Model) ScrollUp(n int) {
 	if n > 0 {
 		m.vp.ScrollUp(n)
+		m.snappedSelection = m.selected
+		m.hasSnapped = true
 		m.dirty()
 	}
 }
 
 // ScrollDown scrolls the thread viewport down by n lines without changing the
-// selected reply.
+// selected reply. Marks the current selection as already-snapped so View()
+// won't pull the viewport back on the next render.
 func (m *Model) ScrollDown(n int) {
 	if n > 0 {
 		m.vp.ScrollDown(n)
+		m.snappedSelection = m.selected
+		m.hasSnapped = true
 		m.dirty()
 	}
+}
+
+// ViewportAtTop reports whether the thread viewport is scrolled to the top.
+// Used by the app layer to detect a wheel-up / PageUp that hit the top of the
+// reply stream (cosmetic only -- no thread backfill exists today).
+func (m *Model) ViewportAtTop() bool {
+	return m.vp.YOffset() == 0
 }
 
 func (m *Model) MoveUp() {
@@ -1404,12 +1424,20 @@ func (m *Model) View(height, width int) string {
 	m.vp.KeyMap = viewport.KeyMap{}
 	m.vp.SetContent(m.viewContent)
 
-	// Scroll to keep selected item visible
-	if m.selectedEndLine > m.vp.YOffset()+m.vp.Height() {
-		m.vp.SetYOffset(m.selectedEndLine - m.vp.Height())
-	}
-	if m.selectedStartLine < m.vp.YOffset() {
-		m.vp.SetYOffset(m.selectedStartLine)
+	// Scroll to keep selected item visible -- but only when the selection
+	// has actually changed since the last snap. This lets the mouse wheel
+	// (or programmatic ScrollUp/Down) move the viewport away from the
+	// selected reply without the next render yanking it back. Mirrors the
+	// same guard used in messages.Model.View().
+	if !m.hasSnapped || m.snappedSelection != m.selected {
+		if m.selectedEndLine > m.vp.YOffset()+m.vp.Height() {
+			m.vp.SetYOffset(m.selectedEndLine - m.vp.Height())
+		}
+		if m.selectedStartLine < m.vp.YOffset() {
+			m.vp.SetYOffset(m.selectedStartLine)
+		}
+		m.snappedSelection = m.selected
+		m.hasSnapped = true
 	}
 
 	// Populate the per-frame reaction-hit slice in pane-local

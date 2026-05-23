@@ -667,6 +667,9 @@ func (m *Model) MoveUp() {
 }
 
 // ScrollUp moves the viewport up by n rows without changing the selection.
+// Marks the current cursor as already-snapped so View() leaves yOffset alone
+// on the next render -- prevents the snap branch from yanking the viewport
+// back to keep the (unchanged) selection visible.
 func (m *Model) ScrollUp(n int) {
 	if n <= 0 {
 		return
@@ -675,16 +678,26 @@ func (m *Model) ScrollUp(n int) {
 	if m.yOffset < 0 {
 		m.yOffset = 0
 	}
+	m.snappedSelection = m.cursor
+	m.hasSnapped = true
 	m.dirty()
 }
 
-// ScrollDown moves the viewport down by n rows. The next View() clamps to the
-// max valid offset for the current content height.
+// ScrollDown moves the viewport down by n rows. View() clamps to the
+// max valid offset for the current content height. See ScrollUp for the
+// snap-guard rationale.
 func (m *Model) ScrollDown(n int) {
 	if n > 0 {
 		m.yOffset += n
+		m.snappedSelection = m.cursor
+		m.hasSnapped = true
 		m.dirty()
 	}
+}
+
+// ViewportAtTop reports whether the sidebar viewport is scrolled to the top.
+func (m *Model) ViewportAtTop() bool {
+	return m.yOffset == 0
 }
 
 func (m *Model) GoToTop() {

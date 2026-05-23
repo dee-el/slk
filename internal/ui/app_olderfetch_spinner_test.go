@@ -57,3 +57,53 @@ func TestHandleUp_BackfillEmitsSpinnerTick(t *testing.T) {
 		t.Fatal("expected fetchingOlder=true after dispatch")
 	}
 }
+
+// PageUp / wheel-up at the top of the messages pane (viewport scrolled all
+// the way up, regardless of where selection sits) must also kick off an
+// older-history backfill -- otherwise users can never load history without
+// also moving selection. Defends the issue-#23 "scroll past long messages"
+// fix path through scrollFocusedPanel.
+func TestScrollFocusedPanel_BackfillAtViewportTop(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C1"
+	app.focusedPanel = PanelMessages
+	app.view = ViewChannels
+	app.loading = false
+	app.fetchingOlder = false
+	app.layoutMsgHeight = 20
+
+	app.messagepane.SetMessages([]messages.MessageItem{
+		{TS: "1.0", UserName: "alice", Text: "first"},
+		{TS: "2.0", UserName: "bob", Text: "second"},
+	})
+
+	called := false
+	app.SetOlderMessagesFetcher(func(channelID, oldestTS string) tea.Msg {
+		called = true
+		return nil
+	})
+
+	// PageUp -> scrollFocusedPanel(-pageSize). With only 2 messages the
+	// viewport is already at the top, so this should immediately trigger
+	// the backfill path via ViewportAtTop().
+	cmd := app.scrollFocusedPanel(-app.pageSize())
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd from PageUp at top of viewport")
+	}
+	got := drainBatch(cmd)
+	var sawSpinner bool
+	for _, m := range got {
+		if _, ok := m.(SpinnerTickMsg); ok {
+			sawSpinner = true
+		}
+	}
+	if !sawSpinner {
+		t.Fatalf("expected SpinnerTickMsg from PageUp backfill, got %#v", got)
+	}
+	if !called {
+		t.Fatal("expected fetcher cmd to have been dispatched from PageUp")
+	}
+	if !app.fetchingOlder {
+		t.Fatal("expected fetchingOlder=true after PageUp dispatch")
+	}
+}

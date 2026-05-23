@@ -301,8 +301,10 @@ func (m *Model) GoToBottom() {
 }
 
 // ScrollUp moves the viewport up n lines without changing the selection.
-// Resetting hasSnapped lets the next selection move re-snap to keep the
-// selection visible (sidebar uses the same convention).
+// Marks the current selection as already-snapped so the next View() leaves
+// yOffset alone -- otherwise the snap would yank the viewport back to keep
+// the (unchanged) selection visible, undoing the scroll. The next selection
+// move (j/k/click) will re-snap naturally because snappedSelection != selected.
 func (m *Model) ScrollUp(n int) {
 	if n <= 0 {
 		return
@@ -311,20 +313,27 @@ func (m *Model) ScrollUp(n int) {
 	if m.yOffset < 0 {
 		m.yOffset = 0
 	}
-	m.hasSnapped = false
+	m.snappedSelection = m.selected
+	m.hasSnapped = true
 	m.dirty()
 }
 
 // ScrollDown moves the viewport down n lines without changing the
 // selection. View() clamps yOffset against the actual content height.
-// Resetting hasSnapped lets the next selection move re-snap.
+// Marks the current selection as already-snapped (see ScrollUp).
 func (m *Model) ScrollDown(n int) {
 	if n <= 0 {
 		return
 	}
 	m.yOffset += n
-	m.hasSnapped = false
+	m.snappedSelection = m.selected
+	m.hasSnapped = true
 	m.dirty()
+}
+
+// ViewportAtTop reports whether the viewport is scrolled to the very top.
+func (m *Model) ViewportAtTop() bool {
+	return m.yOffset == 0 && len(m.summaries) > 0
 }
 
 // ClickAt selects the thread card whose visual row contains rowY, where

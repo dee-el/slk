@@ -861,6 +861,21 @@ func (m *Model) AtTop() bool {
 	return m.selected == 0 && len(m.messages) > 0
 }
 
+// ViewportAtTop reports whether the viewport is scrolled to the very top of
+// the message stream. Used by the app layer to trigger older-history backfill
+// on a wheel-up / PageUp gesture that scrolls the viewport without moving
+// selection (selection-based backfill goes through AtTop()).
+func (m *Model) ViewportAtTop() bool {
+	return m.yOffset == 0 && len(m.messages) > 0
+}
+
+// YOffset returns the current viewport scroll offset (first visible line
+// index inside the flattened message buffer). Exposed for tests and the
+// debug overlay; do not use for navigation -- call ScrollUp/ScrollDown.
+func (m *Model) YOffset() int {
+	return m.yOffset
+}
+
 func (m *Model) PrependMessages(msgs []MessageItem) {
 	if len(msgs) == 0 {
 		return

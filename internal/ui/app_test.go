@@ -1382,9 +1382,12 @@ func TestApp_DuplicateMessageEventDoesNotDoubleAppend(t *testing.T) {
 	}
 }
 
-// Defends Bug B: ctrl+u / ctrl+d must move the selection, not just the
-// viewport. Otherwise a subsequent j/k snaps back to the original spot.
-func TestApp_HalfPageScrollAdvancesSelection(t *testing.T) {
+// Half-page scroll (ctrl+u / ctrl+d) and PageUp/PageDown are now decoupled
+// from selection: they move the viewport only. The selected message stays
+// put -- so a subsequent j/k will snap the viewport back to keep selection
+// visible, which is the expected behavior once the user explicitly invokes
+// selection navigation. This test pins that contract.
+func TestApp_HalfPageScrollMovesViewportNotSelection(t *testing.T) {
 	app := NewApp()
 	app.activeChannelID = "C1"
 	app.focusedPanel = PanelMessages
@@ -1397,19 +1400,34 @@ func TestApp_HalfPageScrollAdvancesSelection(t *testing.T) {
 		})
 	}
 	app.messagepane.SetMessages(items)
-	// Provide a sane layout height so halfPageSize() returns > 1.
+	// Provide a sane layout so halfPageSize() returns > 1.
 	app.layoutMsgHeight = 20
+	// Force one render so yOffset snaps to keep the bottom selection visible
+	// (SetMessages defaults selection to the last message). Without this,
+	// yOffset is still 0 and ScrollUp would clamp with no observable effect.
+	_ = app.messagepane.View(80, 20)
 
 	startIdx := app.messagepane.SelectedIndex()
+	startOff := app.messagepane.YOffset()
+
 	app.scrollFocusedPanel(-app.halfPageSize()) // ctrl+u
-	upIdx := app.messagepane.SelectedIndex()
-	if upIdx >= startIdx {
-		t.Errorf("ctrl+u should decrease selection; start=%d after=%d", startIdx, upIdx)
+	if got := app.messagepane.SelectedIndex(); got != startIdx {
+		t.Errorf("ctrl+u must NOT change selection; start=%d after=%d", startIdx, got)
 	}
+	upOff := app.messagepane.YOffset()
+	if upOff >= startOff {
+		t.Errorf("ctrl+u should decrease yOffset; start=%d after=%d", startOff, upOff)
+	}
+
 	app.scrollFocusedPanel(app.halfPageSize()) // ctrl+d
-	downIdx := app.messagepane.SelectedIndex()
-	if downIdx <= upIdx {
-		t.Errorf("ctrl+d should increase selection; before=%d after=%d", upIdx, downIdx)
+	if got := app.messagepane.SelectedIndex(); got != startIdx {
+		t.Errorf("ctrl+d must NOT change selection; start=%d after=%d", startIdx, got)
+	}
+	// Force a render so View() clamps yOffset against actual content height.
+	_ = app.messagepane.View(80, 20)
+	downOff := app.messagepane.YOffset()
+	if downOff <= upOff {
+		t.Errorf("ctrl+d should increase yOffset; before=%d after=%d", upOff, downOff)
 	}
 }
 
