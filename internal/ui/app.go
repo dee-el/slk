@@ -2145,70 +2145,8 @@ func (a *App) View() tea.View {
 	status := a.renderCache.status.output
 
 	screen := lipgloss.JoinVertical(lipgloss.Left, content, status)
-
-	// Render channel finder overlay on top of existing layout
-	if a.channelFinder.IsVisible() {
-		screen = a.channelFinder.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.reactionPicker.IsVisible() {
-		screen = a.reactionPicker.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.confirmPrompt.IsVisible() {
-		screen = a.confirmPrompt.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.workspaceFinder.IsVisible() {
-		screen = a.workspaceFinder.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.themeSwitcher.IsVisible() {
-		screen = a.themeSwitcher.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.presenceMenu.IsVisible() {
-		screen = a.presenceMenu.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.help.IsVisible() {
-		screen = a.help.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.mode == ModePresenceCustomSnooze {
-		screen = presencemenu.CustomSnoozeView(a.width, a.height, screen, a.presence.SnoozeBuf())
-	}
-
-	if a.bootstrap.IsLoading() {
-		screen = a.bootstrap.Render(a.width, a.height, a.spinnerGlyph())
-	}
-
-	// All panels are wrapped in exactSize / exactSizeBg before joining, so
-	// `screen` is already exactly (a.width, a.height) with every cell themed.
-	// We skip the previously-mandatory full-screen lipgloss wrapper -- it
-	// walked every cell of the entire ANSI output (~3.4 ms / frame, the
-	// single largest cost in the prior profile) just to apply background
-	// padding that's already there. If an overlay is active we still need
-	// the wrapper because overlay compositors don't always produce exact-
-	// sized output; conservatively re-wrap in that case.
-	finalScreen := screen
-	overlayActive := a.channelFinder.IsVisible() ||
-		a.reactionPicker.IsVisible() ||
-		a.confirmPrompt.IsVisible() ||
-		a.workspaceFinder.IsVisible() ||
-		a.themeSwitcher.IsVisible() ||
-		a.presenceMenu.IsVisible() ||
-		a.mode == ModePresenceCustomSnooze ||
-		a.bootstrap.IsLoading()
-	if overlayActive {
-		finalScreen = lipgloss.NewStyle().
-			Width(a.width).
-			Height(a.height).
-			MaxHeight(a.height).
-			Background(styles.Background).
-			Render(screen)
-	}
-	v := tea.NewView(finalScreen)
+	screen = a.applyOverlays(screen)
+	v := tea.NewView(a.maybeWrapFinalScreen(screen))
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	return v
