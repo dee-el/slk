@@ -67,7 +67,7 @@ func TestApp_ClickOnReactionPillAddsReaction(t *testing.T) {
 	}
 	var added []call
 	var removed []call
-	a.SetReactionSender(
+	a.SetReactionService(NewReactionService(
 		func(channelID, ts, emoji string) error {
 			added = append(added, call{channelID, ts, emoji})
 			return nil
@@ -76,7 +76,8 @@ func TestApp_ClickOnReactionPillAddsReaction(t *testing.T) {
 			removed = append(removed, call{channelID, ts, emoji})
 			return nil
 		},
-	)
+		nil, nil, // no frecent in this test
+	))
 
 	x, y, emoji := findMessagepaneReactionHit(t, a)
 	if emoji != "thumbsup" {
@@ -140,7 +141,7 @@ func TestApp_ClickOnAlreadyReactedPillRemovesReaction(t *testing.T) {
 
 	var addCount, removeCount int
 	var lastRemoveEmoji string
-	a.SetReactionSender(
+	a.SetReactionService(NewReactionService(
 		func(channelID, ts, emoji string) error {
 			addCount++
 			return nil
@@ -150,7 +151,8 @@ func TestApp_ClickOnAlreadyReactedPillRemovesReaction(t *testing.T) {
 			lastRemoveEmoji = emoji
 			return nil
 		},
-	)
+		nil, nil, // no frecent in this test
+	))
 
 	x, y, emoji := findMessagepaneReactionHit(t, a)
 	if emoji != "tada" {

@@ -198,10 +198,11 @@ type App struct {
 	// Reaction picker
 	reactionPicker   *reactionpicker.Model
 	confirmPrompt    *confirmprompt.Model
-	reactionAddFn    ReactionAddFunc
-	reactionRemoveFn ReactionRemoveFunc
-	frecentLoadFn    FrecentLoadFunc
-	frecentRecordFn  FrecentRecordFunc
+	// reactions is the App's ReactionService collaborator (add/remove
+	// reactions on Slack + load/record frecent emoji history). See
+	// internal/ui/services.go. Defaulted to a no-op adapter in NewApp
+	// so call sites can dispatch without nil-checks.
+	reactions ReactionService
 	currentUserID    string
 
 	// editing tracks in-progress message edit state. See
@@ -339,6 +340,7 @@ func NewApp() *App {
 		drag:                 newDragState(),
 		preview:              newImagePreviewController(),
 		layout:               newPanelLayout(),
+		reactions:            noopReactionService,
 		lastChannelByTeam:    map[string]string{},
 		navHistory:           newNavHistoryStore(),
 		clipboardRead:        defaultClipboardReader,
@@ -2723,8 +2725,8 @@ func (a *App) handleReactionPickerMode(msg tea.KeyMsg) tea.Cmd {
 		a.SetMode(ModeNormal)
 
 		// Record frecent usage on add (not remove)
-		if !result.Remove && a.frecentRecordFn != nil {
-			a.frecentRecordFn(emojiName)
+		if !result.Remove {
+			a.reactions.RecordFrecent(emojiName)
 		}
 
 		// Optimistic update
@@ -2732,19 +2734,14 @@ func (a *App) handleReactionPickerMode(msg tea.KeyMsg) tea.Cmd {
 
 		// Fire API call
 		if result.Remove {
-			if a.reactionRemoveFn != nil {
-				return func() tea.Msg {
-					err := a.reactionRemoveFn(channelID, messageTS, emojiName)
-					return ReactionSentMsg{Err: err}
-				}
+			return func() tea.Msg {
+				err := a.reactions.Remove(channelID, messageTS, emojiName)
+				return ReactionSentMsg{Err: err}
 			}
-		} else {
-			if a.reactionAddFn != nil {
-				return func() tea.Msg {
-					err := a.reactionAddFn(channelID, messageTS, emojiName)
-					return ReactionSentMsg{Err: err}
-				}
-			}
+		}
+		return func() tea.Msg {
+			err := a.reactions.Add(channelID, messageTS, emojiName)
+			return ReactionSentMsg{Err: err}
 		}
 	}
 
@@ -2824,9 +2821,7 @@ func (a *App) openPickerFromMessage() tea.Cmd {
 		}
 	}
 	a.messagepane.ExitReactionNav()
-	if a.frecentLoadFn != nil {
-		a.reactionPicker.SetFrecentEmoji(a.frecentLoadFn(10))
-	}
+	a.reactionPicker.SetFrecentEmoji(a.reactions.LoadFrecent(10))
 	a.reactionPicker.Open(a.activeChannelID, msg.TS, existing)
 	a.SetMode(ModeReactionPicker)
 	return nil
@@ -2844,9 +2839,7 @@ func (a *App) openPickerFromThread() tea.Cmd {
 		}
 	}
 	a.threadPanel.ExitReactionNav()
-	if a.frecentLoadFn != nil {
-		a.reactionPicker.SetFrecentEmoji(a.frecentLoadFn(10))
-	}
+	a.reactionPicker.SetFrecentEmoji(a.reactions.LoadFrecent(10))
 	a.reactionPicker.Open(a.threadPanel.ChannelID(), reply.TS, existing)
 	a.SetMode(ModeReactionPicker)
 	return nil
@@ -2868,21 +2861,15 @@ func (a *App) toggleReactionOnSelectedMessage(emojiName string) tea.Cmd {
 	channelID := a.activeChannelID
 	ts := msg.TS
 	if remove {
-		if a.reactionRemoveFn != nil {
-			return func() tea.Msg {
-				err := a.reactionRemoveFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
-		}
-	} else {
-		if a.reactionAddFn != nil {
-			return func() tea.Msg {
-				err := a.reactionAddFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
+		return func() tea.Msg {
+			err := a.reactions.Remove(channelID, ts, emojiName)
+			return ReactionSentMsg{Err: err}
 		}
 	}
-	return nil
+	return func() tea.Msg {
+		err := a.reactions.Add(channelID, ts, emojiName)
+		return ReactionSentMsg{Err: err}
+	}
 }
 
 func (a *App) toggleReactionOnSelectedThread(emojiName string) tea.Cmd {
@@ -2901,21 +2888,15 @@ func (a *App) toggleReactionOnSelectedThread(emojiName string) tea.Cmd {
 	a.updateReactionOnMessage(channelID, reply.TS, emojiName, a.currentUserID, remove)
 	ts := reply.TS
 	if remove {
-		if a.reactionRemoveFn != nil {
-			return func() tea.Msg {
-				err := a.reactionRemoveFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
-		}
-	} else {
-		if a.reactionAddFn != nil {
-			return func() tea.Msg {
-				err := a.reactionAddFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
+		return func() tea.Msg {
+			err := a.reactions.Remove(channelID, ts, emojiName)
+			return ReactionSentMsg{Err: err}
 		}
 	}
-	return nil
+	return func() tea.Msg {
+		err := a.reactions.Add(channelID, ts, emojiName)
+		return ReactionSentMsg{Err: err}
+	}
 }
 
 // toggleReactionOnMessageItem toggles the current user's reaction on
@@ -2935,21 +2916,15 @@ func (a *App) toggleReactionOnMessageItem(channelID string, msg messages.Message
 	a.updateReactionOnMessage(channelID, msg.TS, emojiName, a.currentUserID, remove)
 	ts := msg.TS
 	if remove {
-		if a.reactionRemoveFn != nil {
-			return func() tea.Msg {
-				err := a.reactionRemoveFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
-		}
-	} else {
-		if a.reactionAddFn != nil {
-			return func() tea.Msg {
-				err := a.reactionAddFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
+		return func() tea.Msg {
+			err := a.reactions.Remove(channelID, ts, emojiName)
+			return ReactionSentMsg{Err: err}
 		}
 	}
-	return nil
+	return func() tea.Msg {
+		err := a.reactions.Add(channelID, ts, emojiName)
+		return ReactionSentMsg{Err: err}
+	}
 }
 
 // copyPermalinkOfSelected resolves the currently-selected message or thread
@@ -4015,9 +3990,15 @@ func (a *App) SetInitialChannel(channelID, channelName string, msgs []messages.M
 	a.statusbar.SetChannel(channelName)
 }
 
-func (a *App) SetReactionSender(add ReactionAddFunc, remove ReactionRemoveFunc) {
-	a.reactionAddFn = add
-	a.reactionRemoveFn = remove
+// SetReactionService wires the App's ReactionService collaborator.
+// The supplied service handles both reaction add/remove and frecent
+// emoji bookkeeping; build one via NewReactionService from
+// internal/ui/services.go.
+func (a *App) SetReactionService(r ReactionService) {
+	if r == nil {
+		r = noopReactionService
+	}
+	a.reactions = r
 }
 
 // SetPermalinkFetcher sets the callback used to look up message permalinks
@@ -4049,10 +4030,7 @@ func (a *App) nowFormatted() string {
 	return time.Now().Format("3:04 PM")
 }
 
-func (a *App) SetFrecentFuncs(load FrecentLoadFunc, record FrecentRecordFunc) {
-	a.frecentLoadFn = load
-	a.frecentRecordFn = record
-}
+
 
 // ActiveChannelID returns the ID of the currently viewed channel.
 func (a *App) ActiveChannelID() string {

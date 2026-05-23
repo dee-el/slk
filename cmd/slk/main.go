@@ -692,29 +692,6 @@ func run() error {
 	// the lazy-fetch path needs router.Active().AvatarURLs to look up
 	// the avatar URL on cache misses.
 
-	// Wire up frecent emoji functions (not workspace-specific)
-	app.SetFrecentFuncs(
-		func(limit int) []reactionpicker.EmojiEntry {
-			names, err := db.GetFrecentEmoji(limit)
-			if err != nil {
-				return nil
-			}
-			codeMap := emoji.CodeMap()
-			var entries []reactionpicker.EmojiEntry
-			for _, name := range names {
-				unicode := codeMap[":"+name+":"]
-				entries = append(entries, reactionpicker.EmojiEntry{
-					Name:    name,
-					Unicode: unicode,
-				})
-			}
-			return entries
-		},
-		func(emojiName string) {
-			_ = db.RecordEmojiUse(emojiName)
-		},
-	)
-
 	// Declare p before wiring callbacks so closures can capture it
 	var p *tea.Program
 	workspaces := make(map[string]*WorkspaceContext)
@@ -1230,7 +1207,7 @@ func run() error {
 			}
 		})
 
-		app.SetReactionSender(
+		app.SetReactionService(ui.NewReactionService(
 			func(channelID, messageTS, emojiName string) error {
 				wctx := router.Active()
 				if wctx == nil {
@@ -1245,7 +1222,28 @@ func run() error {
 				}
 				return wctx.Client.RemoveReaction(ctx, channelID, messageTS, emojiName)
 			},
-		)
+			// LoadFrecent: not workspace-specific, captures only db.
+			func(limit int) []reactionpicker.EmojiEntry {
+				names, err := db.GetFrecentEmoji(limit)
+				if err != nil {
+					return nil
+				}
+				codeMap := emoji.CodeMap()
+				var entries []reactionpicker.EmojiEntry
+				for _, name := range names {
+					unicode := codeMap[":"+name+":"]
+					entries = append(entries, reactionpicker.EmojiEntry{
+						Name:    name,
+						Unicode: unicode,
+					})
+				}
+				return entries
+			},
+			// RecordFrecent: not workspace-specific, captures only db.
+			func(emojiName string) {
+				_ = db.RecordEmojiUse(emojiName)
+			},
+		))
 
 		app.SetPermalinkFetcher(func(ctx context.Context, channelID, ts string) (string, error) {
 			wctx := router.Active()
