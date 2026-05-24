@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/gammons/slk/internal/ids"
 	"github.com/gammons/slk/internal/ui/messages"
 )
 
@@ -21,12 +22,12 @@ func findMessagepaneReactionHit(t *testing.T, a *App) (x, y int, emoji string) {
 	// "small" since pills sit on a line below the body text — scanning
 	// up to height-1 covers any reasonable layout.
 	maxPaneY := a.height - 2 // minus top border and status bar
-	maxPaneX := a.layoutMsgEnd - a.layoutSidebarEnd - 2
+	maxPaneX := a.layout.msgEnd - a.layout.sidebarEnd - 2
 	for paneY := chrome; paneY < maxPaneY; paneY++ {
 		contentY := paneY - chrome
 		for paneX := 0; paneX < maxPaneX; paneX++ {
 			if _, e, ok := a.messagepane.HitTestReaction(contentY, paneX); ok {
-				return a.layoutSidebarEnd + 1 + paneX, paneY + 1, e
+				return a.layout.sidebarEnd + 1 + paneX, paneY + 1, e
 			}
 		}
 	}
@@ -67,16 +68,17 @@ func TestApp_ClickOnReactionPillAddsReaction(t *testing.T) {
 	}
 	var added []call
 	var removed []call
-	a.SetReactionSender(
-		func(channelID, ts, emoji string) error {
-			added = append(added, call{channelID, ts, emoji})
+	a.SetReactionService(NewReactionService(
+		func(channelID ids.ChannelID, ts ids.MessageTS, emoji string) error {
+			added = append(added, call{string(channelID), string(ts), emoji})
 			return nil
 		},
-		func(channelID, ts, emoji string) error {
-			removed = append(removed, call{channelID, ts, emoji})
+		func(channelID ids.ChannelID, ts ids.MessageTS, emoji string) error {
+			removed = append(removed, call{string(channelID), string(ts), emoji})
 			return nil
 		},
-	)
+		nil, nil, // no frecent in this test
+	))
 
 	x, y, emoji := findMessagepaneReactionHit(t, a)
 	if emoji != "thumbsup" {
@@ -140,17 +142,18 @@ func TestApp_ClickOnAlreadyReactedPillRemovesReaction(t *testing.T) {
 
 	var addCount, removeCount int
 	var lastRemoveEmoji string
-	a.SetReactionSender(
-		func(channelID, ts, emoji string) error {
+	a.SetReactionService(NewReactionService(
+		func(channelID ids.ChannelID, ts ids.MessageTS, emoji string) error {
 			addCount++
 			return nil
 		},
-		func(channelID, ts, emoji string) error {
+		func(channelID ids.ChannelID, ts ids.MessageTS, emoji string) error {
 			removeCount++
 			lastRemoveEmoji = emoji
 			return nil
 		},
-	)
+		nil, nil, // no frecent in this test
+	))
 
 	x, y, emoji := findMessagepaneReactionHit(t, a)
 	if emoji != "tada" {

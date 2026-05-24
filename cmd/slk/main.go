@@ -23,6 +23,7 @@ import (
 	"github.com/gammons/slk/internal/config"
 	"github.com/gammons/slk/internal/debuglog"
 	emojiwidth "github.com/gammons/slk/internal/emoji"
+	"github.com/gammons/slk/internal/ids"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/notify"
 	"github.com/gammons/slk/internal/service"
@@ -692,29 +693,6 @@ func run() error {
 	// the lazy-fetch path needs router.Active().AvatarURLs to look up
 	// the avatar URL on cache misses.
 
-	// Wire up frecent emoji functions (not workspace-specific)
-	app.SetFrecentFuncs(
-		func(limit int) []reactionpicker.EmojiEntry {
-			names, err := db.GetFrecentEmoji(limit)
-			if err != nil {
-				return nil
-			}
-			codeMap := emoji.CodeMap()
-			var entries []reactionpicker.EmojiEntry
-			for _, name := range names {
-				unicode := codeMap[":"+name+":"]
-				entries = append(entries, reactionpicker.EmojiEntry{
-					Name:    name,
-					Unicode: unicode,
-				})
-			}
-			return entries
-		},
-		func(emojiName string) {
-			_ = db.RecordEmojiUse(emojiName)
-		},
-	)
-
 	// Declare p before wiring callbacks so closures can capture it
 	var p *tea.Program
 	workspaces := make(map[string]*WorkspaceContext)
@@ -855,19 +833,6 @@ func run() error {
 	// vars BEFORE the `go func()` so they are not affected by a
 	// concurrent router.Set during the goroutine's lifetime.
 	wireCallbacks := func(router *workspaceRouter) {
-		app.SetChannelLastReadFetcher(func(channelID string) string {
-			wctx := router.Active()
-			if wctx == nil {
-				return ""
-			}
-			state, err := db.GetChannelReadState(channelID)
-			if err != nil {
-				log.Printf("Warning: GetChannelReadState for %s: %v", channelID, err)
-				return ""
-			}
-			return state.LastReadTS
-		})
-
 		app.SetReadStateReader(func() map[string]cache.ReadState {
 			wctx := router.Active()
 			if wctx == nil {
@@ -890,201 +855,235 @@ func run() error {
 			return ids
 		})
 
-		app.SetChannelVisitRecorder(func(channelID string) {
-			wctx := router.Active()
-			if wctx == nil {
-				return
-			}
-			wctx.LastVisitedByChannel[channelID] = time.Now().Unix()
-			teamID := wctx.TeamID
-			go func() {
-				if err := db.RecordChannelVisit(teamID, channelID); err != nil {
-					log.Printf("warning: recording channel visit %s/%s: %v", teamID, channelID, err)
+		app.SetChannelService(ui.NewChannelService(ui.ChannelServiceFuncs{
+			RecordVisit: func(channelID ids.ChannelID) {
+				chIDStr := string(channelID)
+				wctx := router.Active()
+				if wctx == nil {
+					return
 				}
-			}()
-		})
-
-		app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
-			wctx := router.Active()
-			if wctx == nil {
+				wctx.LastVisitedByChannel[chIDStr] = time.Now().Unix()
+				teamID := wctx.TeamID
+				go func() {
+					if err := db.RecordChannelVisit(teamID, chIDStr); err != nil {
+						log.Printf("warning: recording channel visit %s/%s: %v", teamID, chIDStr, err)
+					}
+				}()
+			},
+			Lookup: func(channelID ids.ChannelID) (string, string, bool) {
+				chIDStr := string(channelID)
+				wctx := router.Active()
+				if wctx == nil {
+					return "", "", false
+				}
+				// Sidebar (joined channels + Slack-native sections).
+				for _, ch := range wctx.Channels {
+					if ch.ID == chIDStr {
+						return ch.Name, ch.Type, true
+					}
+				}
+				// Finder items (joined + browseable). Covers DMs/group DMs
+				// that aren't in the sidebar pre-conversation, and any
+				// browseable public channels.
+				for _, it := range wctx.FinderItems {
+					if it.ID == chIDStr {
+						return it.Name, it.Type, true
+					}
+				}
 				return "", "", false
-			}
-			// Sidebar (joined channels + Slack-native sections).
-			for _, ch := range wctx.Channels {
-				if ch.ID == channelID {
-					return ch.Name, ch.Type, true
+			},
+			ReadCache: func(channelID ids.ChannelID) []messages.MessageItem {
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
 				}
-			}
-			// Finder items (joined + browseable). Covers DMs/group DMs
-			// that aren't in the sidebar pre-conversation, and any
-			// browseable public channels.
-			for _, it := range wctx.FinderItems {
-				if it.ID == channelID {
-					return it.Name, it.Type, true
+				return loadCachedMessages(db, wctx.Client.UserID(), string(channelID), wctx.UserNames, tsFormat, router)
+			},
+			SyncedAt: func(channelID ids.ChannelID) int64 {
+				return db.GetChannelSyncedAt(string(channelID))
+			},
+			MembershipFetch: func(channelID ids.ChannelID) {
+				wctx := router.Active()
+				if wctx == nil || wctx.Membership == nil {
+					return
 				}
-			}
-			return "", "", false
-		})
+				// Note: EnsureFresh synchronously calls pushSnapshot, which
+				// invokes p.Send(ChannelMembershipMsg). bubbletea v2's program
+				// channel is unbuffered (charm.land/bubbletea/v2 tea.go:598),
+				// so p.Send blocks until the Update goroutine receives. The
+				// App invokes this fetcher in a goroutine for exactly that
+				// reason (see app.go ChannelSelectedMsg handler) — we can
+				// call EnsureFresh synchronously here because we're already
+				// off the Update goroutine.
+				wctx.Membership.EnsureFresh(context.Background(), string(channelID))
+			},
+			Fetch: func(channelID ids.ChannelID, channelName string) tea.Msg {
+				chIDStr := string(channelID)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				msgItems := fetchChannelMessages(wctx.Client, chIDStr, db, wctx.UserNames, tsFormat, avatarCache, router)
 
-		app.SetChannelCacheReader(func(channelID string) []messages.MessageItem {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			return loadCachedMessages(db, wctx.Client.UserID(), channelID, wctx.UserNames, tsFormat, router)
-		})
+				state, _ := db.GetChannelReadState(chIDStr)
+				lastReadTS := state.LastReadTS
 
-		app.SetChannelSyncedAtReader(func(channelID string) int64 {
-			return db.GetChannelSyncedAt(channelID)
-		})
+				// Mark channel as read up to the latest message
+				if len(msgItems) > 0 {
+					latestTS := msgItems[len(msgItems)-1].TS
+					markChannelReadAsync(ctx, wctx, db, p, chIDStr, latestTS)
+				}
 
-		app.SetChannelMembershipFetcher(func(channelID string) {
-			wctx := router.Active()
-			if wctx == nil || wctx.Membership == nil {
-				return
-			}
-			// Note: EnsureFresh synchronously calls pushSnapshot, which
-			// invokes p.Send(ChannelMembershipMsg). bubbletea v2's program
-			// channel is unbuffered (charm.land/bubbletea/v2 tea.go:598),
-			// so p.Send blocks until the Update goroutine receives. The
-			// App invokes this fetcher in a goroutine for exactly that
-			// reason (see app.go ChannelSelectedMsg handler) — we can
-			// call EnsureFresh synchronously here because we're already
-			// off the Update goroutine.
-			wctx.Membership.EnsureFresh(context.Background(), channelID)
-		})
+				return ui.MessagesLoadedMsg{
+					ChannelID:  chIDStr,
+					Messages:   msgItems,
+					LastReadTS: lastReadTS,
+				}
+			},
+			MarkRead: func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
+				wctx := router.Active()
+				markChannelReadAsync(ctx, wctx, db, p, string(channelID), string(ts))
+				return nil // ChannelMarkedReadMsg is emitted from inside the goroutine
+			},
+			FetchOlder: func(channelID ids.ChannelID, oldestTS ids.MessageTS) tea.Msg {
+				chIDStr := string(channelID)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				msgItems := fetchOlderMessages(wctx.Client, chIDStr, string(oldestTS), db, wctx.UserNames, tsFormat, avatarCache, router)
+				return ui.OlderMessagesLoadedMsg{
+					ChannelID: chIDStr,
+					Messages:  msgItems,
+				}
+			},
+			Join: func(channelID ids.ChannelID, channelName string) tea.Msg {
+				chIDStr := string(channelID)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				ctx := context.Background()
+				if err := wctx.Client.JoinChannel(ctx, chIDStr); err != nil {
+					return ui.ChannelJoinFailedMsg{ID: chIDStr, Name: channelName, Err: err}
+				}
+				return ui.ChannelJoinedMsg{ID: chIDStr, Name: channelName}
+			},
+		}))
 
-		app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			msgItems := fetchChannelMessages(wctx.Client, channelID, db, wctx.UserNames, tsFormat, avatarCache, router)
+		app.SetMessageService(ui.NewMessageService(ui.MessageServiceFuncs{
+			Send: func(channelID ids.ChannelID, text string) tea.Msg {
+				chIDStr := string(channelID)
+				wctx := router.Active()
+				if wctx == nil {
+					return ui.MessageSendFailedMsg{ChannelID: chIDStr, Reason: "no active workspace"}
+				}
+				client := wctx.Client
+				userNames := wctx.UserNames
+				ctx := context.Background()
+				ts, sentMrkdwn, err := client.SendMessage(ctx, chIDStr, text)
+				if err != nil {
+					log.Printf("Warning: failed to send message: %v", err)
+					return ui.MessageSendFailedMsg{ChannelID: chIDStr, Reason: err.Error()}
+				}
+				userName := "you"
+				if resolved, ok := userNames[client.UserID()]; ok {
+					userName = resolved
+				}
+				return ui.MessageSentMsg{
+					ChannelID: chIDStr,
+					Message: messages.MessageItem{
+						TS:        ts,
+						UserID:    client.UserID(),
+						UserName:  userName,
+						Text:      sentMrkdwn,
+						Timestamp: formatTimestamp(ts, tsFormat),
+					},
+				}
+			},
+			Edit: func(channelID ids.ChannelID, ts ids.MessageTS, text string) tea.Msg {
+				chIDStr, tsStr := string(channelID), string(ts)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				// EditMessage returns the converted mrkdwn but we ignore
+				// it here: the message_changed WS echo updates the local
+				// copy with the server-stored text via UpdateMessageInPlace.
+				// MessageEditedMsg only carries success/fail status.
+				_, err := wctx.Client.EditMessage(ctx, chIDStr, tsStr, text)
+				if err != nil {
+					log.Printf("Warning: failed to edit message %s/%s: %v", chIDStr, tsStr, err)
+				}
+				return ui.MessageEditedMsg{ChannelID: chIDStr, TS: tsStr, Err: err}
+			},
+			Delete: func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
+				chIDStr, tsStr := string(channelID), string(ts)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				err := wctx.Client.RemoveMessage(ctx, chIDStr, tsStr)
+				if err != nil {
+					log.Printf("Warning: failed to delete message %s/%s: %v", chIDStr, tsStr, err)
+				}
+				return ui.MessageDeletedMsg{ChannelID: chIDStr, TS: tsStr, Err: err}
+			},
+			MarkUnread: func(channelID ids.ChannelID, threadTS ids.ThreadTS, boundaryTS ids.MessageTS, unreadCount int) tea.Msg {
+				chIDStr := string(channelID)
+				threadTSStr := string(threadTS)
+				boundaryTSStr := string(boundaryTS)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				client := wctx.Client
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
 
-			state, _ := db.GetChannelReadState(channelID)
-			lastReadTS := state.LastReadTS
-
-			// Mark channel as read up to the latest message
-			if len(msgItems) > 0 {
-				latestTS := msgItems[len(msgItems)-1].TS
-				markChannelReadAsync(ctx, wctx, db, p, channelID, latestTS)
-			}
-
-			return ui.MessagesLoadedMsg{
-				ChannelID:  channelID,
-				Messages:   msgItems,
-				LastReadTS: lastReadTS,
-			}
-		})
-
-		app.SetChannelReadMarker(func(channelID, ts string) tea.Msg {
-			wctx := router.Active()
-			markChannelReadAsync(ctx, wctx, db, p, channelID, ts)
-			return nil // ChannelMarkedReadMsg is emitted from inside the goroutine
-		})
-
-		app.SetMessageSender(func(channelID, text string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return ui.MessageSendFailedMsg{ChannelID: channelID, Reason: "no active workspace"}
-			}
-			client := wctx.Client
-			userNames := wctx.UserNames
-			ctx := context.Background()
-			ts, sentMrkdwn, err := client.SendMessage(ctx, channelID, text)
-			if err != nil {
-				log.Printf("Warning: failed to send message: %v", err)
-				return ui.MessageSendFailedMsg{ChannelID: channelID, Reason: err.Error()}
-			}
-			userName := "you"
-			if resolved, ok := userNames[client.UserID()]; ok {
-				userName = resolved
-			}
-			return ui.MessageSentMsg{
-				ChannelID: channelID,
-				Message: messages.MessageItem{
-					TS:        ts,
-					UserID:    client.UserID(),
-					UserName:  userName,
-					Text:      sentMrkdwn,
-					Timestamp: formatTimestamp(ts, tsFormat),
-				},
-			}
-		})
-
-		app.SetMessageEditor(func(channelID, ts, text string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			// EditMessage returns the converted mrkdwn but we ignore
-			// it here: the message_changed WS echo updates the local
-			// copy with the server-stored text via UpdateMessageInPlace
-			// (internal/ui/app.go:1382). MessageEditedMsg only carries
-			// success/fail status.
-			_, err := wctx.Client.EditMessage(ctx, channelID, ts, text)
-			if err != nil {
-				log.Printf("Warning: failed to edit message %s/%s: %v", channelID, ts, err)
-			}
-			return ui.MessageEditedMsg{ChannelID: channelID, TS: ts, Err: err}
-		})
-
-		app.SetMessageDeleter(func(channelID, ts string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			err := wctx.Client.RemoveMessage(ctx, channelID, ts)
-			if err != nil {
-				log.Printf("Warning: failed to delete message %s/%s: %v", channelID, ts, err)
-			}
-			return ui.MessageDeletedMsg{ChannelID: channelID, TS: ts, Err: err}
-		})
-
-		app.SetMessageMarkUnreader(func(channelID, threadTS, boundaryTS string, unreadCount int) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			client := wctx.Client
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			var err error
-			if threadTS == "" {
-				err = client.MarkChannelUnread(ctx, channelID, boundaryTS)
-				if err == nil {
-					if dbErr := db.UpdateChannelReadState(channelID, boundaryTS, true); dbErr != nil {
-						log.Printf("Warning: failed to update read state on mark-unread %s/%s: %v", channelID, boundaryTS, dbErr)
+				var err error
+				if threadTSStr == "" {
+					err = client.MarkChannelUnread(ctx, chIDStr, boundaryTSStr)
+					if err == nil {
+						if dbErr := db.UpdateChannelReadState(chIDStr, boundaryTSStr, true); dbErr != nil {
+							log.Printf("Warning: failed to update read state on mark-unread %s/%s: %v", chIDStr, boundaryTSStr, dbErr)
+						}
+					} else {
+						log.Printf("Warning: failed to mark channel %s as unread (boundary %s): %v", chIDStr, boundaryTSStr, err)
 					}
 				} else {
-					log.Printf("Warning: failed to mark channel %s as unread (boundary %s): %v", channelID, boundaryTS, err)
+					err = client.MarkThreadUnread(ctx, chIDStr, threadTSStr, boundaryTSStr)
+					if err != nil {
+						log.Printf("Warning: failed to mark thread %s/%s as unread (boundary %s): %v", chIDStr, threadTSStr, boundaryTSStr, err)
+					}
+					// No SQLite write here for thread-level — the
+					// thread_subscriptions row's last_read is the
+					// source of truth and gets updated when Slack
+					// echoes back a thread_marked event. The UI
+					// updates immediately via applyThreadMark; on
+					// next refresh cache.ListSubscribedThreads will
+					// reconcile from the persisted subscription row.
 				}
-			} else {
-				err = client.MarkThreadUnread(ctx, channelID, threadTS, boundaryTS)
-				if err != nil {
-					log.Printf("Warning: failed to mark thread %s/%s as unread (boundary %s): %v", channelID, threadTS, boundaryTS, err)
+				return ui.MessageMarkedUnreadMsg{
+					ChannelID:   chIDStr,
+					ThreadTS:    threadTSStr,
+					BoundaryTS:  boundaryTSStr,
+					UnreadCount: unreadCount,
+					Err:         err,
 				}
-				// No SQLite write here for thread-level — the
-				// thread_subscriptions row's last_read is the
-				// source of truth and gets updated when Slack
-				// echoes back a thread_marked event. The UI
-				// updates immediately via applyThreadMark; on
-				// next refresh cache.ListSubscribedThreads will
-				// reconcile from the persisted subscription row.
-			}
-			return ui.MessageMarkedUnreadMsg{
-				ChannelID:   channelID,
-				ThreadTS:    threadTS,
-				BoundaryTS:  boundaryTS,
-				UnreadCount: unreadCount,
-				Err:         err,
-			}
-		})
+			},
+			Permalink: func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
+				wctx := router.Active()
+				if wctx == nil {
+					return "", nil
+				}
+				return wctx.Client.GetPermalink(ctx, string(channelID), string(ts))
+			},
+		}))
 
 		app.SetUploader(func(channelID, threadTS, caption string, attachments []compose.PendingAttachment) tea.Cmd {
 			return func() tea.Msg {
@@ -1125,135 +1124,149 @@ func run() error {
 			}
 		})
 
-		app.SetOlderMessagesFetcher(func(channelID, oldestTS string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			msgItems := fetchOlderMessages(wctx.Client, channelID, oldestTS, db, wctx.UserNames, tsFormat, avatarCache, router)
-			return ui.OlderMessagesLoadedMsg{
-				ChannelID: channelID,
-				Messages:  msgItems,
-			}
-		})
-
-		app.SetThreadFetcher(func(channelID, threadTS string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			replies := fetchThreadReplies(wctx.Client, channelID, threadTS, db, wctx.UserNames, tsFormat, avatarCache, router)
-			return ui.ThreadRepliesLoadedMsg{
-				ThreadTS: threadTS,
-				Replies:  replies,
-			}
-		})
-
-		app.SetThreadCacheReader(func(channelID, threadTS string) []messages.MessageItem {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			return loadCachedThreadReplies(db, wctx.Client.UserID(), channelID, threadTS, wctx.UserNames, tsFormat, router)
-		})
-
-		app.SetThreadMarker(func(channelID, threadTS, ts string) {
-			wctx := router.Active()
-			if wctx == nil {
-				return
-			}
-			client := wctx.Client
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				if err := client.MarkThread(ctx, channelID, threadTS, ts); err != nil {
-					log.Printf("Warning: MarkThread(%s, %s): %v", channelID, threadTS, err)
+		app.SetThreadService(ui.NewThreadService(ui.ThreadServiceFuncs{
+			Fetch: func(channelID ids.ChannelID, threadTS ids.ThreadTS) tea.Msg {
+				chIDStr, threadTSStr := string(channelID), string(threadTS)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
 				}
-			}()
-		})
-
-		app.SetThreadsListFetcher(func(teamID string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			summaries, err := db.ListSubscribedThreads(teamID, wctx.Client.UserID())
-			if err != nil {
-				log.Printf("Warning: ListSubscribedThreads(%s): %v", teamID, err)
+				replies := fetchThreadReplies(wctx.Client, chIDStr, threadTSStr, db, wctx.UserNames, tsFormat, avatarCache, router)
+				return ui.ThreadRepliesLoadedMsg{
+					ThreadTS: threadTSStr,
+					Replies:  replies,
+				}
+			},
+			CacheRead: func(channelID ids.ChannelID, threadTS ids.ThreadTS) []messages.MessageItem {
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				return loadCachedThreadReplies(db, wctx.Client.UserID(), string(channelID), string(threadTS), wctx.UserNames, tsFormat, router)
+			},
+			Mark: func(channelID ids.ChannelID, threadTS ids.ThreadTS, ts ids.MessageTS) {
+				chIDStr, threadTSStr, tsStr := string(channelID), string(threadTS), string(ts)
+				wctx := router.Active()
+				if wctx == nil {
+					return
+				}
+				client := wctx.Client
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := client.MarkThread(ctx, chIDStr, threadTSStr, tsStr); err != nil {
+						log.Printf("Warning: MarkThread(%s, %s): %v", chIDStr, threadTSStr, err)
+					}
+				}()
+			},
+			SendReply: func(channelID ids.ChannelID, threadTS ids.ThreadTS, text string) tea.Msg {
+				chIDStr, threadTSStr := string(channelID), string(threadTS)
+				wctx := router.Active()
+				if wctx == nil {
+					return ui.ThreadReplySendFailedMsg{ChannelID: chIDStr, ThreadTS: threadTSStr, Reason: "no active workspace"}
+				}
+				client := wctx.Client
+				userNames := wctx.UserNames
+				ctx := context.Background()
+				ts, sentMrkdwn, err := client.SendReply(ctx, chIDStr, threadTSStr, text)
+				if err != nil {
+					log.Printf("Warning: failed to send thread reply: %v", err)
+					return ui.ThreadReplySendFailedMsg{ChannelID: chIDStr, ThreadTS: threadTSStr, Reason: err.Error()}
+				}
+				userName := "you"
+				if resolved, ok := userNames[client.UserID()]; ok {
+					userName = resolved
+				}
+				return ui.ThreadReplySentMsg{
+					ChannelID: chIDStr,
+					ThreadTS:  threadTSStr,
+					Message: messages.MessageItem{
+						TS:        ts,
+						UserID:    client.UserID(),
+						UserName:  userName,
+						Text:      sentMrkdwn,
+						Timestamp: formatTimestamp(ts, tsFormat),
+						ThreadTS:  threadTSStr,
+					},
+				}
+			},
+			ListFetch: func(teamID ids.TeamID) tea.Msg {
+				teamIDStr := string(teamID)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				summaries, err := db.ListSubscribedThreads(teamIDStr, wctx.Client.UserID())
+				if err != nil {
+					log.Printf("Warning: ListSubscribedThreads(%s): %v", teamIDStr, err)
+					return ui.ThreadsListLoadedMsg{
+						TeamID:                 teamIDStr,
+						Summaries:              nil,
+						SubscriptionsAvailable: wctx.SubscriptionsAvailable,
+					}
+				}
+				// With per-thread last_read in thread_subscriptions, the Unread
+				// flag is now authoritative — the old ThreadsHasUnreads
+				// suppression heuristic that protected against stale
+				// channels.last_read_ts is no longer needed.
 				return ui.ThreadsListLoadedMsg{
-					TeamID:                 teamID,
-					Summaries:              nil,
+					TeamID:                 teamIDStr,
+					Summaries:              summaries,
 					SubscriptionsAvailable: wctx.SubscriptionsAvailable,
 				}
-			}
-			// With per-thread last_read in thread_subscriptions, the Unread
-			// flag is now authoritative — the old ThreadsHasUnreads
-			// suppression heuristic that protected against stale
-			// channels.last_read_ts is no longer needed. The closure that
-			// previously zeroed all Unread flags when wctx.ThreadsHasUnreads
-			// was false has been removed.
-			return ui.ThreadsListLoadedMsg{
-				TeamID:                 teamID,
-				Summaries:              summaries,
-				SubscriptionsAvailable: wctx.SubscriptionsAvailable,
-			}
-		})
+			},
+			ChannelLastRead: func(channelID ids.ChannelID) string {
+				wctx := router.Active()
+				if wctx == nil {
+					return ""
+				}
+				chIDStr := string(channelID)
+				state, err := db.GetChannelReadState(chIDStr)
+				if err != nil {
+					log.Printf("Warning: GetChannelReadState for %s: %v", chIDStr, err)
+					return ""
+				}
+				return state.LastReadTS
+			},
+		}))
 
-		app.SetThreadReplySender(func(channelID, threadTS, text string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return ui.ThreadReplySendFailedMsg{ChannelID: channelID, ThreadTS: threadTS, Reason: "no active workspace"}
-			}
-			client := wctx.Client
-			userNames := wctx.UserNames
-			ctx := context.Background()
-			ts, sentMrkdwn, err := client.SendReply(ctx, channelID, threadTS, text)
-			if err != nil {
-				log.Printf("Warning: failed to send thread reply: %v", err)
-				return ui.ThreadReplySendFailedMsg{ChannelID: channelID, ThreadTS: threadTS, Reason: err.Error()}
-			}
-			userName := "you"
-			if resolved, ok := userNames[client.UserID()]; ok {
-				userName = resolved
-			}
-			return ui.ThreadReplySentMsg{
-				ChannelID: channelID,
-				ThreadTS:  threadTS,
-				Message: messages.MessageItem{
-					TS:        ts,
-					UserID:    client.UserID(),
-					UserName:  userName,
-					Text:      sentMrkdwn,
-					Timestamp: formatTimestamp(ts, tsFormat),
-					ThreadTS:  threadTS,
-				},
-			}
-		})
-
-		app.SetReactionSender(
-			func(channelID, messageTS, emojiName string) error {
+		app.SetReactionService(ui.NewReactionService(
+			func(channelID ids.ChannelID, messageTS ids.MessageTS, emojiName string) error {
 				wctx := router.Active()
 				if wctx == nil {
 					return nil
 				}
-				return wctx.Client.AddReaction(ctx, channelID, messageTS, emojiName)
+				return wctx.Client.AddReaction(ctx, string(channelID), string(messageTS), emojiName)
 			},
-			func(channelID, messageTS, emojiName string) error {
+			func(channelID ids.ChannelID, messageTS ids.MessageTS, emojiName string) error {
 				wctx := router.Active()
 				if wctx == nil {
 					return nil
 				}
-				return wctx.Client.RemoveReaction(ctx, channelID, messageTS, emojiName)
+				return wctx.Client.RemoveReaction(ctx, string(channelID), string(messageTS), emojiName)
 			},
-		)
-
-		app.SetPermalinkFetcher(func(ctx context.Context, channelID, ts string) (string, error) {
-			wctx := router.Active()
-			if wctx == nil {
-				return "", nil
-			}
-			return wctx.Client.GetPermalink(ctx, channelID, ts)
-		})
+			// LoadFrecent: not workspace-specific, captures only db.
+			func(limit int) []reactionpicker.EmojiEntry {
+				names, err := db.GetFrecentEmoji(limit)
+				if err != nil {
+					return nil
+				}
+				codeMap := emoji.CodeMap()
+				var entries []reactionpicker.EmojiEntry
+				for _, name := range names {
+					unicode := codeMap[":"+name+":"]
+					entries = append(entries, reactionpicker.EmojiEntry{
+						Name:    name,
+						Unicode: unicode,
+					})
+				}
+				return entries
+			},
+			// RecordFrecent: not workspace-specific, captures only db.
+			func(emojiName string) {
+				_ = db.RecordEmojiUse(emojiName)
+			},
+		))
 
 		app.SetTypingSender(func(channelID string) {
 			wctx := router.Active()
@@ -1263,17 +1276,6 @@ func run() error {
 			_ = wctx.Client.SendTyping(channelID)
 		})
 
-		app.SetChannelJoiner(func(channelID, channelName string) tea.Msg {
-			wctx := router.Active()
-			if wctx == nil {
-				return nil
-			}
-			ctx := context.Background()
-			if err := wctx.Client.JoinChannel(ctx, channelID); err != nil {
-				return ui.ChannelJoinFailedMsg{ID: channelID, Name: channelName, Err: err}
-			}
-			return ui.ChannelJoinedMsg{ID: channelID, Name: channelName}
-		})
 	}
 
 	// Bind all callbacks once. They read router.Active() at invocation.

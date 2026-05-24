@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/gammons/slk/internal/ids"
 	"github.com/gammons/slk/internal/ui/messages"
 )
 
@@ -20,7 +21,7 @@ func TestHandleUp_BackfillEmitsSpinnerTick(t *testing.T) {
 	app.activeChannelID = "C1"
 	app.focusedPanel = PanelMessages
 	app.view = ViewChannels
-	app.loading = false
+	app.bootstrap.loading = false
 	app.fetchingOlder = false
 
 	// Two messages with selection at index 0 -> AtTop() == true.
@@ -30,7 +31,7 @@ func TestHandleUp_BackfillEmitsSpinnerTick(t *testing.T) {
 	})
 
 	called := false
-	app.SetOlderMessagesFetcher(func(channelID, oldestTS string) tea.Msg {
+	app.setOlderMessagesFetcherForTest(func(channelID ids.ChannelID, oldestTS ids.MessageTS) tea.Msg {
 		called = true
 		return nil
 	})
@@ -68,9 +69,9 @@ func TestScrollFocusedPanel_BackfillAtViewportTop(t *testing.T) {
 	app.activeChannelID = "C1"
 	app.focusedPanel = PanelMessages
 	app.view = ViewChannels
-	app.loading = false
+	app.bootstrap.loading = false
 	app.fetchingOlder = false
-	app.layoutMsgHeight = 20
+	app.layout.msgHeight = 20
 
 	app.messagepane.SetMessages([]messages.MessageItem{
 		{TS: "1.0", UserName: "alice", Text: "first"},
@@ -78,7 +79,7 @@ func TestScrollFocusedPanel_BackfillAtViewportTop(t *testing.T) {
 	})
 
 	called := false
-	app.SetOlderMessagesFetcher(func(channelID, oldestTS string) tea.Msg {
+	app.setOlderMessagesFetcherForTest(func(channelID ids.ChannelID, oldestTS ids.MessageTS) tea.Msg {
 		called = true
 		return nil
 	})

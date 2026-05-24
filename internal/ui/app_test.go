@@ -18,6 +18,7 @@ import (
 	"github.com/gammons/slk/internal/cache"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/compose"
+	"github.com/gammons/slk/internal/ids"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/sidebar"
 	"github.com/gammons/slk/internal/ui/statusbar"
@@ -78,24 +79,24 @@ func TestTypingStateAddAndExpire(t *testing.T) {
 	app.activeChannelID = "C1"
 
 	// Simulate receiving a typing event
-	app.addTypingUser("C1", "U1")
+	app.typing.Add("C1", "U1")
 
-	users := app.getTypingUsers("C1")
+	users := app.typing.Users("C1")
 	if len(users) != 1 || users[0] != "U1" {
 		t.Errorf("expected [U1], got %v", users)
 	}
 
 	// Add another user
-	app.addTypingUser("C1", "U2")
-	users = app.getTypingUsers("C1")
+	app.typing.Add("C1", "U2")
+	users = app.typing.Users("C1")
 	if len(users) != 2 {
 		t.Errorf("expected 2 users, got %d", len(users))
 	}
 
 	// Expire all
-	app.expireTypingUsers()
+	app.typing.Expire()
 	// They shouldn't be expired yet (TTL is 5 seconds)
-	users = app.getTypingUsers("C1")
+	users = app.typing.Users("C1")
 	if len(users) != 2 {
 		t.Errorf("expected 2 users still active, got %d", len(users))
 	}
@@ -106,34 +107,32 @@ func TestTypingStateFiltersSelf(t *testing.T) {
 	app.activeChannelID = "C1"
 	app.currentUserID = "U1"
 
-	app.addTypingUser("C1", "U1")
-	app.addTypingUser("C1", "U2")
+	app.typing.Add("C1", "U1")
+	app.typing.Add("C1", "U2")
 
-	users := app.getTypingUsersFiltered("C1")
+	users := app.typing.UsersExcluding("C1", app.currentUserID)
 	if len(users) != 1 || users[0] != "U2" {
 		t.Errorf("expected [U2] (self filtered), got %v", users)
 	}
 }
 
 func TestTypingIndicatorText(t *testing.T) {
-	app := NewApp()
-
-	text := app.typingIndicatorText(nil)
+	text := typingIndicatorText(nil)
 	if text != "" {
 		t.Errorf("expected empty for nil, got %q", text)
 	}
 
-	text = app.typingIndicatorText([]string{"Alice"})
+	text = typingIndicatorText([]string{"Alice"})
 	if text != "Alice is typing..." {
 		t.Errorf("expected 'Alice is typing...', got %q", text)
 	}
 
-	text = app.typingIndicatorText([]string{"Alice", "Bob"})
+	text = typingIndicatorText([]string{"Alice", "Bob"})
 	if text != "Alice and Bob are typing..." {
 		t.Errorf("expected 'Alice and Bob are typing...', got %q", text)
 	}
 
-	text = app.typingIndicatorText([]string{"Alice", "Bob", "Charlie"})
+	text = typingIndicatorText([]string{"Alice", "Bob", "Charlie"})
 	if text != "Several people are typing..." {
 		t.Errorf("expected 'Several people are typing...', got %q", text)
 	}
@@ -142,7 +141,7 @@ func TestTypingIndicatorText(t *testing.T) {
 func TestRenderTypingIndicator(t *testing.T) {
 	app := NewApp()
 	app.activeChannelID = "C1"
-	app.typingEnabled = true
+	app.typing.SetEnabled(true)
 	app.currentUserID = "U_SELF"
 
 	// Set up user names
@@ -155,7 +154,7 @@ func TestRenderTypingIndicator(t *testing.T) {
 	}
 
 	// One person typing
-	app.addTypingUser("C1", "U1")
+	app.typing.Add("C1", "U1")
 	line = app.renderTypingLine()
 	if line == "" {
 		t.Error("expected typing indicator, got empty")
@@ -182,24 +181,24 @@ func TestAppModeTransitions(t *testing.T) {
 
 func TestTypingClearedOnChannelSwitch(t *testing.T) {
 	app := NewApp()
-	app.typingEnabled = true
+	app.typing.SetEnabled(true)
 	app.activeChannelID = "C1"
 
-	app.addTypingUser("C1", "U1")
-	app.addTypingUser("C2", "U2")
+	app.typing.Add("C1", "U1")
+	app.typing.Add("C2", "U2")
 
 	// Typing indicator should show for C1
-	users := app.getTypingUsersFiltered("C1")
+	users := app.typing.UsersExcluding("C1", app.currentUserID)
 	if len(users) != 1 {
 		t.Errorf("expected 1 user typing in C1, got %d", len(users))
 	}
 
 	// After "switching" to C2, reset throttle
 	app.activeChannelID = "C2"
-	app.lastTypingSent = time.Time{} // reset throttle on switch
+	app.typingOut.lastSent = time.Time{} // reset throttle on switch
 
 	// C2 should show its typers
-	users = app.getTypingUsersFiltered("C2")
+	users = app.typing.UsersExcluding("C2", app.currentUserID)
 	if len(users) != 1 {
 		t.Errorf("expected 1 user typing in C2, got %d", len(users))
 	}
@@ -207,25 +206,25 @@ func TestTypingClearedOnChannelSwitch(t *testing.T) {
 
 func TestTypingThrottle(t *testing.T) {
 	app := NewApp()
-	app.typingEnabled = true
+	app.typing.SetEnabled(true)
 	app.activeChannelID = "C1"
 
 	// First call should allow sending
-	if !app.shouldSendTyping() {
+	if !app.typingOut.CanSend() {
 		t.Error("expected first typing send to be allowed")
 	}
 
 	// Mark as just sent
-	app.lastTypingSent = time.Now()
+	app.typingOut.lastSent = time.Now()
 
 	// Immediate second call should be throttled
-	if app.shouldSendTyping() {
+	if app.typingOut.CanSend() {
 		t.Error("expected typing send to be throttled")
 	}
 
 	// After 3 seconds, should allow again
-	app.lastTypingSent = time.Now().Add(-4 * time.Second)
-	if !app.shouldSendTyping() {
+	app.typingOut.lastSent = time.Now().Add(-4 * time.Second)
+	if !app.typingOut.CanSend() {
 		t.Error("expected typing send to be allowed after 3s")
 	}
 }
@@ -450,9 +449,9 @@ func TestCopyPermalink_FromMessagesPane(t *testing.T) {
 	})
 
 	var gotCh, gotTS string
-	app.SetPermalinkFetcher(func(ctx context.Context, channelID, ts string) (string, error) {
-		gotCh = channelID
-		gotTS = ts
+	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
+		gotCh = string(channelID)
+		gotTS = string(ts)
 		return "https://example.slack.com/archives/C123/p1700000001000200", nil
 	})
 
@@ -498,9 +497,9 @@ func TestCopyPermalink_FromThreadPane(t *testing.T) {
 	}
 
 	var gotCh, gotTS string
-	app.SetPermalinkFetcher(func(ctx context.Context, channelID, ts string) (string, error) {
-		gotCh = channelID
-		gotTS = ts
+	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
+		gotCh = string(channelID)
+		gotTS = string(ts)
 		return "https://example.slack.com/archives/C999/p1700000050000400?thread_ts=1700000000.000100&cid=C999", nil
 	})
 
@@ -524,7 +523,7 @@ func TestCopyPermalink_NothingSelectedNoop(t *testing.T) {
 	app.activeChannelID = "C123"
 	app.focusedPanel = PanelMessages
 	// No messages set.
-	app.SetPermalinkFetcher(func(ctx context.Context, channelID, ts string) (string, error) {
+	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
 		t.Fatal("fetcher must not be called when nothing is selected")
 		return "", nil
 	})
@@ -542,7 +541,7 @@ func TestCopyPermalink_FetcherErrorEmitsFailedMsg(t *testing.T) {
 	app.messagepane.SetMessages([]messages.MessageItem{
 		{TS: "1.0", UserName: "alice", Text: "hi"},
 	})
-	app.SetPermalinkFetcher(func(ctx context.Context, channelID, ts string) (string, error) {
+	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
 		return "", errors.New("boom")
 	})
 
@@ -605,10 +604,10 @@ func TestCopyPermalink_ShiftYTriggersCopy(t *testing.T) {
 
 	called := 0
 	var gotCh, gotTS string
-	app.SetPermalinkFetcher(func(ctx context.Context, channelID, ts string) (string, error) {
+	app.setPermalinkFetcherForTest(func(ctx context.Context, channelID ids.ChannelID, ts ids.MessageTS) (string, error) {
 		called++
-		gotCh = channelID
-		gotTS = ts
+		gotCh = string(channelID)
+		gotTS = string(ts)
 		return "https://example.slack.com/x", nil
 	})
 
@@ -739,17 +738,17 @@ func TestApp_ClickOnThreadInThreadsViewOpensIt(t *testing.T) {
 	a.activeTeamID = "T1"
 	// Force layout to populate layoutSidebarEnd / layoutMsgEnd.
 	_ = a.View()
-	if a.layoutMsgEnd <= a.layoutSidebarEnd {
+	if a.layout.msgEnd <= a.layout.sidebarEnd {
 		t.Fatalf("layout not populated after View(); sidebarEnd=%d msgEnd=%d",
-			a.layoutSidebarEnd, a.layoutMsgEnd)
+			a.layout.sidebarEnd, a.layout.msgEnd)
 	}
 
 	fetchedCh := ""
 	fetchedTS := ""
-	a.SetThreadFetcher(func(channelID, threadTS string) tea.Msg {
-		fetchedCh = channelID
-		fetchedTS = threadTS
-		return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: nil}
+	a.setThreadFetcherForTest(func(channelID ids.ChannelID, threadTS ids.ThreadTS) tea.Msg {
+		fetchedCh = string(channelID)
+		fetchedTS = string(threadTS)
+		return ThreadRepliesLoadedMsg{ThreadTS: string(threadTS), Replies: nil}
 	})
 	summaries := []cache.ThreadSummary{
 		{ChannelID: "C_A", ThreadTS: "1.0", ParentTS: "1.0", ParentText: "alpha"},
@@ -772,7 +771,7 @@ func TestApp_ClickOnThreadInThreadsViewOpensIt(t *testing.T) {
 	// cardStride=4 and cardContentLines=3, absLine=4 lies on the
 	// first row of card 1 (rows 0-2 = card 0, row 3 = separator,
 	// rows 4-6 = card 1).
-	clickX := a.layoutSidebarEnd + 5 // anywhere inside the msg pane zone
+	clickX := a.layout.sidebarEnd + 5 // anywhere inside the msg pane zone
 	clickY := 5
 	fetchedCh, fetchedTS = "", ""
 	_, cmd := a.Update(tea.MouseClickMsg{X: clickX, Y: clickY, Button: tea.MouseLeft})
@@ -808,10 +807,10 @@ func TestApp_HandleEnterInThreadsViewOpensSelectedThread(t *testing.T) {
 
 	fetchedCh := ""
 	fetchedTS := ""
-	app.SetThreadFetcher(func(channelID, threadTS string) tea.Msg {
-		fetchedCh = channelID
-		fetchedTS = threadTS
-		return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: nil}
+	app.setThreadFetcherForTest(func(channelID ids.ChannelID, threadTS ids.ThreadTS) tea.Msg {
+		fetchedCh = string(channelID)
+		fetchedTS = string(threadTS)
+		return ThreadRepliesLoadedMsg{ThreadTS: string(threadTS), Replies: nil}
 	})
 
 	// Seed the channel messages pane with a message highlighted at
@@ -872,9 +871,9 @@ func TestApp_OpenSelectedThreadDedups(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"
 	fetched := 0
-	app.SetThreadFetcher(func(channelID, threadTS string) tea.Msg {
+	app.setThreadFetcherForTest(func(channelID ids.ChannelID, threadTS ids.ThreadTS) tea.Msg {
 		fetched++
-		return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: nil}
+		return ThreadRepliesLoadedMsg{ThreadTS: string(threadTS), Replies: nil}
 	})
 	summaries := []cache.ThreadSummary{
 		{ChannelID: "C1", ThreadTS: "1.0"},
@@ -942,9 +941,9 @@ func TestApp_NewThreadReplyTriggersDirtyMsg(t *testing.T) {
 	app.threadsDirtyDebounce = 5 * time.Millisecond
 
 	fetched := make(chan string, 4)
-	app.SetThreadsListFetcher(func(teamID string) tea.Msg {
-		fetched <- teamID
-		return ThreadsListLoadedMsg{TeamID: teamID, Summaries: nil}
+	app.setThreadsListFetcherForTest(func(teamID ids.TeamID) tea.Msg {
+		fetched <- string(teamID)
+		return ThreadsListLoadedMsg{TeamID: string(teamID), Summaries: nil}
 	})
 
 	// Activate threads view; drain the resulting initial fetch so it
@@ -1009,9 +1008,9 @@ func TestApp_NewMessageWithoutThreadTSDoesNotTriggerDirty(t *testing.T) {
 	app.threadsDirtyDebounce = 5 * time.Millisecond
 
 	fetched := make(chan struct{}, 4)
-	app.SetThreadsListFetcher(func(teamID string) tea.Msg {
+	app.setThreadsListFetcherForTest(func(teamID ids.TeamID) tea.Msg {
 		fetched <- struct{}{}
-		return ThreadsListLoadedMsg{TeamID: teamID, Summaries: nil}
+		return ThreadsListLoadedMsg{TeamID: string(teamID), Summaries: nil}
 	})
 
 	// Top-level message (no ThreadTS) should NOT schedule any dirty fetch.
@@ -1045,9 +1044,9 @@ func TestApp_NewMessageWithoutThreadTSDoesNotTriggerDirty(t *testing.T) {
 func TestApp_WorkspaceReadyTriggersThreadsListFetch(t *testing.T) {
 	app := NewApp()
 	fetched := make(chan string, 1)
-	app.SetThreadsListFetcher(func(teamID string) tea.Msg {
-		fetched <- teamID
-		return ThreadsListLoadedMsg{TeamID: teamID, Summaries: nil}
+	app.setThreadsListFetcherForTest(func(teamID ids.TeamID) tea.Msg {
+		fetched <- string(teamID)
+		return ThreadsListLoadedMsg{TeamID: string(teamID), Summaries: nil}
 	})
 
 	_, cmd := app.Update(WorkspaceReadyMsg{
@@ -1102,8 +1101,8 @@ func TestApp_InsertInThreadsViewFocusesThreadCompose(t *testing.T) {
 
 func TestApp_BackgroundWorkspaceReadyDoesNotClobberActiveState(t *testing.T) {
 	app := NewApp()
-	app.SetThreadsListFetcher(func(teamID string) tea.Msg {
-		return ThreadsListLoadedMsg{TeamID: teamID, Summaries: nil}
+	app.setThreadsListFetcherForTest(func(teamID ids.TeamID) tea.Msg {
+		return ThreadsListLoadedMsg{TeamID: string(teamID), Summaries: nil}
 	})
 
 	// Make T1 the active workspace by sending the first WorkspaceReadyMsg.
@@ -1155,9 +1154,9 @@ func TestApp_WorkspaceSwitchedTriggersThreadsListFetchAndSelectsThreadsRow(t *te
 	}
 
 	fetched := make(chan string, 1)
-	app.SetThreadsListFetcher(func(teamID string) tea.Msg {
-		fetched <- teamID
-		return ThreadsListLoadedMsg{TeamID: teamID, Summaries: nil}
+	app.setThreadsListFetcherForTest(func(teamID ids.TeamID) tea.Msg {
+		fetched <- string(teamID)
+		return ThreadsListLoadedMsg{TeamID: string(teamID), Summaries: nil}
 	})
 
 	_, cmd := app.Update(WorkspaceSwitchedMsg{
@@ -1204,7 +1203,7 @@ func TestApp_ThreadReplySentOptimisticallyAddsToThreadPanel(t *testing.T) {
 	if got := app.threadPanel.ReplyCount(); got != 1 {
 		t.Fatalf("expected 1 reply added optimistically, got %d", got)
 	}
-	if !app.isSelfSent("1700000050.000400") {
+	if !app.selfSend.IsSelfSent("1700000050.000400") {
 		t.Errorf("expected TS to be recorded as self-sent for echo dedup")
 	}
 }
@@ -1316,7 +1315,7 @@ func TestApp_MessageSentOptimisticallyAppendsToMessagepane(t *testing.T) {
 	if app.messagepane.Version() == beforeVer {
 		t.Errorf("expected messagepane version to advance after optimistic append")
 	}
-	if !app.isSelfSent("1700000999.000001") {
+	if !app.selfSend.IsSelfSent("1700000999.000001") {
 		t.Errorf("expected TS to be recorded for echo dedup")
 	}
 }
@@ -1401,7 +1400,7 @@ func TestApp_HalfPageScrollMovesViewportNotSelection(t *testing.T) {
 	}
 	app.messagepane.SetMessages(items)
 	// Provide a sane layout so halfPageSize() returns > 1.
-	app.layoutMsgHeight = 20
+	app.layout.msgHeight = 20
 	// Force one render so yOffset snaps to keep the bottom selection visible
 	// (SetMessages defaults selection to the last message). Without this,
 	// yOffset is still 0 and ScrollUp would clamp with no observable effect.
@@ -2478,10 +2477,10 @@ func TestPreviewOverlay_EscClosesAndNils(t *testing.T) {
 	// is acceptable for this test since we never call View(); the close
 	// path doesn't touch the renderer.
 	p := imgpkg.NewPreview(imgpkg.PreviewInput{Name: "x.png"})
-	app.previewOverlay = &p
+	app.preview.overlay = &p
 
 	_, _ = app.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	if app.previewOverlay != nil {
+	if app.preview.overlay != nil {
 		t.Fatal("Esc should clear previewOverlay")
 	}
 }
@@ -2492,10 +2491,10 @@ func TestPreviewOverlay_EscClosesAndNils(t *testing.T) {
 func TestPreviewOverlay_QClosesAndNils(t *testing.T) {
 	app := NewApp()
 	p := imgpkg.NewPreview(imgpkg.PreviewInput{Name: "x.png"})
-	app.previewOverlay = &p
+	app.preview.overlay = &p
 
 	_, _ = app.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
-	if app.previewOverlay != nil {
+	if app.preview.overlay != nil {
 		t.Fatal("q should clear previewOverlay")
 	}
 	if app.confirmPrompt.IsVisible() {
@@ -2510,10 +2509,10 @@ func TestPreviewOverlay_QClosesAndNils(t *testing.T) {
 func TestPreviewOverlay_EnterClosesAndReturnsCmd(t *testing.T) {
 	app := NewApp()
 	p := imgpkg.NewPreview(imgpkg.PreviewInput{Name: "x.png", Path: "/tmp/x.png"})
-	app.previewOverlay = &p
+	app.preview.overlay = &p
 
 	_, cmd := app.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if app.previewOverlay != nil {
+	if app.preview.overlay != nil {
 		t.Fatal("Enter should clear previewOverlay")
 	}
 	if cmd == nil {
@@ -2541,10 +2540,10 @@ func TestPreviewOverlay_OtherKeysSwallowed(t *testing.T) {
 	}
 
 	p := imgpkg.NewPreview(imgpkg.PreviewInput{Name: "x.png"})
-	app.previewOverlay = &p
+	app.preview.overlay = &p
 
 	_, _ = app.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
-	if app.previewOverlay == nil {
+	if app.preview.overlay == nil {
 		t.Fatal("j must NOT close the preview overlay")
 	}
 	afterIdx := -1
@@ -3231,7 +3230,7 @@ func TestChannelSelectedRendersFromCacheWithoutSpinner(t *testing.T) {
 	cachedItems := []messages.MessageItem{
 		{TS: "1.0", UserID: "U1", UserName: "alice", Text: "from cache"},
 	}
-	app.SetChannelCacheReader(func(channelID string) []messages.MessageItem {
+	app.setChannelCacheReaderForTest(func(channelID ids.ChannelID) []messages.MessageItem {
 		if channelID == "C1" {
 			return cachedItems
 		}
@@ -3239,11 +3238,11 @@ func TestChannelSelectedRendersFromCacheWithoutSpinner(t *testing.T) {
 	})
 	// Land in Tier 2 (cache rendered + fetcher fires): synced 2 minutes
 	// ago is >30s (not Tier 1) and <5min (not Tier 3).
-	app.SetChannelSyncedAtReader(func(string) int64 { return time.Now().Unix() - 120 })
+	app.setChannelSyncedAtReaderForTest(func(ids.ChannelID) int64 { return time.Now().Unix() - 120 })
 	fetcherCalled := false
-	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
+	app.setChannelFetcherForTest(func(channelID ids.ChannelID, channelName string) tea.Msg {
 		fetcherCalled = true
-		return MessagesLoadedMsg{ChannelID: channelID, Messages: nil}
+		return MessagesLoadedMsg{ChannelID: string(channelID), Messages: nil}
 	})
 
 	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
@@ -3280,16 +3279,16 @@ func TestMessagesLoadedNilDoesNotClobberCachedView(t *testing.T) {
 	cachedItems := []messages.MessageItem{
 		{TS: "1.0", UserID: "U1", UserName: "alice", Text: "from cache"},
 	}
-	app.SetChannelCacheReader(func(channelID string) []messages.MessageItem {
+	app.setChannelCacheReaderForTest(func(channelID ids.ChannelID) []messages.MessageItem {
 		return cachedItems
 	})
 	// Tier 2: cache renders + fetcher fires (the network failure path
 	// under test happens after both).
-	app.SetChannelSyncedAtReader(func(string) int64 { return time.Now().Unix() - 120 })
-	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
+	app.setChannelSyncedAtReaderForTest(func(ids.ChannelID) int64 { return time.Now().Unix() - 120 })
+	app.setChannelFetcherForTest(func(channelID ids.ChannelID, channelName string) tea.Msg {
 		// Simulate a network failure by returning the same shape the
 		// real fetcher uses on error.
-		return MessagesLoadedMsg{ChannelID: channelID, Messages: nil}
+		return MessagesLoadedMsg{ChannelID: string(channelID), Messages: nil}
 	})
 
 	// First: open the channel; cache fills the pane.
@@ -3327,9 +3326,9 @@ func TestMessagesLoadedEmptyClearsView(t *testing.T) {
 	cachedItems := []messages.MessageItem{
 		{TS: "1.0", UserID: "U1", UserName: "alice", Text: "stale cache"},
 	}
-	app.SetChannelCacheReader(func(channelID string) []messages.MessageItem { return cachedItems })
-	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
-		return MessagesLoadedMsg{ChannelID: channelID, Messages: []messages.MessageItem{}}
+	app.setChannelCacheReaderForTest(func(channelID ids.ChannelID) []messages.MessageItem { return cachedItems })
+	app.setChannelFetcherForTest(func(channelID ids.ChannelID, channelName string) tea.Msg {
+		return MessagesLoadedMsg{ChannelID: string(channelID), Messages: []messages.MessageItem{}}
 	})
 	app.activeChannelID = "C1"
 	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
@@ -3348,9 +3347,9 @@ func TestMessagesLoadedEmptyClearsView(t *testing.T) {
 // back to the loading spinner while the network fetch is in flight.
 func TestChannelSelectedFallsBackToSpinnerOnCacheMiss(t *testing.T) {
 	app := NewApp()
-	app.SetChannelCacheReader(func(channelID string) []messages.MessageItem { return nil })
-	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
-		return MessagesLoadedMsg{ChannelID: channelID, Messages: nil}
+	app.setChannelCacheReaderForTest(func(channelID ids.ChannelID) []messages.MessageItem { return nil })
+	app.setChannelFetcherForTest(func(channelID ids.ChannelID, channelName string) tea.Msg {
+		return MessagesLoadedMsg{ChannelID: string(channelID), Messages: nil}
 	})
 
 	app.Update(ChannelSelectedMsg{ID: "C2", Name: "alerts", Type: "channel"})
@@ -3368,9 +3367,9 @@ func TestChannelSelectedFallsBackToSpinnerOnCacheMiss(t *testing.T) {
 // intermediate empty-state flash.
 func TestWorkspaceSwitchedQueuesChannelSelected(t *testing.T) {
 	app := NewApp()
-	app.SetChannelCacheReader(func(channelID string) []messages.MessageItem { return nil })
-	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
-		return MessagesLoadedMsg{ChannelID: channelID, Messages: nil}
+	app.setChannelCacheReaderForTest(func(channelID ids.ChannelID) []messages.MessageItem { return nil })
+	app.setChannelFetcherForTest(func(channelID ids.ChannelID, channelName string) tea.Msg {
+		return MessagesLoadedMsg{ChannelID: string(channelID), Messages: nil}
 	})
 
 	_, cmd := app.Update(WorkspaceSwitchedMsg{
@@ -3432,9 +3431,9 @@ func TestWorkspaceSwitchedEmptyClearsPane(t *testing.T) {
 // it clears the messagepane to avoid an empty-state flash.
 func TestWorkspaceReadyFirstChannelSetsLoading(t *testing.T) {
 	app := NewApp()
-	app.SetChannelCacheReader(func(channelID string) []messages.MessageItem { return nil })
-	app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
-		return MessagesLoadedMsg{ChannelID: channelID, Messages: nil}
+	app.setChannelCacheReaderForTest(func(channelID ids.ChannelID) []messages.MessageItem { return nil })
+	app.setChannelFetcherForTest(func(channelID ids.ChannelID, channelName string) tea.Msg {
+		return MessagesLoadedMsg{ChannelID: string(channelID), Messages: nil}
 	})
 
 	app.Update(WorkspaceReadyMsg{
@@ -3454,8 +3453,8 @@ func TestChannelSelectedInvokesVisitRecorder(t *testing.T) {
 	app.activeTeamID = "T1"
 
 	var recorded []string
-	app.SetChannelVisitRecorder(func(channelID string) {
-		recorded = append(recorded, channelID)
+	app.setChannelVisitRecorderForTest(func(channelID ids.ChannelID) {
+		recorded = append(recorded, string(channelID))
 	})
 
 	// Dispatch a ChannelSelectedMsg. The handler should call the recorder.
@@ -3471,8 +3470,8 @@ func TestChannelSelectedFromHistoryStillRecordsVisit(t *testing.T) {
 	app.activeTeamID = "T1"
 
 	var recorded []string
-	app.SetChannelVisitRecorder(func(channelID string) {
-		recorded = append(recorded, channelID)
+	app.setChannelVisitRecorderForTest(func(channelID ids.ChannelID) {
+		recorded = append(recorded, string(channelID))
 	})
 
 	// Even when synthesized by back/forward (FromHistory: true),
@@ -3492,7 +3491,7 @@ func TestNavStackPushOnChannelSelected(t *testing.T) {
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C2", Name: "b", Type: "channel"})
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C3", Name: "c", Type: "channel"})
 
-	stack := app.navHistory["T1"]
+	stack := app.navHistory.Stack("T1")
 	if stack == nil {
 		t.Fatal("expected nav stack for T1 to exist")
 	}
@@ -3513,7 +3512,7 @@ func TestNavStackDedupesConsecutive(t *testing.T) {
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"}) // re-select same
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C2", Name: "b", Type: "channel"})
 
-	stack := app.navHistory["T1"]
+	stack := app.navHistory.Stack("T1")
 	want := []string{"C1", "C2"}
 	if !reflect.DeepEqual(stack.entries, want) {
 		t.Errorf("entries: want %v, got %v", want, stack.entries)
@@ -3534,11 +3533,11 @@ func TestNavStackForwardTruncationOnNewVisit(t *testing.T) {
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C", Name: "c", Type: "channel"})
 
 	// Simulate a back step (cursor moves but entries don't change).
-	app.navHistory["T1"].cursor = 1
+	app.navHistory.Stack("T1").cursor = 1
 
 	_, _ = app.Update(ChannelSelectedMsg{ID: "D", Name: "d", Type: "channel"})
 
-	stack := app.navHistory["T1"]
+	stack := app.navHistory.Stack("T1")
 	want := []string{"A", "B", "D"}
 	if !reflect.DeepEqual(stack.entries, want) {
 		t.Errorf("entries: want %v, got %v", want, stack.entries)
@@ -3555,7 +3554,7 @@ func TestNavStackCapAt50EvictsOldest(t *testing.T) {
 	for i := 0; i < 60; i++ {
 		_, _ = app.Update(ChannelSelectedMsg{ID: fmt.Sprintf("C%d", i), Name: "x", Type: "channel"})
 	}
-	stack := app.navHistory["T1"]
+	stack := app.navHistory.Stack("T1")
 	if len(stack.entries) != 50 {
 		t.Errorf("len: want 50, got %d", len(stack.entries))
 	}
@@ -3578,8 +3577,8 @@ func TestNavStackPerWorkspaceIsolation(t *testing.T) {
 	app.activeTeamID = "T2"
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C2", Name: "b", Type: "channel"})
 
-	t1 := app.navHistory["T1"]
-	t2 := app.navHistory["T2"]
+	t1 := app.navHistory.Stack("T1")
+	t2 := app.navHistory.Stack("T2")
 	if t1 == nil || t2 == nil {
 		t.Fatalf("expected both stacks to exist; t1=%v t2=%v", t1, t2)
 	}
@@ -3601,7 +3600,7 @@ func TestNavStackFromHistoryDoesNotPush(t *testing.T) {
 	// FromHistory navigation should NOT grow the stack.
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel", FromHistory: true})
 
-	stack := app.navHistory["T1"]
+	stack := app.navHistory.Stack("T1")
 	if !reflect.DeepEqual(stack.entries, []string{"C1", "C2"}) {
 		t.Errorf("entries should be unchanged; got %v", stack.entries)
 	}
@@ -3613,8 +3612,8 @@ func TestNavStackFromHistoryDoesNotPush(t *testing.T) {
 func TestNavigateBackEmitsChannelSelectedMsg(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"
-	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
-		return channelID + "-name", "channel", true
+	app.setChannelLookupFuncForTest(func(channelID ids.ChannelID) (string, string, bool) {
+		return string(channelID) + "-name", "channel", true
 	})
 
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
@@ -3635,21 +3634,21 @@ func TestNavigateBackEmitsChannelSelectedMsg(t *testing.T) {
 	if !cs.FromHistory {
 		t.Error("FromHistory must be true on synthesized navigation")
 	}
-	if app.navHistory["T1"].cursor != 0 {
-		t.Errorf("cursor: want 0, got %d", app.navHistory["T1"].cursor)
+	if app.navHistory.Stack("T1").cursor != 0 {
+		t.Errorf("cursor: want 0, got %d", app.navHistory.Stack("T1").cursor)
 	}
 }
 
 func TestNavigateForwardEmitsChannelSelectedMsg(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"
-	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
-		return channelID + "-name", "channel", true
+	app.setChannelLookupFuncForTest(func(channelID ids.ChannelID) (string, string, bool) {
+		return string(channelID) + "-name", "channel", true
 	})
 
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C2", Name: "b", Type: "channel"})
-	app.navHistory["T1"].cursor = 0 // simulate one back
+	app.navHistory.Stack("T1").cursor = 0 // simulate one back
 
 	cmd := app.navigateForward()
 	if cmd == nil {
@@ -3666,16 +3665,16 @@ func TestNavigateForwardEmitsChannelSelectedMsg(t *testing.T) {
 	if !cs.FromHistory {
 		t.Error("FromHistory must be true on synthesized navigation")
 	}
-	if app.navHistory["T1"].cursor != 1 {
-		t.Errorf("cursor: want 1, got %d", app.navHistory["T1"].cursor)
+	if app.navHistory.Stack("T1").cursor != 1 {
+		t.Errorf("cursor: want 1, got %d", app.navHistory.Stack("T1").cursor)
 	}
 }
 
 func TestNavigateBackAtStartIsNoop(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"
-	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
-		return channelID, "channel", true
+	app.setChannelLookupFuncForTest(func(channelID ids.ChannelID) (string, string, bool) {
+		return string(channelID), "channel", true
 	})
 
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
@@ -3689,8 +3688,8 @@ func TestNavigateBackAtStartIsNoop(t *testing.T) {
 func TestNavigateForwardAtEndIsNoop(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"
-	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
-		return channelID, "channel", true
+	app.setChannelLookupFuncForTest(func(channelID ids.ChannelID) (string, string, bool) {
+		return string(channelID), "channel", true
 	})
 
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
@@ -3706,11 +3705,11 @@ func TestNavigateBackSkipsStaleAndDropsThem(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"
 	// Lookup says "C2 is gone, others valid".
-	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
-		if channelID == "C2" {
+	app.setChannelLookupFuncForTest(func(channelID ids.ChannelID) (string, string, bool) {
+		if channelID == ids.ChannelID("C2") {
 			return "", "", false
 		}
-		return channelID, "channel", true
+		return string(channelID), "channel", true
 	})
 
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
@@ -3731,7 +3730,7 @@ func TestNavigateBackSkipsStaleAndDropsThem(t *testing.T) {
 		t.Errorf("want ID=C1 (skipping stale C2), got %q", cs.ID)
 	}
 	// C2 must have been dropped from entries.
-	stack := app.navHistory["T1"]
+	stack := app.navHistory.Stack("T1")
 	for _, id := range stack.entries {
 		if id == "C2" {
 			t.Errorf("stale C2 should have been dropped from entries; got %v", stack.entries)
@@ -3742,8 +3741,8 @@ func TestNavigateBackSkipsStaleAndDropsThem(t *testing.T) {
 func TestCtrlHTriggersNavBack(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"
-	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
-		return channelID, "channel", true
+	app.setChannelLookupFuncForTest(func(channelID ids.ChannelID) (string, string, bool) {
+		return string(channelID), "channel", true
 	})
 
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
@@ -3766,13 +3765,13 @@ func TestCtrlHTriggersNavBack(t *testing.T) {
 func TestCtrlKTriggersNavForward(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"
-	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
-		return channelID, "channel", true
+	app.setChannelLookupFuncForTest(func(channelID ids.ChannelID) (string, string, bool) {
+		return string(channelID), "channel", true
 	})
 
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
 	_, _ = app.Update(ChannelSelectedMsg{ID: "C2", Name: "b", Type: "channel"})
-	app.navHistory["T1"].cursor = 0
+	app.navHistory.Stack("T1").cursor = 0
 
 	cmd := app.handleNormalMode(tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
 	if cmd == nil {
@@ -3920,17 +3919,17 @@ func drainAllCmds(t *testing.T, cmd tea.Cmd) {
 func TestChannelSelected_Tier1_RenderCacheNoFetch(t *testing.T) {
 	app := NewApp()
 	now := time.Now().Unix()
-	app.SetChannelSyncedAtReader(func(id string) int64 { return now - 10 })
-	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+	app.setChannelSyncedAtReaderForTest(func(id ids.ChannelID) int64 { return now - 10 })
+	app.setChannelCacheReaderForTest(func(id ids.ChannelID) []messages.MessageItem {
 		return []messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "hi"}}
 	})
 	fetchCalled := 0
-	app.SetChannelFetcher(func(id, name string) tea.Msg {
+	app.setChannelFetcherForTest(func(id ids.ChannelID, name string) tea.Msg {
 		fetchCalled++
-		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+		return MessagesLoadedMsg{ChannelID: string(id), Messages: nil}
 	})
 	markCalled := 0
-	app.SetChannelReadMarker(func(id, ts string) tea.Msg {
+	app.setChannelReadMarkerForTest(func(id ids.ChannelID, ts ids.MessageTS) tea.Msg {
 		markCalled++
 		return nil
 	})
@@ -3949,17 +3948,17 @@ func TestChannelSelected_Tier1_RenderCacheNoFetch(t *testing.T) {
 func TestChannelSelected_Tier2_CacheAndFetch(t *testing.T) {
 	app := NewApp()
 	now := time.Now().Unix()
-	app.SetChannelSyncedAtReader(func(id string) int64 { return now - 120 })
-	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+	app.setChannelSyncedAtReaderForTest(func(id ids.ChannelID) int64 { return now - 120 })
+	app.setChannelCacheReaderForTest(func(id ids.ChannelID) []messages.MessageItem {
 		return []messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "hi"}}
 	})
 	fetchCalled := 0
-	app.SetChannelFetcher(func(id, name string) tea.Msg {
+	app.setChannelFetcherForTest(func(id ids.ChannelID, name string) tea.Msg {
 		fetchCalled++
-		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+		return MessagesLoadedMsg{ChannelID: string(id), Messages: nil}
 	})
 	markCalled := 0
-	app.SetChannelReadMarker(func(id, ts string) tea.Msg {
+	app.setChannelReadMarkerForTest(func(id ids.ChannelID, ts ids.MessageTS) tea.Msg {
 		markCalled++
 		return nil
 	})
@@ -3977,14 +3976,14 @@ func TestChannelSelected_Tier2_CacheAndFetch(t *testing.T) {
 
 func TestChannelSelected_Tier3_SpinnerOnly(t *testing.T) {
 	app := NewApp()
-	app.SetChannelSyncedAtReader(func(id string) int64 { return 0 })
-	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+	app.setChannelSyncedAtReaderForTest(func(id ids.ChannelID) int64 { return 0 })
+	app.setChannelCacheReaderForTest(func(id ids.ChannelID) []messages.MessageItem {
 		return nil // no cache at all → genuine Tier 3
 	})
 	fetchCalled := 0
-	app.SetChannelFetcher(func(id, name string) tea.Msg {
+	app.setChannelFetcherForTest(func(id ids.ChannelID, name string) tea.Msg {
 		fetchCalled++
-		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+		return MessagesLoadedMsg{ChannelID: string(id), Messages: nil}
 	})
 
 	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
@@ -4005,13 +4004,13 @@ func TestChannelSelected_UnknownFreshnessWithCache_FallsToTier2(t *testing.T) {
 	// pane with a spinner.
 	app := NewApp()
 	// no SetChannelSyncedAtReader call — leaves it nil
-	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+	app.setChannelCacheReaderForTest(func(id ids.ChannelID) []messages.MessageItem {
 		return []messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "hi"}}
 	})
 	fetchCalled := 0
-	app.SetChannelFetcher(func(id, name string) tea.Msg {
+	app.setChannelFetcherForTest(func(id ids.ChannelID, name string) tea.Msg {
 		fetchCalled++
-		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+		return MessagesLoadedMsg{ChannelID: string(id), Messages: nil}
 	})
 
 	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
@@ -4107,9 +4106,9 @@ func TestChannelSelectedInvokesMembershipFetcher(t *testing.T) {
 	var mu sync.Mutex
 	var fetched []string
 	done := make(chan struct{}, 1)
-	app.SetChannelMembershipFetcher(func(channelID string) {
+	app.setChannelMembershipFetcherForTest(func(channelID ids.ChannelID) {
 		mu.Lock()
-		fetched = append(fetched, channelID)
+		fetched = append(fetched, string(channelID))
 		mu.Unlock()
 		done <- struct{}{}
 	})
@@ -4148,7 +4147,7 @@ func TestChannelSelectedReturnsPromptlyEvenIfFetcherBlocks(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"
 	release := make(chan struct{})
-	app.SetChannelMembershipFetcher(func(channelID string) {
+	app.setChannelMembershipFetcherForTest(func(channelID ids.ChannelID) {
 		// Simulate a slow fetcher (e.g., blocked on a network call
 		// or a blocking p.Send). Releases when the test allows.
 		<-release

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/gammons/slk/internal/ids"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/statusbar"
 )
@@ -57,7 +58,7 @@ func looksLikeSetClipboardMsg(m tea.Msg) (string, bool) {
 
 func TestApp_DragInMessagesEmitsClipboardAndToast(t *testing.T) {
 	a := newTestAppWithMessages(t)
-	pressX := a.layoutSidebarEnd + 2
+	pressX := a.layout.sidebarEnd + 2
 	// Terminal Y = 4 → panelAt subtracts the 1-row panel border to give
 	// pane-local y=3, which is past the chrome (header + separator =
 	// chromeHeight=2). Anything < 3 lands on the chrome and is a no-op.
@@ -100,7 +101,7 @@ func TestApp_DragInMessagesEmitsClipboardAndToast(t *testing.T) {
 
 func TestApp_PlainClickDoesNotCopy(t *testing.T) {
 	a := newTestAppWithMessages(t)
-	pressX := a.layoutSidebarEnd + 2
+	pressX := a.layout.sidebarEnd + 2
 	// Terminal Y past the chrome (panel border + 2-row chrome).
 	pressY := 4
 	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: pressY, Button: tea.MouseLeft})
@@ -125,13 +126,13 @@ func TestApp_PlainClickOnMessageOpensThread(t *testing.T) {
 
 	fetchedCh := ""
 	fetchedTS := ""
-	a.SetThreadFetcher(func(channelID, threadTS string) tea.Msg {
-		fetchedCh = channelID
-		fetchedTS = threadTS
-		return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: nil}
+	a.setThreadFetcherForTest(func(channelID ids.ChannelID, threadTS ids.ThreadTS) tea.Msg {
+		fetchedCh = string(channelID)
+		fetchedTS = string(threadTS)
+		return ThreadRepliesLoadedMsg{ThreadTS: string(threadTS), Replies: nil}
 	})
 
-	pressX := a.layoutSidebarEnd + 2
+	pressX := a.layout.sidebarEnd + 2
 	// pane-local y=3 (terminal y=4 minus 1-row panel border) lands on
 	// the first message row past the 2-row chrome. newTestAppWithMessages
 	// seeds 2 messages with selection at index 1 (the bottom message --
@@ -169,12 +170,12 @@ func TestApp_PlainClickOnChromeDoesNotOpenThread(t *testing.T) {
 	a.activeChannelID = "C1"
 
 	called := false
-	a.SetThreadFetcher(func(channelID, threadTS string) tea.Msg {
+	a.setThreadFetcherForTest(func(channelID ids.ChannelID, threadTS ids.ThreadTS) tea.Msg {
 		called = true
-		return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: nil}
+		return ThreadRepliesLoadedMsg{ThreadTS: string(threadTS), Replies: nil}
 	})
 
-	pressX := a.layoutSidebarEnd + 2
+	pressX := a.layout.sidebarEnd + 2
 	// pane-local y=0 (terminal y=1 minus 1-row panel border) lands on
 	// the channel header inside the messages pane chrome -- chrome
 	// occupies pane-local rows 0..chromeHeight-1.
@@ -203,12 +204,12 @@ func TestApp_DragDoesNotOpenThread(t *testing.T) {
 	a.activeChannelID = "C1"
 
 	called := false
-	a.SetThreadFetcher(func(channelID, threadTS string) tea.Msg {
+	a.setThreadFetcherForTest(func(channelID ids.ChannelID, threadTS ids.ThreadTS) tea.Msg {
 		called = true
-		return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: nil}
+		return ThreadRepliesLoadedMsg{ThreadTS: string(threadTS), Replies: nil}
 	})
 
-	pressX := a.layoutSidebarEnd + 2
+	pressX := a.layout.sidebarEnd + 2
 	pressY := 4
 	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: pressY, Button: tea.MouseLeft})
 	// Any motion between press and release flags a drag.
@@ -245,7 +246,7 @@ func TestApp_CopiedMsgShowsToastAndSchedulesClear(t *testing.T) {
 
 func TestApp_DragNearTopEdgeSchedulesAutoScroll(t *testing.T) {
 	a := newTestAppWithMessages(t)
-	pressX := a.layoutSidebarEnd + 2
+	pressX := a.layout.sidebarEnd + 2
 	// Press in the middle of the pane.
 	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: 5, Button: tea.MouseLeft})
 	// Move to row 1 (which is pane-local y=0 — the top edge).
@@ -268,7 +269,7 @@ func TestApp_DragNearTopEdgeSchedulesAutoScroll(t *testing.T) {
 
 func TestApp_AutoScrollTickRefreshesWhileEdgeHeld(t *testing.T) {
 	a := newTestAppWithMessages(t)
-	pressX := a.layoutSidebarEnd + 2
+	pressX := a.layout.sidebarEnd + 2
 	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: 5, Button: tea.MouseLeft})
 	_, _ = a.Update(tea.MouseMotionMsg{X: pressX, Y: 1, Button: tea.MouseLeft})
 	// First tick fires; while still at the top edge we expect another one.
@@ -290,7 +291,7 @@ func TestApp_AutoScrollTickRefreshesWhileEdgeHeld(t *testing.T) {
 
 func TestApp_AutoScrollStopsWhenCursorLeavesEdge(t *testing.T) {
 	a := newTestAppWithMessages(t)
-	pressX := a.layoutSidebarEnd + 2
+	pressX := a.layout.sidebarEnd + 2
 	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: 5, Button: tea.MouseLeft})
 	_, _ = a.Update(tea.MouseMotionMsg{X: pressX, Y: 1, Button: tea.MouseLeft})
 	// Move back to the middle.
@@ -306,7 +307,7 @@ func TestApp_AutoScrollStopsWhenCursorLeavesEdge(t *testing.T) {
 
 func TestApp_FocusNextClearsSelection(t *testing.T) {
 	a := newTestAppWithMessages(t)
-	pressX := a.layoutSidebarEnd + 2
+	pressX := a.layout.sidebarEnd + 2
 	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: 4, Button: tea.MouseLeft})
 	_, _ = a.Update(tea.MouseMotionMsg{X: pressX + 5, Y: 4, Button: tea.MouseLeft})
 	if !a.messagepane.HasSelection() {
@@ -320,7 +321,7 @@ func TestApp_FocusNextClearsSelection(t *testing.T) {
 
 func TestApp_SetModeInsertClearsSelection(t *testing.T) {
 	a := newTestAppWithMessages(t)
-	pressX := a.layoutSidebarEnd + 2
+	pressX := a.layout.sidebarEnd + 2
 	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: 4, Button: tea.MouseLeft})
 	_, _ = a.Update(tea.MouseMotionMsg{X: pressX + 5, Y: 4, Button: tea.MouseLeft})
 	if !a.messagepane.HasSelection() {
@@ -334,7 +335,7 @@ func TestApp_SetModeInsertClearsSelection(t *testing.T) {
 
 func TestApp_ToggleSidebarClearsSelection(t *testing.T) {
 	a := newTestAppWithMessages(t)
-	pressX := a.layoutSidebarEnd + 2
+	pressX := a.layout.sidebarEnd + 2
 	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: 4, Button: tea.MouseLeft})
 	_, _ = a.Update(tea.MouseMotionMsg{X: pressX + 5, Y: 4, Button: tea.MouseLeft})
 	a.ToggleSidebar()

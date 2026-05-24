@@ -5,14 +5,12 @@ import (
 	"context"
 	"fmt"
 	"image"
-	"image/color"
 	"log"
 	"mime"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -24,8 +22,8 @@ import (
 	"github.com/gammons/slk/internal/config"
 	"github.com/gammons/slk/internal/debuglog"
 	"github.com/gammons/slk/internal/emoji"
+	"github.com/gammons/slk/internal/ids"
 	imgpkg "github.com/gammons/slk/internal/image"
-	"github.com/gammons/slk/internal/slack/mrkdwn"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/channelpicker"
 	"github.com/gammons/slk/internal/ui/compose"
@@ -55,32 +53,6 @@ const (
 	PanelThread
 )
 
-// navStack is a per-workspace browser-style back/forward history of
-// channel IDs. cursor points at the current entry; len(entries)==0
-// is the empty state with cursor==-1.
-type navStack struct {
-	entries []string
-	cursor  int
-}
-
-// navStackMax caps the per-workspace history at 50 entries. When a
-// push would exceed the cap, the oldest entry is dropped and the
-// cursor is shifted accordingly.
-const navStackMax = 50
-
-// editState tracks an in-progress message edit. When active, the
-// channel or thread compose box is repurposed: its existing draft is
-// stashed, the message text seeded, and Enter submits an
-// EditMessageMsg instead of sending. Cancellation (Esc, channel
-// switch, panel switch, etc.) restores the stashed draft.
-type editState struct {
-	active       bool
-	channelID    string
-	ts           string
-	panel        Panel // PanelMessages or PanelThread
-	stashedDraft string
-}
-
 // View identifies which "page" the message pane is displaying. The default
 // is ViewChannels (a channel's message history); ViewThreads swaps the
 // pane's contents for the involved-threads list.
@@ -98,611 +70,11 @@ const (
 	cacheFreshThreshold = 30 * time.Second
 )
 
-// Messages sent between components
-type (
-	ChannelSelectedMsg struct {
-		ID   string
-		Name string
-		// Type is the channel type ("channel", "private", "dm",
-		// "group_dm"); used to render a type-aware glyph in the
-		// message-pane header and status bar. May be empty when
-		// callers don't yet know the type — the UI then falls
-		// back to a default `#` glyph.
-		Type string
-		// FromHistory marks navigations synthesized by Ctrl+H /
-		// Ctrl+K. The case ChannelSelectedMsg handler suppresses
-		// pushing onto navHistory when this is true so back/forward
-		// walks don't grow the stack on every step. Visit recording
-		// is unaffected — going back to a channel still updates its
-		// last-visited timestamp.
-		FromHistory bool
-	}
-	MessagesLoadedMsg struct {
-		ChannelID  string
-		Messages   []messages.MessageItem
-		LastReadTS string
-	}
-	OlderMessagesLoadedMsg struct {
-		ChannelID string
-		Messages  []messages.MessageItem
-	}
-	NewMessageMsg struct {
-		ChannelID string
-		Message   messages.MessageItem
-	}
-	SendMessageMsg struct {
-		ChannelID string
-		Text      string
-	}
-	ThreadOpenedMsg struct {
-		ChannelID string
-		ThreadTS  string
-		ParentMsg messages.MessageItem
-	}
-	ThreadRepliesLoadedMsg struct {
-		ThreadTS string
-		Replies  []messages.MessageItem
-	}
-	SendThreadReplyMsg struct {
-		ChannelID string
-		ThreadTS  string
-		Text      string
-	}
-	ThreadReplySentMsg struct {
-		ChannelID string
-		ThreadTS  string
-		LocalTS   string // optimistic-placeholder id; see MessageSentMsg.LocalTS
-		Message   messages.MessageItem
-	}
-	// ThreadReplySendFailedMsg is returned when chat.postMessage for a
-	// thread reply fails. Mirrors MessageSendFailedMsg.
-	ThreadReplySendFailedMsg struct {
-		ChannelID string
-		ThreadTS  string
-		LocalTS   string
-		Reason    string
-	}
-	// ThreadsViewActivatedMsg is dispatched when the user picks the
-	// synthetic Threads sidebar row. The App switches the message pane to
-	// the threads-list view and (re)fetches the involved-threads list.
-	ThreadsViewActivatedMsg struct{}
-	// ThreadsListLoadedMsg carries a freshly loaded list of involved-thread
-	// summaries for the named workspace. The App ignores it if it doesn't
-	// match the active team.
-	ThreadsListLoadedMsg struct {
-		TeamID    string
-		Summaries []cache.ThreadSummary
-		// SubscriptionsAvailable reflects whether the most recent
-		// runSubscriptionPhase succeeded in fetching the authoritative
-		// thread-subscription list. The threads view renders a banner
-		// when false (Task 10 wires the renderer).
-		SubscriptionsAvailable bool
-	}
-	// ThreadsListDirtyMsg is dispatched when something that could affect
-	// the involved-threads list has changed (new message, mention, etc.)
-	// and the list should be refetched. Ignored if not the active team.
-	ThreadsListDirtyMsg struct {
-		TeamID string
-	}
-	ConnectionStateMsg struct {
-		State int // 0=connecting, 1=connected, 2=disconnected
-	}
-	ReactionAddedMsg struct {
-		ChannelID string
-		MessageTS string
-		UserID    string
-		Emoji     string
-	}
-	ReactionRemovedMsg struct {
-		ChannelID string
-		MessageTS string
-		UserID    string
-		Emoji     string
-	}
-	ReactionSentMsg struct {
-		Err error
-	}
-	ChannelMarkedReadMsg struct {
-		ChannelID string
-	}
-	DMNameResolvedMsg struct {
-		ChannelID   string
-		DisplayName string
-		// IsBot is true when the resolved peer is a Slack app or bot.
-		// On first run (before the background users.list fetch has
-		// landed), bot DMs are initially classified as Type="dm" and
-		// the resolveUser path discovers the IsBot flag asynchronously
-		// via users.info. The App handler flips Type to "app" when
-		// this lands so the row hops into the Apps section live.
-		IsBot bool
-	}
-	// UserResolvedMsg arrives asynchronously after main.go's per-workspace
-	// userResolver completes a users.info round-trip for a previously-
-	// unknown message author. The handler patches the in-memory display
-	// name on the messagepane and threadPanel so rows authored by this
-	// user re-render with the real name on the next View().
-	UserResolvedMsg struct {
-		TeamID      string
-		UserID      string
-		DisplayName string
-		IsBot       bool
-	}
-	// UserExternalMsg flags a single user as external (Slack Connect /
-	// shared-channel guest). Emitted by the user-resolution path when a
-	// users.info response shows team_id != workspace TeamID. The App
-	// updates externalUsers and re-pushes user-list state to the pickers.
-	UserExternalMsg struct {
-		UserID     string
-		IsExternal bool
-	}
-	WorkspaceSwitchedMsg struct {
-		TeamID      string
-		TeamName    string
-		Theme       string // resolved theme name (per-workspace or global default)
-		Channels    []sidebar.ChannelItem
-		FinderItems []channelfinder.Item
-		UserNames   map[string]string
-		// ExternalUsers maps userID -> true for users this workspace
-		// considers Slack Connect / shared-channel guests. Hydrated from
-		// cache.User.IsExternal so the mention picker can flag externals
-		// at workspace-switch time, before any new userResolver lookups
-		// fire. Order matters: the App handler applies this BEFORE
-		// SetUserNames so the picker rebuild sees the external flags.
-		ExternalUsers map[string]bool
-		UserID        string
-		CustomEmoji   map[string]string
-		// SectionsProvider supplies Slack-native sidebar sections for this
-		// workspace. Nil means "use config-glob behavior" (the App's
-		// sidebar reverts to its existing name-keyed buckets).
-		SectionsProvider sidebar.SectionsProvider
-	}
-	// ReadStateChangedMsg is sent whenever the persistent read state changes,
-	// so panels that read from cache.GetWorkspaceReadState re-render.
-	// ChannelID may be "" if the change is multi-channel (e.g., batch update
-	// from reconnect catch-up).
-	ReadStateChangedMsg struct {
-		WorkspaceID string
-		ChannelID   string
-	}
-	// ConversationOpenedMsg is sent when Slack delivers an mpim_open,
-	// im_created, group_joined, or channel_joined event. The TeamID
-	// disambiguates events for inactive workspaces; only events whose
-	// TeamID matches the currently-active workspace mutate the live
-	// sidebar — others are persisted in the workspace's WorkspaceContext
-	// for when the user switches in.
-	ConversationOpenedMsg struct {
-		TeamID string
-		Item   sidebar.ChannelItem
-	}
-	// SectionsRefreshedMsg is sent when a workspace's Slack-native
-	// section state has mutated (via channel_section_* WS events) and
-	// the channel list needs to be re-bucketed in the sidebar. Channels
-	// carries a fresh slice with updated Section fields. The App only
-	// rebuckets if TeamID matches the active workspace; inactive
-	// workspaces have already been mutated in-place in their
-	// WorkspaceContext.
-	SectionsRefreshedMsg struct {
-		TeamID   string
-		Channels []sidebar.ChannelItem
-	}
-	// ChannelMembershipMsg is published by membership.Manager when a
-	// channel's member set has been loaded, updated by a delta event, or
-	// refreshed after a TTL miss / reconnect. MemberIDs is the full member
-	// list (not a delta). May be sent for non-active channels — the App
-	// forwards to both compose pickers, which gate on activeChannelID.
-	ChannelMembershipMsg struct {
-		ChannelID string
-		MemberIDs []string
-	}
-	WorkspaceReadyMsg struct {
-		TeamID      string
-		TeamName    string
-		Theme       string // resolved theme name (per-workspace or global default)
-		Channels    []sidebar.ChannelItem
-		FinderItems []channelfinder.Item
-		UserNames   map[string]string
-		// ExternalUsers maps userID -> true for users this workspace
-		// considers Slack Connect / shared-channel guests. Hydrated from
-		// cache.User.IsExternal so the mention picker can flag externals
-		// on startup, before any new userResolver lookups fire. Order
-		// matters: the App handler applies this BEFORE SetUserNames so
-		// the picker rebuild sees the external flags.
-		ExternalUsers map[string]bool
-		UserID        string
-		CustomEmoji   map[string]string
-		// SectionsProvider supplies Slack-native sidebar sections for this
-		// workspace. Nil means "use config-glob behavior" (the App's
-		// sidebar reverts to its existing name-keyed buckets).
-		SectionsProvider sidebar.SectionsProvider
-		// InitialActive is true for exactly one WorkspaceReadyMsg per
-		// program run: the workspace whose team ID matches the configured
-		// default_workspace, or — if no default is configured — the first
-		// workspace to successfully connect. main.go enforces the uniqueness
-		// via sync.Once + atomic router (Task 14). App's handler treats
-		// InitialActive=false as "workspace is up; threads-list kick only".
-		InitialActive bool
-	}
-	// CustomEmojisLoadedMsg is sent when a workspace's custom emoji list
-	// finishes loading in the background, after WorkspaceReadyMsg has
-	// already fired with whatever the goroutine had written so far. App
-	// refreshes the active compose's emoji entry list if this matches the
-	// active workspace.
-	CustomEmojisLoadedMsg struct {
-		TeamID      string
-		CustomEmoji map[string]string
-	}
-	WorkspaceFailedMsg struct {
-		TeamName string
-	}
-	// BrowseableChannelsLoadedMsg is sent after the background fetch of all
-	// public channels (including ones the user has not joined) completes.
-	// The Items have Joined=false; the App merges them into the channel
-	// finder for the matching workspace.
-	BrowseableChannelsLoadedMsg struct {
-		TeamID string
-		Items  []channelfinder.Item
-	}
-	SpinnerTickMsg    struct{}
-	LoadingTimeoutMsg struct{}
-	UserTypingMsg     struct {
-		ChannelID   string
-		UserID      string
-		WorkspaceID string
-	}
-	TypingExpiredMsg struct{}
-	PresenceChangeMsg struct {
-		UserID   string
-		Presence string
-	}
-	// StatusChangeMsg is sent when the authenticated user's own presence
-	// or DND state changes for any workspace. The App routes it to the
-	// status bar only when TeamID matches the active workspace; otherwise
-	// it just updates the App's per-workspace status cache.
-	StatusChangeMsg struct {
-		TeamID     string
-		Presence   string // "active" or "away"; "" means unknown/unchanged
-		DNDEnabled bool
-		DNDEndTS   time.Time
-	}
-	// ToastMsg sets a transient string in the status bar's toast slot. Used
-	// for short error notices (e.g. failed status change). Auto-clears after
-	// 3 seconds via a CopiedClearMsg tick scheduled by the App.
-	ToastMsg struct{ Text string }
-)
-
-type loadingEntry struct {
-	TeamName string
-	Status   string // "connecting", "ready", "failed"
-}
-
-// workspaceStatus caches the latest StatusChangeMsg per team so the
-// status bar can refresh on workspace switch without round-tripping.
-type workspaceStatus struct {
-	Presence   string
-	DNDEnabled bool
-	DNDEndTS   time.Time
-}
-
-// dragState captures an in-progress mouse drag for text selection. The
-// FSM lives in App.Update: MouseClickMsg seeds it, MouseMotionMsg
-// extends, MouseReleaseMsg finalizes (or clears it on a plain click).
-//
-// autoScrollActive is reserved for Task 9 (edge auto-scroll) and is
-// declared here so that future task can wire it in without re-touching
-// this struct definition.
-type dragState struct {
-	panel            Panel // PanelMessages or PanelThread; PanelWorkspace == idle
-	pressX, pressY   int
-	lastX, lastY     int
-	moved            bool
-	autoScrollActive bool
-	// clickedMessage is set on press when ClickAt on the messages pane
-	// reported a hit on a real message row (i.e. not chrome / empty
-	// space). MouseReleaseMsg consults it: a plain click (no motion)
-	// that landed on a message opens that message's thread, mirroring
-	// the Enter keypress. Cleared by clearing the whole dragState.
-	clickedMessage bool
-}
-
-// autoScrollTickMsg is dispatched by tea.Tick while a drag is held near
-// the top or bottom edge of a pane. Each tick scrolls the pane one line
-// in the indicated direction, extends the selection to the new lastY,
-// and (if still at an edge) schedules the next tick. The loop self-
-// terminates when the cursor leaves the edge or the drag ends.
-type autoScrollTickMsg struct{}
-
-// threadFetchDebounceMsg is delivered after the user's threadsview selection
-// stops moving for openThreadDebounceDelay. Carries the (channelID, threadTS,
-// generation) the user had selected at scheduling time; if the App's current
-// pendingThreadFetchGen has advanced past `gen`, the message is dropped — a
-// later j/k has scheduled a fresh fetch.
-type threadFetchDebounceMsg struct {
-	channelID string
-	threadTS  string
-	gen       uint64
-}
-
 // openThreadDebounceDelay is how long openSelectedThreadCmd waits after a
 // j/k key event before firing the conversations.replies HTTP call. Held-key
 // bursts coalesce into a single fetch against whichever row the cursor
 // finally lands on.
 const openThreadDebounceDelay = 200 * time.Millisecond
-
-// panelCache stores the fully-wrapped (border + exactSize) output of a panel
-// keyed on a tuple of inputs that affect its rendering. A cache hit returns
-// the previous frame's string verbatim; a miss recomputes and stores.
-//
-// layoutKey is a free-form int64 callers can use to encode focus state,
-// mode, theme version, and layout-toggle bits as a single comparable value.
-type panelCache struct {
-	output       string
-	panelVersion int64
-	width        int
-	height       int
-	layoutKey    int64
-	valid        bool
-}
-
-func (c *panelCache) hit(panelVersion int64, width, height int, layoutKey int64) bool {
-	return c.valid &&
-		c.panelVersion == panelVersion &&
-		c.width == width &&
-		c.height == height &&
-		c.layoutKey == layoutKey
-}
-
-func (c *panelCache) store(out string, panelVersion int64, width, height int, layoutKey int64) {
-	c.output = out
-	c.panelVersion = panelVersion
-	c.width = width
-	c.height = height
-	c.layoutKey = layoutKey
-	c.valid = true
-}
-
-func boolToInt(b bool) int64 {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-// SwitchWorkspaceFunc is called to switch the active workspace.
-type SwitchWorkspaceFunc func(teamID string) tea.Msg
-
-// ChannelFetchFunc is called when the user selects a channel.
-type ChannelFetchFunc func(channelID, channelName string) tea.Msg
-
-// ChannelCacheReadFunc is called synchronously when the user selects a
-// channel; it returns cached messages from local storage. Returning a
-// non-empty slice causes the messagepane to render immediately without
-// the loading spinner. Returning nil falls through to the network
-// fetcher.
-type ChannelCacheReadFunc func(channelID string) []messages.MessageItem
-
-// OlderMessagesFetchFunc is called when the user scrolls to the top of a channel.
-type OlderMessagesFetchFunc func(channelID, oldestTS string) tea.Msg
-
-// MessageSendFunc is called when the user sends a message. Returns a tea.Msg with the result.
-type MessageSendFunc func(channelID, text string) tea.Msg
-
-// MessageSentMsg is returned after a message is successfully sent.
-// LocalTS, if non-empty, identifies the optimistic placeholder added
-// when the user pressed Enter. The handler uses it to swap the
-// placeholder for the authoritative Message in place. LocalTS may be
-// empty for legacy/test callers that fire this message without a
-// preceding SendMessageMsg.
-type MessageSentMsg struct {
-	ChannelID string
-	LocalTS   string
-	Message   messages.MessageItem
-}
-
-// MessageSendFailedMsg is returned when chat.postMessage fails. The
-// App's handler removes the optimistic placeholder identified by
-// LocalTS (if any) and shows a toast.
-type MessageSendFailedMsg struct {
-	ChannelID string
-	LocalTS   string
-	Reason    string
-}
-
-// EditMessageMsg is emitted when the user submits an edit. App.Update
-// invokes the configured messageEditor and converts the result to
-// MessageEditedMsg.
-type EditMessageMsg struct {
-	ChannelID string
-	TS        string
-	NewText   string
-}
-
-// DeleteMessageMsg is emitted when the user confirms a delete.
-type DeleteMessageMsg struct {
-	ChannelID string
-	TS        string
-}
-
-// MessageEditedMsg carries the result of the chat.update API call.
-type MessageEditedMsg struct {
-	ChannelID string
-	TS        string
-	Err       error
-}
-
-// MessageDeletedMsg carries the result of the chat.delete API call.
-type MessageDeletedMsg struct {
-	ChannelID string
-	TS        string
-	Err       error
-}
-
-// MarkUnreadMsg requests the App to mark the given message as unread.
-// ThreadTS is "" for channel-level mark-unread; non-empty for thread-level
-// (in which case ChannelID is the parent channel and BoundaryTS is the
-// boundary within the thread). BoundaryTS is the ts that should become
-// the new last_read watermark — i.e., the ts of the message immediately
-// before the user's selection. UnreadCount is computed by the dispatcher
-// from the loaded buffer at press time and is forwarded to the sidebar
-// for an exact badge value (0 for thread-level, since the sidebar only
-// tracks channel-level unreads).
-type MarkUnreadMsg struct {
-	ChannelID   string
-	ThreadTS    string
-	BoundaryTS  string
-	UnreadCount int
-}
-
-// MessageMarkedUnreadMsg carries the result of a MarkUnreadFunc call.
-// On success Err is nil and the App's Update arm applies the local
-// state changes (move the unread boundary, update the sidebar badge,
-// flip the threads-view row, emit a toast). On error Err is populated
-// and the toast goes to the failure path; no local state mutates.
-type MessageMarkedUnreadMsg struct {
-	ChannelID   string
-	ThreadTS    string
-	BoundaryTS  string
-	UnreadCount int
-	Err         error
-}
-
-// ChannelMarkedRemoteMsg is dispatched by the WS event handler when
-// Slack pushes a channel_marked / im_marked / group_marked / mpim_marked
-// event (read state changed in another client, or via this client's own
-// mark echoing back). The handler has already persisted the new
-// last_read_ts to SQLite via cache.UpdateChannelReadState; the App's
-// Update arm only updates the UI. No toast.
-type ChannelMarkedRemoteMsg struct {
-	ChannelID   string
-	TS          string
-	UnreadCount int
-}
-
-// ThreadMarkedRemoteMsg is dispatched by the WS event handler when
-// Slack pushes a thread_marked event. Read=true means the thread is
-// now read (clear local boundary + threads-view row); Read=false means
-// it's unread.
-type ThreadMarkedRemoteMsg struct {
-	ChannelID string
-	ThreadTS  string
-	TS        string
-	Read      bool
-}
-
-// WSMessageDeletedMsg is dispatched by the RTM event handler when a
-// message_deleted event arrives. App.Update handles it by removing the
-// message from both panes and the cache.
-type WSMessageDeletedMsg struct {
-	ChannelID string
-	TS        string
-}
-
-// UploadProgressMsg is dispatched out-of-band by the uploader as
-// each file completes. App updates the status-bar toast.
-type UploadProgressMsg struct {
-	Done  int
-	Total int
-}
-
-// UploadResultMsg carries the final result of an upload batch.
-type UploadResultMsg struct {
-	Err error
-}
-
-// UploadFunc performs an upload of one or more files to a channel
-// (with optional thread). It returns a tea.Cmd whose terminal
-// message is UploadResultMsg; intermediate UploadProgressMsg events
-// are dispatched out-of-band via program.Send.
-type UploadFunc func(channelID, threadTS, caption string, attachments []compose.PendingAttachment) tea.Cmd
-
-// MessageEditFunc performs the chat.update API call. Returns a tea.Msg
-// (typically MessageEditedMsg) describing the result.
-type MessageEditFunc func(channelID, ts, newText string) tea.Msg
-
-// MessageDeleteFunc performs the chat.delete API call. Returns a tea.Msg
-// (typically MessageDeletedMsg) describing the result.
-type MessageDeleteFunc func(channelID, ts string) tea.Msg
-
-// MarkUnreadFunc performs the conversations.mark or
-// subscriptions.thread.mark HTTP call (with the rolled-back ts /
-// read=0 form), updates SQLite + in-memory caches if the call
-// succeeded, and returns a tea.Msg (typically MessageMarkedUnreadMsg)
-// describing the result. ThreadTS == "" means channel-level.
-type MarkUnreadFunc func(channelID, threadTS, boundaryTS string, unreadCount int) tea.Msg
-
-// ThreadFetchFunc is called when the user opens a thread.
-type ThreadFetchFunc func(channelID, threadTS string) tea.Msg
-
-// ThreadCacheReadFunc is called synchronously when a thread is opened;
-// returns cached replies (or nil) so the thread panel can populate
-// without waiting for the network. Returning a non-empty slice causes
-// the thread panel to render immediately; the subsequent network
-// response overwrites with authoritative data.
-type ThreadCacheReadFunc func(channelID, threadTS string) []messages.MessageItem
-
-// ThreadMarkFunc is called to mark a thread as read on Slack's servers
-// (subscriptions.thread.mark). channelID is the parent channel, threadTS
-// is the parent message ts, and ts is the latest reply ts the user has now
-// seen. Implementations should be best-effort and non-blocking.
-type ThreadMarkFunc func(channelID, threadTS, ts string)
-
-// ThreadReplySendFunc is called when the user sends a thread reply.
-type ThreadReplySendFunc func(channelID, threadTS, text string) tea.Msg
-
-// ThreadsListFetchFunc loads the involved-threads list for a workspace.
-// Returns the resulting tea.Msg (typically ThreadsListLoadedMsg).
-type ThreadsListFetchFunc func(teamID string) tea.Msg
-
-type ReactionAddFunc func(channelID, messageTS, emoji string) error
-type ReactionRemoveFunc func(channelID, messageTS, emoji string) error
-
-// PermalinkFetchFunc is called to fetch the Slack permalink for a message.
-// For thread replies, pass the reply's ts; Slack returns a thread-aware URL.
-type PermalinkFetchFunc func(ctx context.Context, channelID, ts string) (string, error)
-type FrecentLoadFunc func(limit int) []reactionpicker.EmojiEntry
-type FrecentRecordFunc func(emoji string)
-
-// TypingSendFunc is called to broadcast a typing indicator.
-type TypingSendFunc func(channelID string)
-
-// JoinChannelFunc is called to join a public channel by ID. Returns a tea.Msg
-// describing the result (typically ChannelJoinedMsg or ChannelJoinFailedMsg).
-type JoinChannelFunc func(channelID, channelName string) tea.Msg
-
-// ChannelVisitRecorder is invoked from case ChannelSelectedMsg to let
-// main.go persist the visit (SQLite write + in-memory map update on
-// the WorkspaceContext). Always called regardless of FromHistory.
-type ChannelVisitRecorder func(channelID string)
-
-// ChannelLookupFunc returns metadata for a channel that the App has
-// in its navigation history. Used by navigateBack / navigateForward
-// to skip stale entries (channels the user has left, archived, or
-// kicked from). Returns ok=false when the channel is no longer
-// available in the active workspace.
-type ChannelLookupFunc func(channelID string) (name, channelType string, ok bool)
-
-// ChannelJoinedMsg is sent after the user successfully joins a channel from
-// the channel finder. The App responds by adding the channel to the sidebar
-// (so it appears in the user's regular channel list), marking it as joined in
-// the finder, and switching to it.
-type ChannelJoinedMsg struct {
-	ID   string
-	Name string
-}
-
-// ChannelJoinFailedMsg is sent when the join API call fails.
-type ChannelJoinFailedMsg struct {
-	ID   string
-	Name string
-	Err  error
-}
-
-// clipboardReader abstracts clipboard.Read so tests can inject fake
-// clipboard contents. Production code uses the real clipboard.Read.
-type clipboardReader func(format clipboard.Format) []byte
-
-// defaultClipboardReader is the real clipboard read function. It's
-// overridable per-App via SetClipboardReader for tests.
-var defaultClipboardReader clipboardReader = clipboard.Read
 
 type App struct {
 	// Sub-models
@@ -730,61 +102,32 @@ type App struct {
 	height         int
 	keys           KeyMap
 
-	// Cached layout widths for mouse hit-testing
-	layoutRailWidth    int
-	layoutSidebarEnd   int // railWidth + sidebarWidth + sidebarBorder
-	layoutMsgEnd       int // layoutSidebarEnd + msgWidth + msgBorder
-	layoutThreadEnd    int // layoutMsgEnd + threadWidth + threadBorder
-	// Cached pane content heights, used for page-up/down distance calculations.
-	layoutMsgHeight     int
-	layoutSidebarHeight int
-	layoutThreadHeight  int
+	// layout owns the per-frame layout geometry (horizontal bands for
+	// mouse hit-testing + per-pane content heights for pageSize). See
+	// internal/ui/panellayout.go.
+	layout *panelLayout
 
-	// Per-panel render caches. Each panel exposes Version() that increments
-	// on any state change that could alter its View() output. The App caches
-	// the FULLY-WRAPPED panel output (panel.View + border + exactSize) keyed
-	// on (panelVersion, width, height, layoutKey). On compose keystrokes,
-	// only compose's version changes so all the other panels' wrapped
-	// outputs are reused -- saving the bulk of the per-keystroke render cost.
-	panelCacheRail     panelCache
-	panelCacheSidebar  panelCache
-	panelCacheMsgPanel panelCache // used by the threads-list view (no compose)
-	panelCacheMsgTop   panelCache // bordered messages region (channel view); compose+typing rendered fresh below
-	panelCacheThread   panelCache // used by the thread side panel's bordered top region
-	panelCacheStatus   panelCache
+	// renderCache aggregates the six per-panel render caches. See
+	// internal/ui/panelcache.go.
+	renderCache *panelRenderCache
 
 	// Current context
 	activeChannelID string
 	activeTeamID    string // workspace whose data is currently loaded into the side panels
 
-	// bootstrapActiveClaimed flips on the first WorkspaceReadyMsg whose
-	// InitialActive=true is observed. Subsequent InitialActive=true
-	// messages (defensive — main.go's sync.Once should prevent them) are
-	// ignored.
-	bootstrapActiveClaimed bool
-
 	// Callbacks
-	channelFetcher ChannelFetchFunc
-	// channelReadMarker fires Slack's MarkChannel + cache.UpdateChannelReadState
-	// for the given channel up to ts. Returns a tea.Msg (typically
-	// ChannelMarkedReadMsg). Wired in cmd/slk/main.go's wireCallbacks.
-	// Tier 1 of ChannelSelectedMsg (cache fresh, no GetHistory) uses this
-	// to keep mark-as-read working without firing the full fetcher.
-	channelReadMarker  func(channelID, ts string) tea.Msg
-	channelCacheReader ChannelCacheReadFunc
-	// channelSyncedAtReader returns the unix timestamp (seconds) at which
-	// the channel's cache was last authoritatively replaced from the
-	// network, or 0 if never. Used by ChannelSelectedMsg's three-tier
-	// dispatch to decide between cache-only, cache-and-verify, and
-	// spinner-only render. Nil reader defaults to 0 (spinner-only tier
-	// always).
-	channelSyncedAtReader func(channelID string) int64
-	olderMessagesFetcher  OlderMessagesFetchFunc
-	messageSender        MessageSendFunc
-	messageEditor        MessageEditFunc
-	messageDeleter       MessageDeleteFunc
-	messageMarkUnreader  MarkUnreadFunc
-	uploader             UploadFunc
+	// channels is the App's ChannelService collaborator (Slack
+	// channels API + local cache + session bookkeeping). See
+	// internal/ui/services.go. Defaulted to a no-op adapter in
+	// NewApp so call sites can dispatch without nil-checks.
+	channels ChannelService
+	// messages is the App's MessageService collaborator (send / edit /
+	// delete / mark-unread / permalink). See internal/ui/services.go.
+	// Defaulted to a no-op adapter in NewApp so call sites can dispatch
+	// without nil-checks.
+	messageSvc MessageService
+
+	uploader UploadFunc
 
 	// clipboardAvailable is set at startup based on the result of
 	// clipboard.Init(). When false, Ctrl+V smart-paste is a no-op.
@@ -794,16 +137,13 @@ type App struct {
 	// clipboard contents. Tests inject fakes via SetClipboardReader.
 	clipboardRead clipboardReader
 
-	threadFetcher        ThreadFetchFunc
-	threadCacheReader    ThreadCacheReadFunc
-	threadMarker         ThreadMarkFunc
-	threadReplySender    ThreadReplySendFunc
-	channelJoiner        JoinChannelFunc
-	threadsListFetcher   ThreadsListFetchFunc
-	// channelLastReadFetcher returns the parent channel's last_read_ts
-	// so the thread panel can render a "── new ──" boundary. Optional —
-	// when nil, the thread panel renders without an unread boundary.
-	channelLastReadFetcher func(channelID string) string
+	// threads is the App's ThreadService collaborator (fetch / mark /
+	// reply / list-fetch + parent-channel last-read lookup for the
+	// unread boundary). See internal/ui/services.go. Defaulted to a
+	// no-op adapter in NewApp so call sites can dispatch without
+	// nil-checks.
+	threads ThreadService
+
 	threadsDirtyDebounce time.Duration
 	fetchingOlder        bool
 
@@ -818,11 +158,6 @@ type App struct {
 	// resolved. Read by SetUserNames when building the mention-picker User
 	// slice so IsExternal is set on each entry.
 	externalUsers map[string]bool
-	// channelMembershipFetcher is invoked on every ChannelSelectedMsg to
-	// prompt the membership.Manager to ensure-fresh the new active channel.
-	// nil-safe.
-	channelMembershipFetcher func(channelID string)
-
 	// Last (channelID, threadTS) auto-opened from the threads view.
 	// openSelectedThreadCmd compares against these to dedup repeat calls
 	// (j/k keystrokes and ThreadsListLoadedMsg refreshes both fire
@@ -844,22 +179,16 @@ type App struct {
 	// Reaction picker
 	reactionPicker   *reactionpicker.Model
 	confirmPrompt    *confirmprompt.Model
-	reactionAddFn    ReactionAddFunc
-	reactionRemoveFn ReactionRemoveFunc
-	frecentLoadFn    FrecentLoadFunc
-	frecentRecordFn  FrecentRecordFunc
+	// reactions is the App's ReactionService collaborator (add/remove
+	// reactions on Slack + load/record frecent emoji history). See
+	// internal/ui/services.go. Defaulted to a no-op adapter in NewApp
+	// so call sites can dispatch without nil-checks.
+	reactions ReactionService
 	currentUserID    string
 
-	// editing tracks in-progress message edit state. See editState.
-	editing editState
-
-	// Permalink copying
-	permalinkFetchFn PermalinkFetchFunc
-
-	// Channel visit recording (persists SQLite + WorkspaceContext map)
-	channelVisitRecorder ChannelVisitRecorder
-
-	channelLookup ChannelLookupFunc
+	// editing tracks in-progress message edit state. See
+	// internal/ui/edit.go.
+	editing *editController
 
 	// Workspace switching
 	workspaceSwitcher SwitchWorkspaceFunc
@@ -873,68 +202,43 @@ type App struct {
 	// channel is no longer in the list.
 	lastChannelByTeam map[string]string
 
-	// navHistory holds the per-workspace ctrl+h / ctrl+k browser-style
-	// jump list. Lazy-initialized on first push for each team. Cleared
-	// only when slk exits — the stack is session-only by design.
-	navHistory map[string]*navStack
+	// navHistory owns the per-workspace ctrl+h / ctrl+k browser-style
+	// jump list. See internal/ui/navhistory.go. Lazy-initialized on
+	// first push for each team. Cleared only when slk exits — the
+	// stacks are session-only by design.
+	navHistory *navHistoryStore
 
 	// Theme switching
 	themeSaveFn    func(name string, scope themeswitcher.ThemeScope)
 	themeOverrides config.Theme
 
-	// Presence / DND status
-	presenceCustomBuf string                                              // numeric input buffer for custom snooze
-	statusByTeam      map[string]workspaceStatus                          // last known status per workspace
-	setStatusFn       func(action presencemenu.Action, snoozeMinutes int) // callback for API call
-	dndTickerOn       bool                                                // guards against parallel DNDTickMsg chains
+	// presence owns per-workspace presence/DND cache, the DND-tick
+	// guard, and the custom-snooze numeric input buffer. See
+	// internal/ui/presence.go.
+	presence *presenceController
+	// setStatusFn is the callback invoked when the user picks a presence-
+	// menu action; it runs the Slack API call for the active workspace.
+	// Wired by cmd/slk/main.go via SetStatusSetter.
+	setStatusFn func(action presencemenu.Action, snoozeMinutes int)
 
-	// Typing indicators
-	typingUsers    map[string]map[string]time.Time // channelID -> userID -> expiresAt
-	typingTickerOn bool
-	typingEnabled  bool
+	// typing owns both inbound typing-indicator state (other users
+	// typing in channels) and outbound typing-send throttle. See
+	// internal/ui/typing.go.
+	typing    *typingTracker
+	typingOut *typingBroadcaster
 
 	// mouseWheelLines is the number of lines the viewport scrolls per
 	// mouse-wheel notch. Plumbed from [appearance].mouse_wheel_lines.
 	// Falls back to 3 when unset (matches the pre-config behavior).
 	mouseWheelLines int
 
-	// Outbound typing
-	typingSendFn   TypingSendFunc
-	lastTypingSent time.Time
-
-	// Self-sent message TS dedup. When the user posts a message or thread
-	// reply, the chat.postMessage HTTP response (MessageSentMsg /
-	// ThreadReplySentMsg) is used for an optimistic UI update. The Slack
-	// WebSocket may also deliver an echo of the same TS later -- or, in
-	// the case of self-posted thread replies on the internal flannel
-	// protocol, may not deliver one at all. Recording our own TSes lets
-	// us skip the echo if it arrives, while not relying on it for
-	// correctness.
-	selfSentTSes map[string]time.Time // TS -> when recorded
-
-	// lastSelfSendByChannel records when the user last submitted a
-	// send/edit/reply for a channel via slk. We use this to suppress
-	// the Slack WS echo of slk-originated messages BEFORE the
-	// chat.postMessage HTTP response returns: without this, the WS
-	// echo (which carries Slack's normalised text — paragraph breaks
-	// flattened for rich_text_block messages) renders briefly as a
-	// single-line message, then flicker-replaces with the optimistic
-	// version that has the correctly-converted mrkdwn. See
-	// internal/ui/messages/model.go:UpsertSelfSent for the late-
-	// arrival fix; this map closes the early-arrival flicker window.
-	//
-	// Cross-session messages (sent from the official Slack client
-	// while slk is open) do NOT update this map and continue to
-	// display via the normal WS-echo path.
-	lastSelfSendByChannel map[string]time.Time
-
-	// localTSCounter is incremented per optimistic-placeholder message
-	// so each one carries a unique TS-shaped ("local:<counter>") id.
-	// SendMessageMsg / SendThreadReplyMsg use this to mint a placeholder
-	// id, then MessageSentMsg / ThreadReplySentMsg uses it to swap the
-	// placeholder for the authoritative Slack-assigned TS once the
-	// chat.postMessage HTTP response arrives.
-	localTSCounter uint64
+	// selfSend tracks slk-originated message sends so WS echoes can
+	// be suppressed (preventing the visible flicker between Slack's
+	// normalised echo text and the optimistic instant-display text).
+	// See internal/ui/selfsend.go. Used for both channel-level
+	// in-flight suppression (before chat.postMessage's response
+	// returns) and TS-level exact-match suppression (after).
+	selfSend *selfSendDedup
 
 	// nowTimestampFormatter renders "now" using the same format used
 	// for message timestamps elsewhere (configured via
@@ -945,14 +249,20 @@ type App struct {
 	// Falls back to time.Now().Format("3:04 PM") when unset.
 	nowTimestampFormatter func() string
 
-	// Loading overlay
-	loading       bool
-	loadingStates []loadingEntry
-	spinnerFrame  int
+	// bootstrap owns the multi-workspace startup overlay (loading flag,
+	// per-workspace status entries, initial-active claim guard, and the
+	// overlay's render). See internal/ui/bootstrap.go.
+	bootstrap *workspaceBootstrap
 
-	// Mouse drag selection FSM (set by MouseClickMsg, advanced by
-	// MouseMotionMsg, drained by MouseReleaseMsg).
-	drag dragState
+	// spinnerFrame is the global tick counter for the loading spinner
+	// glyph. Shared by the bootstrap overlay and the messages pane's
+	// in-channel load spinner; advanced by SpinnerTickMsg.
+	spinnerFrame int
+
+	// drag owns the mouse-drag selection FSM (set by MouseClickMsg,
+	// advanced by MouseMotionMsg, drained by MouseReleaseMsg). See
+	// internal/ui/drag.go.
+	drag *dragState
 
 	// imageFetcher is the inline-image fetcher shared with the messages
 	// pane; the App uses it to load the larger thumb when the user
@@ -964,56 +274,10 @@ type App struct {
 	// startup. Used to render the full-screen preview overlay.
 	imgProtocol imgpkg.Protocol
 
-	// previewOverlay holds the full-screen image preview state. nil when
-	// no preview is open. View() composes its output over the
-	// messages+thread region; key handling routes through it while
-	// non-nil.
-	previewOverlay *imgpkg.Preview
-	// previewSource records (channel, ts, attIdx) of the currently
-	// displayed image so h/l/arrow cycling can locate sibling
-	// attachments. Zero values when no preview is open.
-	previewChannel string
-	previewTS      string
-	previewAttIdx  int
-}
-
-// previewLoadedMsg is dispatched after a preview thumb has been fetched.
-// The receiver constructs (or, when isCycle is set, swaps the image of)
-// an imgpkg.Preview and stores it on the App.
-type previewLoadedMsg struct {
-	Name         string
-	FileID       string
-	Img          image.Image
-	Path         string
-	SiblingCount int
-	SiblingIndex int
-	// isCycle distinguishes a cycle (h/l/arrow) from a fresh open. On
-	// cycle we mutate the existing overlay rather than constructing a
-	// new one so transient state (e.g. position within wrap-around)
-	// stays coherent.
-	isCycle bool
-}
-
-// previewErrorMsg is dispatched if the preview fetch fails. The error
-// is logged; the overlay is not opened.
-type previewErrorMsg struct {
-	Err error
-}
-
-// previewSpinnerTickMsg drives the loading-state spinner animation.
-// While the preview overlay is open and in its loading state, the
-// Update arm advances the spinner frame and re-schedules another tick;
-// when the image lands (or the overlay closes), the chain stops.
-type previewSpinnerTickMsg struct{}
-
-// previewSpinnerTickInterval is the redraw cadence for the loading
-// spinner. 100ms feels alive without being a CPU hog.
-const previewSpinnerTickInterval = 100 * time.Millisecond
-
-func previewSpinnerTickCmd() tea.Cmd {
-	return tea.Tick(previewSpinnerTickInterval, func(time.Time) tea.Msg {
-		return previewSpinnerTickMsg{}
-	})
+	// preview owns the full-screen image preview overlay state
+	// (overlay + the channel/ts/attIdx triple that lets h/l/arrow
+	// cycling locate sibling attachments). See internal/ui/imagepreview.go.
+	preview *imagePreviewController
 }
 
 func NewApp() *App {
@@ -1038,18 +302,31 @@ func NewApp() *App {
 		sidebarVisible:       true,
 		view:                 ViewChannels,
 		keys:                 DefaultKeyMap(),
-		typingUsers:          make(map[string]map[string]time.Time),
-		selfSentTSes:         make(map[string]time.Time),
-		lastSelfSendByChannel: make(map[string]time.Time),
+		selfSend:             newSelfSendDedup(),
+		bootstrap:            newWorkspaceBootstrap(),
 		threadsDirtyDebounce: 150 * time.Millisecond,
 		mouseWheelLines:      3,
 		userNames:            map[string]string{},
 		externalUsers:        map[string]bool{},
-		statusByTeam:         map[string]workspaceStatus{},
+		presence:             newPresenceController(),
+		renderCache:          newPanelRenderCache(),
+		drag:                 newDragState(),
+		preview:              newImagePreviewController(),
+		layout:               newPanelLayout(),
+		reactions:            noopReactionService,
+		threads:              noopThreadService,
+		messageSvc:           noopMessageService,
+		channels:             noopChannelService,
 		lastChannelByTeam:    map[string]string{},
-		navHistory:           make(map[string]*navStack),
+		navHistory:           newNavHistoryStore(),
 		clipboardRead:        defaultClipboardReader,
 	}
+	app.editing = newEditController()
+	// typing tracker is referenced by typingOut so it must exist first;
+	// construct outside the literal because struct literals can't
+	// reference sibling fields.
+	app.typing = newTypingTracker()
+	app.typingOut = newTypingBroadcaster(app.typing)
 	// Seed the picker with built-in emojis so the autocomplete works even
 	// before the first workspace finishes loading customs.
 	app.compose.SetEmojiEntries(emoji.BuildEntries(nil))
@@ -1073,7 +350,7 @@ func NewApp() *App {
 }
 
 func (a *App) Init() tea.Cmd {
-	if a.loading {
+	if a.bootstrap.IsLoading() {
 		return tea.Batch(
 			tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
 				return SpinnerTickMsg{}
@@ -1089,6 +366,35 @@ func (a *App) Init() tea.Cmd {
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
+	// Phase 4 reducer chain (extension point — see internal/ui/reducers.go).
+	// Each reducer owns a cohesive family of message types and either
+	// claims the message (returning its cmd, true) or passes (nil,
+	// false). The first claimant short-circuits the rest of Update;
+	// unclaimed messages fall through to the residual switch below.
+	// Reducers are added to this chain one family at a time as the
+	// switch shrinks. Order doesn't matter semantically — message
+	// types are disjoint across reducers — but stable order keeps
+	// the trace predictable.
+	if cmd, handled := dispatchReducers(a, msg,
+		a.presence,
+		a.preview,
+		a.drag,
+		a.typing,
+		a.bootstrap,
+		reduceReactions,
+		reduceThreads,
+		reduceSend,
+		reduceChannels,
+		reduceWorkspace,
+		reduceIO,
+		reduceMouse,
+	); handled {
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return a, tea.Batch(cmds...)
+	}
+
 	// While the full-screen image preview overlay is open, route close
 	// and cycle keys directly:
 	//   - Esc/q: dismiss
@@ -1099,26 +405,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// doesn't leak through. Resize / mouse / async messages still flow
 	// normally so the rest of the UI keeps ticking — including the
 	// previewLoadedMsg arm that swaps the cycled image into place.
-	if a.previewOverlay != nil && !a.previewOverlay.IsClosed() {
+	if a.preview.Active() {
 		if km, ok := msg.(tea.KeyMsg); ok {
 			switch km.String() {
 			case "esc", "q":
-				a.previewOverlay.Close()
-				a.previewOverlay = nil
+				a.preview.Close()
 				return a, nil
 			case "enter":
-				path := a.previewOverlay.Path()
-				a.previewOverlay.Close()
-				a.previewOverlay = nil
+				path := a.preview.Overlay().Path()
+				a.preview.Close()
 				return a, openInSystemViewerCmd(path)
 			case "h", "left":
-				if a.previewOverlay.SiblingCount() > 1 {
-					return a, a.cycleImagePreviewCmd(a.previewChannel, a.previewTS, a.previewAttIdx, -1)
+				if a.preview.Overlay().SiblingCount() > 1 {
+					return a, a.cycleImagePreviewCmd(a.preview.Channel(), a.preview.TS(), a.preview.AttIdx(), -1)
 				}
 				return a, nil
 			case "l", "right":
-				if a.previewOverlay.SiblingCount() > 1 {
-					return a, a.cycleImagePreviewCmd(a.previewChannel, a.previewTS, a.previewAttIdx, +1)
+				if a.preview.Overlay().SiblingCount() > 1 {
+					return a, a.cycleImagePreviewCmd(a.preview.Channel(), a.preview.TS(), a.preview.AttIdx(), +1)
 				}
 				return a, nil
 			}
@@ -1138,1590 +442,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
-	case tea.MouseWheelMsg:
-		if a.loading {
-			break
-		}
-		// Wheel notches scroll the viewport of the panel under the cursor
-		// WITHOUT changing the current selection -- decoupled from j/k so a
-		// user can read past a long message or browse history without losing
-		// the selected/active item. Targets the panel under the cursor
-		// regardless of which panel currently has keyboard focus.
-		up := false
-		switch msg.Button {
-		case tea.MouseWheelUp:
-			up = true
-		case tea.MouseWheelDown:
-			up = false
-		default:
-			break
-		}
-		// Lines moved per wheel notch -- configured via
-		// [appearance].mouse_wheel_lines (default 3, matches typical
-		// terminal behavior). Single-row panes (sidebar) still feel fine
-		// because real-world workspace lists are short and the snap-back
-		// on the next j/k restores the previously-selected channel.
-		wheelLinesPerNotch := a.mouseWheelLines
-		if wheelLinesPerNotch < 1 {
-			wheelLinesPerNotch = 1
-		}
-		x := msg.X
-		switch {
-		case x < a.layoutRailWidth:
-			// Workspace rail: no scroll here.
-		case a.sidebarVisible && x < a.layoutSidebarEnd:
-			if up {
-				a.sidebar.ScrollUp(wheelLinesPerNotch)
-			} else {
-				a.sidebar.ScrollDown(wheelLinesPerNotch)
-			}
-		case x < a.layoutMsgEnd:
-			if a.view == ViewThreads {
-				if up {
-					a.threadsView.ScrollUp(wheelLinesPerNotch)
-				} else {
-					a.threadsView.ScrollDown(wheelLinesPerNotch)
-				}
-				// No openSelectedThreadCmd here: pure viewport scroll
-				// does not change the highlighted thread card.
-			} else {
-				if up {
-					a.messagepane.ScrollUp(wheelLinesPerNotch)
-					// Backfill older history when the viewport hits the
-					// top (selection-based AtTop check moved to handleUp).
-					if cmd := a.maybeFetchOlderHistory(a.messagepane.ViewportAtTop()); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-				} else {
-					a.messagepane.ScrollDown(wheelLinesPerNotch)
-				}
-			}
-		case a.threadVisible && x < a.layoutThreadEnd:
-			if up {
-				a.threadPanel.ScrollUp(wheelLinesPerNotch)
-			} else {
-				a.threadPanel.ScrollDown(wheelLinesPerNotch)
-			}
-		}
-
-	case tea.MouseClickMsg:
-		if a.loading {
-			break
-		}
-		if msg.Button != tea.MouseLeft {
-			break
-		}
-		x := msg.X
-		statusHeight := 1
-		if msg.Y >= a.height-statusHeight {
-			break // click on status bar, ignore
-		}
-
-		// Determine which panel was clicked
-		if x < a.layoutRailWidth {
-			// Workspace rail: clicking a workspace tile switches to
-			// that workspace (same code path as the 1-9 keybinds and
-			// the workspace finder). The rail has no border above, so
-			// the panel-local y is just msg.Y.
-			if item, ok := a.workspaceRail.ClickAt(msg.Y); ok {
-				if a.workspaceSwitcher != nil && item.ID != a.workspaceRail.SelectedID() {
-					switcher := a.workspaceSwitcher
-					teamID := item.ID
-					return a, func() tea.Msg {
-						return switcher(teamID)
-					}
-				}
-			}
-		} else if a.sidebarVisible && x < a.layoutSidebarEnd {
-			a.focusedPanel = PanelSidebar
-			sidebarY := msg.Y - 1 // account for top border
-			if sidebarY >= 0 {
-				if item, ok := a.sidebar.ClickAt(sidebarY); ok {
-					return a, func() tea.Msg {
-						return ChannelSelectedMsg{ID: item.ID, Name: item.Name, Type: item.Type}
-					}
-				}
-				// ClickAt returns ok=false for the synthetic Threads
-				// row; if the click landed there (sidebar updates its
-				// own selection state), activate the threads view.
-				if a.sidebar.IsThreadsSelected() {
-					return a, func() tea.Msg { return ThreadsViewActivatedMsg{} }
-				}
-			}
-		} else if x < a.layoutMsgEnd {
-			a.focusedPanel = PanelMessages
-			// In the threads-list view, the messages-pane region
-			// renders threadsView, not the channel messages. Route
-			// the click through threadsView.ClickAt so the cursor
-			// follows the click, then open the highlighted thread
-			// (mirrors the mouse-wheel branch above and the j/k/Enter
-			// paths). The messagepane drag-selection / reaction /
-			// image-hit-test code below operates on the (hidden)
-			// channel pane and must not run here.
-			if a.view == ViewThreads {
-				panel, _, py, ok := a.panelAt(msg.X, msg.Y)
-				if ok && panel == PanelMessages && py >= 0 && a.threadsView.ClickAt(py) {
-					return a, a.openSelectedThreadCmd(false)
-				}
-				break
-			}
-			panel, px, py, ok := a.panelAt(msg.X, msg.Y)
-			if ok && panel == PanelMessages && py >= 0 {
-				// Hit-test reactions and inline images first: a click
-				// that lands inside a pill toggles the user's
-				// reaction; a click inside an image footprint opens
-				// the full-screen preview. Either takes precedence
-				// over the drag-to-copy selection and the click-to-
-				// select-message behavior on this panel. lastHits /
-				// lastReactionHits are keyed in pane-local content
-				// coordinates (chrome already stripped), so we
-				// subtract chromeHeight here, mirroring the
-				// convention used by ClickAt / BeginSelectionAt.
-				contentY := py - a.messagepane.ChromeHeight()
-				if contentY >= 0 {
-					if hitMsgIdx, emojiName, hit := a.messagepane.HitTestReaction(contentY, px); hit && emojiName != "" {
-						msgs := a.messagepane.Messages()
-						if hitMsgIdx >= 0 && hitMsgIdx < len(msgs) {
-							return a, a.toggleReactionOnMessageItem(a.activeChannelID, msgs[hitMsgIdx], emojiName)
-						}
-					}
-					if hitMsgIdx, attIdx, fileID, hit := a.messagepane.HitTest(contentY, px); hit && fileID != "" {
-						msgs := a.messagepane.Messages()
-						if hitMsgIdx >= 0 && hitMsgIdx < len(msgs) {
-							ch := a.activeChannelID
-							messageTS := msgs[hitMsgIdx].TS
-							idx := attIdx
-							return a, func() tea.Msg {
-								return messages.OpenImagePreviewMsg{
-									Channel: ch,
-									TS:      messageTS,
-									AttIdx:  idx,
-								}
-							}
-						}
-					}
-				}
-				a.drag = dragState{panel: PanelMessages, pressX: px, pressY: py, lastX: px, lastY: py}
-				a.messagepane.BeginSelectionAt(py, px)
-				// Remember whether this press actually landed on a message
-				// row -- MouseReleaseMsg uses this to decide whether a plain
-				// click (no drag) should open the message's thread (mirrors
-				// pressing Enter on the selected message).
-				a.drag.clickedMessage = a.messagepane.ClickAt(py)
-			}
-		} else if a.threadVisible && x < a.layoutThreadEnd {
-			a.focusedPanel = PanelThread
-			panel, px, py, ok := a.panelAt(msg.X, msg.Y)
-			if ok && panel == PanelThread && py >= 0 {
-				// Hit-test reactions first on the thread pane too.
-				// HitTestReaction's rows are pane-local (already
-				// inclusive of the thread chromeHeight), matching the
-				// frame returned by panelAt.
-				if hitReplyIdx, emojiName, hit := a.threadPanel.HitTestReaction(py, px); hit && emojiName != "" {
-					replies := a.threadPanel.Replies()
-					if hitReplyIdx >= 0 && hitReplyIdx < len(replies) {
-						return a, a.toggleReactionOnMessageItem(a.threadPanel.ChannelID(), replies[hitReplyIdx], emojiName)
-					}
-				}
-				a.drag = dragState{panel: PanelThread, pressX: px, pressY: py, lastX: px, lastY: py}
-				a.threadPanel.BeginSelectionAt(py, px)
-				a.threadPanel.ClickAt(py)
-			}
-		}
-
-	case tea.MouseMotionMsg:
-		if a.loading {
-			break
-		}
-		if msg.Button != tea.MouseLeft {
-			break
-		}
-		if a.drag.panel != PanelMessages && a.drag.panel != PanelThread {
-			break
-		}
-		panel, px, py, _ := a.panelAt(msg.X, msg.Y)
-		// Clamp to the originating pane: if the cursor leaves the pane,
-		// pin extension at the last known coordinates inside it.
-		if panel != a.drag.panel {
-			px, py = a.drag.lastX, a.drag.lastY
-		}
-		a.drag.lastX, a.drag.lastY = px, py
-		a.drag.moved = true
-		switch a.drag.panel {
-		case PanelMessages:
-			a.messagepane.ExtendSelectionAt(py, px)
-		case PanelThread:
-			a.threadPanel.ExtendSelectionAt(py, px)
-		}
-		// If the cursor is at the top/bottom edge of the originating pane,
-		// schedule an auto-scroll tick. The autoScrollActive gate ensures
-		// only one tick is in-flight at a time -- otherwise every motion
-		// event would queue another timer.
-		var hint int
-		switch a.drag.panel {
-		case PanelMessages:
-			hint = a.messagepane.ScrollHintForDrag(py)
-		case PanelThread:
-			hint = a.threadPanel.ScrollHintForDrag(py)
-		}
-		if hint != 0 && !a.drag.autoScrollActive {
-			a.drag.autoScrollActive = true
-			cmds = append(cmds, tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
-				return autoScrollTickMsg{}
-			}))
-		}
-
-	case autoScrollTickMsg:
-		// If the drag ended (release clears a.drag), self-terminate.
-		if a.drag.panel != PanelMessages && a.drag.panel != PanelThread {
-			a.drag.autoScrollActive = false
-			break
-		}
-		var hint int
-		switch a.drag.panel {
-		case PanelMessages:
-			hint = a.messagepane.ScrollHintForDrag(a.drag.lastY)
-		case PanelThread:
-			hint = a.threadPanel.ScrollHintForDrag(a.drag.lastY)
-		}
-		if hint == 0 {
-			// Cursor left the edge -- stop ticking. Re-entering the edge
-			// in a future motion event will re-arm the loop.
-			a.drag.autoScrollActive = false
-			break
-		}
-		switch a.drag.panel {
-		case PanelMessages:
-			if hint < 0 {
-				a.messagepane.ScrollUp(1)
-			} else {
-				a.messagepane.ScrollDown(1)
-			}
-			a.messagepane.ExtendSelectionAt(a.drag.lastY, a.drag.lastX)
-		case PanelThread:
-			if hint < 0 {
-				a.threadPanel.ScrollUp(1)
-			} else {
-				a.threadPanel.ScrollDown(1)
-			}
-			a.threadPanel.ExtendSelectionAt(a.drag.lastY, a.drag.lastX)
-		}
-		// Schedule the next tick. autoScrollActive remains true.
-		cmds = append(cmds, tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
-			return autoScrollTickMsg{}
-		}))
-
-	case tea.PasteMsg:
-		// Bracketed-paste from the terminal. First check the OS
-		// clipboard for an image (terminals can't deliver image bytes
-		// via bracketed paste — only the text representation — so the
-		// image data is still sitting in the clipboard waiting for us
-		// to read directly). Also test the bracketed text as a file
-		// path. If neither matches, fall through to forwarding the
-		// paste verbatim into the active compose's textarea.
-		if a.mode != ModeInsert {
-			break
-		}
-		if a.clipboardAvailable {
-			target := &a.compose
-			if a.focusedPanel == PanelThread && a.threadVisible {
-				target = &a.threadCompose
-			}
-			if consumed, cmd := a.tryAttachFromClipboard(target, msg.Content); consumed {
-				if cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-				break
-			}
-		}
-		if a.focusedPanel == PanelThread && a.threadVisible {
-			var cmd tea.Cmd
-			a.threadCompose, cmd = a.threadCompose.Update(msg)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		} else {
-			var cmd tea.Cmd
-			a.compose, cmd = a.compose.Update(msg)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
-
-	case tea.MouseReleaseMsg:
-		if a.drag.panel != PanelMessages && a.drag.panel != PanelThread {
-			break
-		}
-		moved := a.drag.moved
-		panel := a.drag.panel
-		clickedMessage := a.drag.clickedMessage
-		a.drag = dragState{}
-		if !moved {
-			// Plain click — drop any previous pinned selection.
-			switch panel {
-			case PanelMessages:
-				a.messagepane.ClearSelection()
-				// Treat a click on a real message row as Enter:
-				// open that message's thread. Clicks that missed
-				// (chrome, empty space) leave the panel as-is.
-				if clickedMessage {
-					if cmd := a.openThreadForSelectedMessage(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-				}
-			case PanelThread:
-				a.threadPanel.ClearSelection()
-			}
-			break
-		}
-		var (
-			text string
-			ok   bool
-		)
-		switch panel {
-		case PanelMessages:
-			text, ok = a.messagepane.EndSelection()
-		case PanelThread:
-			text, ok = a.threadPanel.EndSelection()
-		}
-		if ok && text != "" {
-			n := len([]rune(text))
-			cmds = append(cmds, tea.SetClipboard(text))
-			cmds = append(cmds, func() tea.Msg { return statusbar.CopiedMsg{N: n} })
-		}
-
-	case statusbar.CopiedMsg:
-		a.statusbar.ShowCopied(msg.N)
-		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case statusbar.CopiedClearMsg:
-		a.statusbar.ClearCopied()
-
-	case statusbar.PermalinkCopiedMsg:
-		a.statusbar.SetToast("Copied permalink")
-		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case statusbar.PermalinkCopyFailedMsg:
-		a.statusbar.SetToast("Failed to copy link")
-		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case statusbar.MarkedUnreadMsg:
-		a.statusbar.SetToast("Marked unread")
-		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case statusbar.MarkUnreadFailedMsg:
-		a.statusbar.SetToast("Mark unread failed: " + truncateReason(msg.Reason, 40))
-		cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case statusbar.EditFailedMsg:
-		a.statusbar.SetToast("Edit failed: " + truncateReason(msg.Reason, 40))
-		cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case editEmptyToastMsg:
-		a.statusbar.SetToast("Edit must have text (use D to delete)")
-		cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case statusbar.DeleteFailedMsg:
-		a.statusbar.SetToast("Delete failed: " + truncateReason(msg.Reason, 40))
-		cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case statusbar.SendFailedMsg:
-		a.statusbar.SetToast("Send failed: " + truncateReason(msg.Reason, 40))
-		cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case statusbar.EditNotOwnMsg:
-		a.statusbar.SetToast("Can only edit your own messages")
-		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case statusbar.DeleteNotOwnMsg:
-		a.statusbar.SetToast("Can only delete your own messages")
-		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case UploadProgressMsg:
-		a.statusbar.SetToast(fmt.Sprintf("Uploading %d/%d…", msg.Done, msg.Total))
-
-	case UploadResultMsg:
-		a.compose.SetUploading(false)
-		a.threadCompose.SetUploading(false)
-		if msg.Err != nil {
-			cmds = append(cmds, a.uploadToastCmd(
-				"Upload failed: "+truncateReason(msg.Err.Error(), 40),
-				3*time.Second,
-			))
-			break
-		}
-		a.compose.ClearAttachments()
-		a.threadCompose.ClearAttachments()
-		a.compose.Reset()
-		a.threadCompose.Reset()
-		cmds = append(cmds, a.uploadToastCmd("Sent", 2*time.Second))
-
-	case ChannelSelectedMsg:
-		if a.compose.Uploading() || a.threadCompose.Uploading() {
-			cmds = append(cmds, a.uploadToastCmd("Upload in progress", 2*time.Second))
-			break
-		}
-		a.cancelEdit()
-		// Picking a channel always exits the Threads view.
-		a.view = ViewChannels
-		a.sidebar.SetThreadsActive(false)
-		a.lastOpenedChannelID = ""
-		a.lastOpenedThreadTS = ""
-		// Close thread panel when switching channels
-		a.CloseThread()
-		a.clearSelections()
-		// Move focus to the messages pane so the user can immediately
-		// j/k through messages, react, open threads, etc. without first
-		// having to Tab/h-l out of the sidebar after picking a channel.
-		a.focusedPanel = PanelMessages
-		a.activeChannelID = msg.ID
-		a.lastTypingSent = time.Time{} // reset typing throttle for new channel
-		// Update local finder ordering immediately so the next Ctrl+T
-		// sees this channel at the top of the recents.
-		now := time.Now().Unix()
-		a.channelFinder.UpdateLastVisited(msg.ID, now)
-		// Persist the visit (SQLite write + WorkspaceContext map update)
-		// asynchronously via main.go's recorder closure.
-		if a.channelVisitRecorder != nil {
-			a.channelVisitRecorder(msg.ID)
-		}
-		if !msg.FromHistory {
-			a.pushNavHistory(a.activeTeamID, msg.ID)
-		}
-		// Tell the sidebar which channel is active so the staleness
-		// filter never hides it out from under the user.
-		a.sidebar.SetActiveChannelID(msg.ID)
-		a.messagepane.SetChannel(msg.Name, "")
-		a.messagepane.SetChannelType(msg.Type)
-
-		// Close any open mention picker before switching channels.
-		// SetUsers replaces the user list but does NOT re-run the
-		// picker's filter, so an open picker would render the
-		// previous channel's matches until the user typed or moved.
-		// CloseMention is nil-safe (no-op when already closed).
-		a.compose.CloseMention()
-		a.threadCompose.CloseMention()
-
-		a.compose.SetChannel(msg.Name)
-		a.compose.SetActiveChannel(msg.ID)
-		a.threadCompose.SetActiveChannel(msg.ID)
-		if a.channelMembershipFetcher != nil {
-			// Fire the fetcher on a fresh goroutine so it can't block
-			// the Update loop. The fetcher is fire-and-forget — results
-			// arrive later via ChannelMembershipMsg. main.go's fetcher
-			// closure ultimately calls Membership.EnsureFresh which
-			// invokes bubbletea Program.Send via pushSnapshot, and
-			// bubbletea v2's program channel is unbuffered: a Send
-			// from inside Update would deadlock waiting for the same
-			// goroutine to receive. See manager.go's EnsureFresh
-			// docs and the deadlock-regression test in app_test.go.
-			fetcher := a.channelMembershipFetcher
-			channelID := msg.ID
-			go fetcher(channelID)
-		}
-		a.statusbar.SetChannel(msg.Name)
-		a.statusbar.SetChannelType(msg.Type)
-
-		var cached []messages.MessageItem
-		if a.channelCacheReader != nil {
-			cached = a.channelCacheReader(msg.ID)
-		}
-		var syncedAt int64
-		if a.channelSyncedAtReader != nil {
-			syncedAt = a.channelSyncedAtReader(msg.ID)
-		}
-		age := time.Duration(0)
-		if syncedAt > 0 {
-			age = time.Since(time.Unix(syncedAt, 0))
-		}
-		debuglog.Cache("ChannelSelectedMsg: channel=%s name=%q cache_hit_count=%d synced_at=%d age_ms=%d",
-			msg.ID, msg.Name, len(cached), syncedAt, age.Milliseconds())
-
-		fireFetch := func() {
-			if a.channelFetcher == nil {
-				debuglog.Cache("ChannelSelectedMsg: channel=%s no channelFetcher wired", msg.ID)
-				return
-			}
-			fetcher := a.channelFetcher
-			chID, chName := msg.ID, msg.Name
-			debuglog.Cache("ChannelSelectedMsg: channel=%s firing background network fetch", msg.ID)
-			cmds = append(cmds, func() tea.Msg { return fetcher(chID, chName) })
-		}
-
-		switch {
-		case syncedAt > 0 && age < cacheFreshThreshold:
-			// Tier 1: provably fresh (cache was just synced). Render whatever
-			// we have (cached can legitimately be empty here — e.g., a channel
-			// verified empty within the last 30s). Mark-as-read if non-empty.
-			// No fetch.
-			a.messagepane.SetLoading(false)
-			a.messagepane.SetMessages(cached)
-			a.statusbar.SetSyncing(false)
-			if a.channelReadMarker != nil && len(cached) > 0 {
-				marker := a.channelReadMarker
-				chID := msg.ID
-				latestTS := cached[len(cached)-1].TS
-				cmds = append(cmds, func() tea.Msg { return marker(chID, latestTS) })
-			}
-			debuglog.Cache("ChannelSelectedMsg: channel=%s tier=1_fresh", msg.ID)
-
-		case len(cached) > 0:
-			// Tier 2: cache exists, verify in background. Covers
-			// (a) syncedAt > 0 with age >= 30s (any age — we render and verify
-			//     rather than blanking the pane),
-			// (b) syncedAt == 0 (freshness unknown; could be a prior session's
-			//     cache or an un-wired reader). Always render + fire fetch +
-			//     show indicator so the user knows it's being checked.
-			a.messagepane.SetLoading(false)
-			a.messagepane.SetMessages(cached)
-			a.statusbar.SetSyncing(true)
-			fireFetch()
-			debuglog.Cache("ChannelSelectedMsg: channel=%s tier=2_verify", msg.ID)
-
-		default:
-			// Tier 3: no cache at all (genuine cold-start, never-visited
-			// channel). Spinner + fetch.
-			a.messagepane.SetLoading(true)
-			a.messagepane.SetMessages(nil)
-			a.statusbar.SetSyncing(false)
-			cmds = append(cmds, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-				return SpinnerTickMsg{}
-			}))
-			fireFetch()
-			debuglog.Cache("ChannelSelectedMsg: channel=%s tier=3_spinner", msg.ID)
-		}
-
-	case MessagesLoadedMsg:
-		// Distinguish the three cases of the fetcher's nil-vs-[] contract:
-		//   nil      → network failure, keep cached render
-		//   []       → channel is genuinely empty, replace with empty
-		//   non-empty → authoritative replace
-		var kind string
-		switch {
-		case msg.Messages == nil:
-			kind = "nil_keep_cache"
-		case len(msg.Messages) == 0:
-			kind = "empty_replace"
-		default:
-			kind = "full_replace"
-		}
-		debuglog.Cache("MessagesLoadedMsg: channel=%s active=%s kind=%s count=%d",
-			msg.ChannelID, a.activeChannelID, kind, len(msg.Messages))
-		if msg.ChannelID == a.activeChannelID {
-			a.statusbar.SetSyncing(false)
-			a.messagepane.SetLoading(false)
-			a.messagepane.SetLastReadTS(msg.LastReadTS)
-			// nil Messages from the fetcher signals network FAILURE, not an
-			// empty channel (empty channels return []messages.MessageItem{}).
-			// On failure, preserve whatever the cache already rendered so a
-			// transient blip doesn't blank a working view. The Slack-side
-			// fetcher logs the error before returning nil.
-			if msg.Messages != nil {
-				a.messagepane.SetMessages(msg.Messages)
-			}
-		}
-
-	case OlderMessagesLoadedMsg:
-		debuglog.Cache("OlderMessagesLoadedMsg: channel=%s active=%s count=%d",
-			msg.ChannelID, a.activeChannelID, len(msg.Messages))
-		if msg.ChannelID == a.activeChannelID {
-			a.fetchingOlder = false
-			a.messagepane.SetLoading(false)
-			a.messagepane.PrependMessages(msg.Messages)
-		}
-
-	case imgrender.ImageReadyMsg:
-		debuglog.ImgFetch("recv: kind=ready channel=%s ts=%s key=%s req_id=%d",
-			msg.Channel, msg.TS, msg.Key, msg.ReqID)
-		// Image attachment finished downloading; invalidate the
-		// messages pane's render cache for the affected channel so the
-		// next View() picks up the cached bytes inline. Only the
-		// specific key's in-flight bit is cleared so sibling images
-		// that are still mid-fetch don't trigger fresh respawns. The
-		// model itself filters by active channel name (no-op when the
-		// user has switched away).
-		a.messagepane.HandleImageReady(msg.Channel, msg.TS, msg.Key)
-		// Thread panel: v1 uses coarse cache invalidation. If any reply
-		// in the open thread has a matching TS, blow the thread cache
-		// so renderThreadMessage runs again with the now-cached image
-		// bytes. HasReply guards against churning the thread cache on
-		// every messages-pane image arrival.
-		if a.threadPanel.HasReply(msg.TS) {
-			a.threadPanel.InvalidateCache()
-		}
-
-	case messages.AvatarReadyMsg:
-		// A lazy avatar fetch landed for msg.UserID. Both the messages
-		// pane and the thread panel cache avatar slots in their render
-		// caches, so both must invalidate. The handlers no-op when the
-		// userID isn't in their current view, but coarse invalidation
-		// is cheap relative to the cost of a missing avatar.
-		a.messagepane.HandleAvatarReady(msg.UserID)
-		a.threadPanel.HandleAvatarReady(msg.UserID)
-
-	case imgrender.ImageFailedMsg:
-		debuglog.ImgFetch("recv: kind=failed key=%s req_id=%d", msg.Key, msg.ReqID)
-		// Image attachment fetch hit a permanent failure (all auths
-		// exhausted, or some other terminal error). Clear the in-flight
-		// bit so a future cache invalidation doesn't keep retrying;
-		// don't trigger a re-render — the placeholder is already on
-		// screen and we have no new bytes to show.
-		a.messagepane.HandleImageFailed(msg.Key)
-		// Mirror the in-flight bookkeeping on the thread panel so a
-		// permanently-failed image isn't re-attempted from the thread.
-		a.threadPanel.HandleImageFailed(msg.Key)
-
-	case messages.OpenImagePreviewMsg:
-		// Open the overlay IMMEDIATELY in a loading state so the user
-		// gets visual feedback that their click / O / v registered.
-		// The actual image fetch happens asynchronously; previewLoadedMsg
-		// swaps the bytes in when ready. Without this fast path the UI
-		// felt hung on slow-fetching previews (Slack Connect channels
-		// where multi-auth retry can take seconds).
-		if cmd := a.openImagePreviewCmd(msg.Channel, msg.TS, msg.AttIdx); cmd != nil {
-			a.previewChannel = msg.Channel
-			a.previewTS = msg.TS
-			a.previewAttIdx = msg.AttIdx
-			name, sibCount, sibIndex := a.previewMetaForOpen(msg.Channel, msg.TS, msg.AttIdx)
-			loading := imgpkg.NewLoadingPreview(name, sibCount, sibIndex)
-			a.previewOverlay = &loading
-			cmds = append(cmds, cmd, previewSpinnerTickCmd())
-		}
-
-	case previewSpinnerTickMsg:
-		if a.previewOverlay != nil && !a.previewOverlay.IsClosed() && a.previewOverlay.IsLoading() {
-			a.previewOverlay.AdvanceLoadingFrame()
-			cmds = append(cmds, previewSpinnerTickCmd())
-		}
-
-	case previewLoadedMsg:
-		input := imgpkg.PreviewInput{
-			Name:         msg.Name,
-			FileID:       msg.FileID,
-			Img:          msg.Img,
-			Path:         msg.Path,
-			SiblingCount: msg.SiblingCount,
-			SiblingIndex: msg.SiblingIndex,
-		}
-		// If the overlay is nil or already closed, the user dismissed
-		// it before the bytes arrived; drop the image on the floor.
-		if a.previewOverlay != nil && !a.previewOverlay.IsClosed() {
-			// Swap bytes into the existing overlay (whether it's the
-			// initial loading shell or an already-displayed image
-			// being cycled). This preserves the overlay layout and
-			// keeps cycling state coherent.
-			a.previewOverlay.SwapImage(input)
-			if msg.isCycle {
-				// Cycling case: update the remembered attIdx so a
-				// subsequent cycle key starts from the new position.
-				if msgItem, ok := a.findMessageInActiveChannel(a.previewChannel, a.previewTS); ok {
-					for i, att := range msgItem.Attachments {
-						if att.FileID == msg.FileID {
-							a.previewAttIdx = i
-							break
-						}
-					}
-				}
-			}
-		}
-
-	case previewErrorMsg:
-		log.Printf("preview fetch error: %v", msg.Err)
-		// Dismiss the loading overlay so the user isn't left staring at
-		// a permanent spinner.
-		if a.previewOverlay != nil && a.previewOverlay.IsLoading() {
-			a.previewOverlay.Close()
-			a.previewOverlay = nil
-		}
-
-	case NewMessageMsg:
-		debuglog.Cache("NewMessageMsg: channel=%s ts=%s thread_ts=%s active=%s",
-			msg.ChannelID, msg.Message.TS, msg.Message.ThreadTS, a.activeChannelID)
-		if msg.Message.IsEdited {
-			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_edit_echo",
-				msg.ChannelID, msg.Message.TS)
-			// Edit echo: update existing message in place rather than
-			// appending. Gate on the active channel for the main pane
-			// and on the thread panel's channel for the thread cache —
-			// avoids touching panes showing a different channel. This
-			// branch must run BEFORE the isSelfSent dedup below, since
-			// edits to messages we recently sent would otherwise be
-			// silently dropped (the TS is still in selfSentTSes).
-			if msg.ChannelID == a.activeChannelID {
-				a.messagepane.UpdateMessageInPlace(msg.Message.TS, msg.Message.Text)
-			}
-			if msg.ChannelID == a.threadPanel.ChannelID() {
-				a.threadPanel.UpdateMessageInPlace(msg.Message.TS, msg.Message.Text)
-				a.threadPanel.UpdateParentInPlace(msg.Message.TS, msg.Message.Text)
-			}
-			break
-		}
-		// Skip the WS echo of our own optimistic add. The corresponding
-		// MessageSentMsg / ThreadReplySentMsg already updated the UI and
-		// scheduled side effects; redoing them here would double-render.
-		if a.isSelfSent(msg.Message.TS) {
-			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_self_send",
-				msg.ChannelID, msg.Message.TS)
-			break
-		}
-		// Early-arrival suppression: if the WS echo for an slk-
-		// originated send arrives BEFORE the chat.postMessage HTTP
-		// response (and therefore before recordSelfSent could fire),
-		// drop it for self-user messages. Otherwise the WS-echo
-		// version — which carries Slack's normalised text (paragraph
-		// breaks flattened for rich_text_block messages) — renders
-		// briefly, then flicker-replaces with the optimistic version.
-		// See markSelfSendInFlight / selfSendInFlight comments.
-		//
-		// Cross-session messages from this user (sent via the
-		// official Slack client while slk is open) do NOT update
-		// lastSelfSendByChannel, so they pass through this guard.
-		if msg.Message.UserID != "" && msg.Message.UserID == a.currentUserID && a.selfSendInFlight(msg.ChannelID) {
-			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_self_send_in_flight",
-				msg.ChannelID, msg.Message.TS)
-			break
-		}
-		if msg.ChannelID == a.activeChannelID {
-			// "active_channel_no_unread_bump": message arrived for the
-			// currently-viewed channel, so it's appended to the message
-			// pane (not skipped) but no unread bump is applied — the
-			// user is actively reading.
-			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=active_channel_no_unread_bump",
-				msg.ChannelID, msg.Message.TS)
-			// Route thread replies to the thread panel if it matches the open thread
-			if a.threadVisible && msg.Message.ThreadTS == a.threadPanel.ThreadTS() {
-				a.threadPanel.AddReply(msg.Message)
-			}
-			// Always add to main pane if it's a top-level message (no ThreadTS or is the parent)
-			if msg.Message.ThreadTS == "" || msg.Message.ThreadTS == msg.Message.TS {
-				a.messagepane.AppendMessage(msg.Message)
-			}
-			// Update reply count on parent message when a thread reply arrives
-			if msg.Message.ThreadTS != "" && msg.Message.ThreadTS != msg.Message.TS {
-				a.messagepane.IncrementReplyCount(msg.Message.ThreadTS, msg.Message.TS)
-			}
-		} else {
-			// Message arrived for a channel the user isn't currently
-			// viewing — bump its unread count so the sidebar shows
-			// the dot + bold indicator. Active-channel messages are
-			// auto-marked-read elsewhere (MarkChannel on entry), so
-			// no sidebar update is needed there.
-			//
-			// Skip plain thread replies: a reply inside a thread does
-			// not mark the parent channel as unread on Slack — only
-			// top-level messages and thread_broadcasts do. The
-			// Threads view tracks its own unread state separately.
-			isThreadReply := msg.Message.ThreadTS != "" && msg.Message.ThreadTS != msg.Message.TS
-			if !isThreadReply || msg.Message.Subtype == "thread_broadcast" {
-				debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=mark_unread",
-					msg.ChannelID, msg.Message.TS)
-				// The DB write that flips has_unread=true for this
-				// channel already happened in the WS-handler path
-				// (cache.UpdateChannelReadState). Force the sidebar
-				// to re-read read state so the dot appears on the
-				// next render, and refresh the workspace rail so its
-				// HasUnread flag picks up the change too.
-				a.notifyReadStateChanged()
-			} else {
-				debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_thread_reply_inactive",
-					msg.ChannelID, msg.Message.TS)
-			}
-		}
-		// A thread reply (regardless of channel) may have changed the
-		// involved-threads list — schedule a debounced re-query so a burst
-		// of replies coalesces into a single fetch.
-		if msg.Message.ThreadTS != "" {
-			if c := a.scheduleThreadsDirty(); c != nil {
-				cmds = append(cmds, c)
-			}
-		}
-
-	case SendMessageMsg:
-		// Mark in-flight regardless of whether a sender is wired —
-		// the user's send intent is what controls WS-echo suppression
-		// for self-user messages on this channel.
-		a.markSelfSendInFlight(msg.ChannelID)
-		// Instant-display: append an optimistic placeholder for the
-		// active channel immediately, before the chat.postMessage HTTP
-		// round-trip. The placeholder carries a "local:<n>" TS so the
-		// MessageSentMsg / MessageSendFailedMsg handler can find and
-		// swap (or remove) it once the HTTP result lands.
-		//
-		// We only render the placeholder when the send is for the
-		// channel currently in view. For background sends (rare —
-		// would require sending while in a different view) we skip
-		// the placeholder; the HTTP response will fall back to
-		// UpsertSelfSent's append path.
-		//
-		// Convert the user-typed CommonMark to Slack mrkdwn before
-		// rendering so the placeholder picks up bold / italic / code /
-		// link styling immediately. Without this, "**bold**" would
-		// render literally until the chat.postMessage HTTP response
-		// landed and the swap dropped in Slack's converted form. The
-		// converter is the same one used by client.SendMessage, so
-		// the placeholder and the swapped message render identically
-		// for the common case (no rich_text_block paragraph quirks).
-		localTS := a.nextLocalTS()
-		optimisticText, _ := mrkdwn.Convert(msg.Text)
-		if msg.ChannelID == a.activeChannelID {
-			a.messagepane.AppendMessage(messages.MessageItem{
-				TS:        localTS,
-				UserID:    a.currentUserID,
-				UserName:  a.userNameFor(a.currentUserID),
-				Text:      optimisticText,
-				Timestamp: a.nowFormatted(),
-			})
-		}
-		if a.messageSender != nil {
-			sender := a.messageSender
-			chID, text := msg.ChannelID, msg.Text
-			cmds = append(cmds, func() tea.Msg {
-				result := sender(chID, text)
-				// Attach LocalTS so the receiving handler can swap or
-				// remove the placeholder. Senders shouldn't need to
-				// know about LocalTS themselves.
-				switch r := result.(type) {
-				case MessageSentMsg:
-					r.LocalTS = localTS
-					return r
-				case MessageSendFailedMsg:
-					r.LocalTS = localTS
-					return r
-				}
-				return result
-			})
-		}
-
-	case MessageSentMsg:
-		// The chat.postMessage HTTP response landed. If a "local:..."
-		// placeholder is in the pane from the instant-display path
-		// (SendMessageMsg above), swap it for the authoritative
-		// message. Otherwise — e.g. test paths firing MessageSentMsg
-		// directly, or the user navigated away and back between
-		// Enter and the HTTP response — fall back to UpsertSelfSent
-		// which appends-or-replaces by Slack TS.
-		//
-		// UpsertSelfSent is also the fallback for any racing WS echo
-		// that managed to slip past selfSendInFlight: if AppendMessage
-		// stored the echo's normalised text first, UpsertSelfSent
-		// replaces it with our converted-mrkdwn text. See
-		// internal/ui/messages/model.go for both methods' contracts.
-		if msg.Message.TS != "" {
-			a.recordSelfSent(msg.Message.TS)
-			if msg.ChannelID == a.activeChannelID {
-				if !a.messagepane.SwapLocalSent(msg.LocalTS, msg.Message) {
-					a.messagepane.UpsertSelfSent(msg.Message)
-				}
-			}
-		}
-
-	case MessageSendFailedMsg:
-		// The chat.postMessage HTTP call failed; roll back the
-		// optimistic placeholder so the user can see the send didn't
-		// go through. A toast surfaces the reason.
-		if msg.ChannelID == a.activeChannelID && msg.LocalTS != "" {
-			a.messagepane.RemoveLocalSent(msg.LocalTS)
-		}
-		cmds = append(cmds, func() tea.Msg {
-			return statusbar.SendFailedMsg{Reason: msg.Reason}
-		})
-
-	case EditMessageMsg:
-		a.markSelfSendInFlight(msg.ChannelID)
-		if a.messageEditor != nil {
-			editor := a.messageEditor
-			chID, ts, text := msg.ChannelID, msg.TS, msg.NewText
-			cmds = append(cmds, func() tea.Msg {
-				return editor(chID, ts, text)
-			})
-		}
-
-	case MessageEditedMsg:
-		// Only exit edit mode if this result matches the edit that's
-		// currently in flight. A stale result from a previously
-		// cancelled or replaced edit must not clobber the current one.
-		if a.editing.active &&
-			a.editing.channelID == msg.ChannelID &&
-			a.editing.ts == msg.TS {
-			a.cancelEdit()
-		}
-		if msg.Err != nil {
-			cmds = append(cmds, func() tea.Msg {
-				return statusbar.EditFailedMsg{Reason: msg.Err.Error()}
-			})
-		}
-
-	case DeleteMessageMsg:
-		if a.messageDeleter != nil {
-			deleter := a.messageDeleter
-			chID, ts := msg.ChannelID, msg.TS
-			cmds = append(cmds, func() tea.Msg {
-				return deleter(chID, ts)
-			})
-		}
-
-	case MarkUnreadMsg:
-		if a.messageMarkUnreader != nil {
-			marker := a.messageMarkUnreader
-			chID, threadTS, ts, n := msg.ChannelID, msg.ThreadTS, msg.BoundaryTS, msg.UnreadCount
-			cmds = append(cmds, func() tea.Msg {
-				return marker(chID, threadTS, ts, n)
-			})
-		}
-
-	case MessageDeletedMsg:
-		if msg.Err != nil {
-			cmds = append(cmds, func() tea.Msg {
-				return statusbar.DeleteFailedMsg{Reason: msg.Err.Error()}
-			})
-		}
-
-	case MessageMarkedUnreadMsg:
-		if msg.Err != nil {
-			cmds = append(cmds, func() tea.Msg {
-				return statusbar.MarkUnreadFailedMsg{Reason: msg.Err.Error()}
-			})
-			break
-		}
-		if msg.ThreadTS == "" {
-			a.applyChannelMark(msg.ChannelID, msg.BoundaryTS, msg.UnreadCount)
-		} else {
-			a.applyThreadMark(msg.ChannelID, msg.ThreadTS, msg.BoundaryTS, false)
-		}
-		cmds = append(cmds, func() tea.Msg {
-			return statusbar.MarkedUnreadMsg{}
-		})
-
-	case ChannelMarkedRemoteMsg:
-		a.applyChannelMark(msg.ChannelID, msg.TS, msg.UnreadCount)
-
-	case ThreadMarkedRemoteMsg:
-		a.applyThreadMark(msg.ChannelID, msg.ThreadTS, msg.TS, msg.Read)
-
-	case threadFetchDebounceMsg:
-		// Drop stale debounce ticks: a later j/k has scheduled a fresh
-		// fetch and bumped the generation past this one.
-		if msg.gen != a.pendingThreadFetchGen {
-			return a, nil
-		}
-		// Also drop if the user has navigated away (e.g. switched to a
-		// different thread or closed the threads view) since scheduling.
-		if msg.channelID != a.lastOpenedChannelID || msg.threadTS != a.lastOpenedThreadTS {
-			return a, nil
-		}
-		if a.threadFetcher == nil {
-			return a, nil
-		}
-		fetcher := a.threadFetcher
-		chID, threadTS := msg.channelID, msg.threadTS
-		var batch []tea.Cmd
-		if a.threadCacheReader != nil {
-			if cached := a.threadCacheReader(chID, threadTS); len(cached) > 1 {
-				replies := cached[1:] // strip parent; reducer expects replies-only
-				ts := threadTS
-				batch = append(batch, func() tea.Msg {
-					return ThreadRepliesLoadedMsg{ThreadTS: ts, Replies: replies}
-				})
-			}
-		}
-		batch = append(batch, func() tea.Msg { return fetcher(chID, threadTS) })
-		return a, tea.Batch(batch...)
-
-	case ThreadRepliesLoadedMsg:
-		if a.threadVisible && msg.ThreadTS == a.threadPanel.ThreadTS() {
-			channelID := a.threadPanel.ChannelID()
-			// nil Replies signals network failure (the fetcher logs the error
-			// and returns nil); empty []MessageItem{} signals "no replies yet".
-			// Skip the panel update on failure so a transient blip doesn't
-			// blank a successfully-rendered cached thread view.
-			if msg.Replies == nil {
-				break
-			}
-			a.threadPanel.SetThread(a.threadPanel.ParentMsg(), msg.Replies, channelID, msg.ThreadTS)
-
-			// Mark the thread as read now that the user has actually
-			// seen the replies. Server-side: fire-and-forget against
-			// Slack's subscriptions.thread.mark with the latest reply
-			// ts (or the parent ts when the thread has no replies).
-			// Local-side: clear the Unread flag in the threads-list view
-			// and refresh the sidebar's threads-row badge so the UI
-			// reflects the change immediately, regardless of which path
-			// (messages pane or threads view) opened the thread.
-			latestTS := msg.ThreadTS
-			if n := len(msg.Replies); n > 0 {
-				if t := msg.Replies[n-1].TS; t != "" {
-					latestTS = t
-				}
-			}
-			if a.threadMarker != nil && channelID != "" && msg.ThreadTS != "" {
-				marker := a.threadMarker
-				chID, threadTS, ts := channelID, msg.ThreadTS, latestTS
-				cmds = append(cmds, func() tea.Msg {
-					marker(chID, threadTS, ts)
-					return nil
-				})
-			}
-			if a.threadsView.MarkByThreadTSRead(channelID, msg.ThreadTS) {
-				a.sidebar.SetThreadsUnreadCount(a.threadsView.UnreadCount())
-			}
-		}
-
-	case ThreadsViewActivatedMsg:
-		a.view = ViewThreads
-		a.sidebar.SetThreadsActive(true)
-		a.focusedPanel = PanelMessages
-		if a.threadsListFetcher != nil && a.activeTeamID != "" {
-			fetcher := a.threadsListFetcher
-			team := a.activeTeamID
-			cmds = append(cmds, func() tea.Msg { return fetcher(team) })
-		}
-		// Activation is a single event — fire the fetch immediately so the
-		// right thread panel populates without artificial delay.
-		if cmd := a.openSelectedThreadCmd(false); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-
-	case ThreadsListLoadedMsg:
-		if msg.TeamID == a.activeTeamID {
-			a.threadsView.SetSummaries(msg.Summaries)
-			a.threadsView.SetSubscriptionsAvailable(msg.SubscriptionsAvailable)
-			a.sidebar.SetThreadsUnreadCount(a.threadsView.UnreadCount())
-			if a.view == ViewThreads {
-				// List reload is a single event; if the dedup
-				// short-circuits no fetch happens anyway. Don't add
-				// 200ms latency here.
-				if cmd := a.openSelectedThreadCmd(false); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
-		}
-
-	case ThreadsListDirtyMsg:
-		if msg.TeamID == a.activeTeamID && a.threadsListFetcher != nil {
-			fetcher := a.threadsListFetcher
-			team := a.activeTeamID
-			cmds = append(cmds, func() tea.Msg { return fetcher(team) })
-		}
-
-	case SendThreadReplyMsg:
-		a.markSelfSendInFlight(msg.ChannelID)
-		// Instant-display: append an optimistic placeholder to the
-		// thread panel immediately, before the chat.postMessage HTTP
-		// round-trip. Mirrors the SendMessageMsg path; see there for
-		// the LocalTS / swap-or-remove contract and the mrkdwn.Convert
-		// rationale.
-		localTS := a.nextLocalTS()
-		optimisticText, _ := mrkdwn.Convert(msg.Text)
-		if a.threadVisible && msg.ThreadTS == a.threadPanel.ThreadTS() && msg.ChannelID == a.threadPanel.ChannelID() {
-			a.threadPanel.AddReply(messages.MessageItem{
-				TS:        localTS,
-				UserID:    a.currentUserID,
-				UserName:  a.userNameFor(a.currentUserID),
-				Text:      optimisticText,
-				Timestamp: a.nowFormatted(),
-				ThreadTS:  msg.ThreadTS,
-			})
-		}
-		if a.threadReplySender != nil {
-			sender := a.threadReplySender
-			chID, ts, text := msg.ChannelID, msg.ThreadTS, msg.Text
-			cmds = append(cmds, func() tea.Msg {
-				result := sender(chID, ts, text)
-				switch r := result.(type) {
-				case ThreadReplySentMsg:
-					r.LocalTS = localTS
-					return r
-				case ThreadReplySendFailedMsg:
-					r.LocalTS = localTS
-					return r
-				}
-				return result
-			})
-		}
-
-	case ThreadReplySentMsg:
-		// chat.postMessage for the thread reply landed. If a "local:..."
-		// placeholder is in the thread panel from the instant-display
-		// path (SendThreadReplyMsg above), swap it for the
-		// authoritative message; otherwise fall back to
-		// UpsertSelfSentReply.
-		//
-		// Note: the internal Slack flannel WebSocket does not always
-		// echo self-posted thread replies as a plain "message" event,
-		// so we cannot rely on the WS echo alone — the HTTP response
-		// must apply all the side effects (parent reply count, threads
-		// dirty) here.
-		if msg.Message.TS != "" {
-			a.recordSelfSent(msg.Message.TS)
-			// Update the thread panel whenever the visible thread matches,
-			// regardless of activeChannelID. When a thread is opened from
-			// the threads view, activeChannelID is not switched to the
-			// thread's channel, so gating on it here meant the user's own
-			// reply was sent to Slack but never appended locally -- they
-			// had to leave and re-enter the thread to see it.
-			if a.threadVisible && msg.ThreadTS == a.threadPanel.ThreadTS() && msg.ChannelID == a.threadPanel.ChannelID() {
-				if !a.threadPanel.SwapLocalSentReply(msg.LocalTS, msg.Message) {
-					a.threadPanel.UpsertSelfSentReply(msg.Message)
-				}
-			}
-			if msg.ChannelID == a.activeChannelID {
-				a.messagepane.IncrementReplyCount(msg.ThreadTS, msg.Message.TS)
-			}
-			if c := a.scheduleThreadsDirty(); c != nil {
-				cmds = append(cmds, c)
-			}
-		}
-
-	case ThreadReplySendFailedMsg:
-		// chat.postMessage for the thread reply failed; roll back the
-		// optimistic placeholder. Mirrors MessageSendFailedMsg.
-		if a.threadVisible && msg.ThreadTS == a.threadPanel.ThreadTS() && msg.ChannelID == a.threadPanel.ChannelID() && msg.LocalTS != "" {
-			a.threadPanel.RemoveLocalSentReply(msg.LocalTS)
-		}
-		cmds = append(cmds, func() tea.Msg {
-			return statusbar.SendFailedMsg{Reason: msg.Reason}
-		})
-
-	case ConnectionStateMsg:
-		a.statusbar.SetConnectionState(statusbar.ConnectionState(msg.State))
-
-	case WSMessageDeletedMsg:
-		debuglog.Cache("WSMessageDeletedMsg: channel=%s ts=%s active=%s",
-			msg.ChannelID, msg.TS, a.activeChannelID)
-		if msg.ChannelID == a.activeChannelID {
-			a.messagepane.RemoveMessageByTS(msg.TS)
-		}
-		if msg.ChannelID == a.threadPanel.ChannelID() {
-			a.threadPanel.RemoveMessageByTS(msg.TS)
-		}
-		// If the deleted message is the one currently being edited,
-		// cancel the edit (the message is gone — submitting would fail).
-		if a.editing.active && a.editing.ts == msg.TS && a.editing.channelID == msg.ChannelID {
-			a.cancelEdit()
-		}
-		// If the deleted message was the open thread's parent, close
-		// the thread panel — Slack deletes the entire thread when the
-		// parent is deleted. Cancel any in-flight edit first so we
-		// don't leave the user in insert mode with a hidden compose.
-		if a.threadVisible && a.threadPanel.ThreadTS() == msg.TS && msg.ChannelID == a.threadPanel.ChannelID() {
-			a.cancelEdit()
-			a.CloseThread()
-		}
-
-	case ReactionAddedMsg:
-		// Skip WebSocket echo of our own optimistic updates.
-		// When we add/remove a reaction, we update the UI immediately.
-		// The WebSocket echo arrives later with our own userID — ignore it.
-		if msg.UserID != a.currentUserID {
-			a.updateReactionOnMessage(msg.ChannelID, msg.MessageTS, msg.Emoji, msg.UserID, false)
-		}
-
-	case ReactionRemovedMsg:
-		if msg.UserID != a.currentUserID {
-			a.updateReactionOnMessage(msg.ChannelID, msg.MessageTS, msg.Emoji, msg.UserID, true)
-		}
-
-	case ReactionSentMsg:
-		// API call completed. If err, optimistic update stays (could add status bar error later).
-
-	case ChannelMarkedReadMsg:
-		debuglog.Cache("ChannelMarkedReadMsg: channel=%s active=%s (optimistic clear)",
-			msg.ChannelID, a.activeChannelID)
-		a.notifyReadStateChanged()
-
-	case DMNameResolvedMsg:
-		items := a.sidebar.Items()
-		for i := range items {
-			if items[i].ID == msg.ChannelID {
-				items[i].Name = msg.DisplayName
-				if msg.IsBot && items[i].Type == "dm" {
-					items[i].Type = "app"
-				}
-				break
-			}
-		}
-		a.SetChannels(items)
-
-	case UserResolvedMsg:
-		if msg.TeamID != a.activeTeamID {
-			break
-		}
-		a.messagepane.PatchUserName(msg.UserID, msg.DisplayName)
-		a.threadPanel.PatchUserName(msg.UserID, msg.DisplayName)
-		// IsBot affects DM channel-type classification, but that's
-		// orchestrated by DMNameResolvedMsg; this handler is only the
-		// in-history name patch. IsBot is carried for forward
-		// compatibility but not consumed here.
-
-	case UserExternalMsg:
-		if a.externalUsers == nil {
-			a.externalUsers = map[string]bool{}
-		}
-		if msg.IsExternal {
-			a.externalUsers[msg.UserID] = true
-		} else {
-			delete(a.externalUsers, msg.UserID)
-		}
-		if len(a.userNames) > 0 {
-			a.SetUserNames(a.userNames)
-		}
-		return a, nil
-
-	case WorkspaceSwitchedMsg:
-		if a.compose.Uploading() || a.threadCompose.Uploading() {
-			cmds = append(cmds, a.uploadToastCmd("Upload in progress", 2*time.Second))
-			break
-		}
-		// Remember which channel we were on in the workspace we're
-		// leaving so that switching back lands the user on the same
-		// channel rather than always snapping to the sidebar's first
-		// entry.
-		if a.activeTeamID != "" && a.activeChannelID != "" && a.activeTeamID != msg.TeamID {
-			a.lastChannelByTeam[a.activeTeamID] = a.activeChannelID
-		}
-		a.cancelEdit()
-		// Always land in ViewChannels and drop any per-workspace
-		// threads-view state so stale summaries / unread badges from the
-		// previous workspace can't leak in. The sidebar cursor is moved
-		// to the restored channel below (after SetChannels); only fall
-		// back to the Threads row when the new workspace has no channels
-		// at all.
-		a.view = ViewChannels
-		a.sidebar.SetThreadsActive(false)
-		a.threadsView.SetSummaries(nil)
-		a.sidebar.SetThreadsUnreadCount(0)
-		a.lastOpenedChannelID = ""
-		a.lastOpenedThreadTS = ""
-		a.CloseThread()
-		a.clearSelections()
-		a.compose.Reset()
-		a.statusbar.SetSyncing(false) // defensive: don't carry stale sync state across workspaces
-		// Pane is left as-is — the queued ChannelSelectedMsg below will paint
-		// over it via the three-tier dispatch (Task 10). For empty workspaces
-		// (no Channels) the pane is cleared explicitly in the else branch
-		// below.
-		a.SetMode(ModeNormal)
-		a.compose.Blur()
-		a.sidebar.SetSectionsProvider(msg.SectionsProvider)
-		a.SetChannels(msg.Channels)
-		a.channelFinder.SetItems(msg.FinderItems)
-		// SetExternalUsers re-pushes user-names; calling SetUserNames
-		// last is the canonical state.
-		a.SetExternalUsers(msg.ExternalUsers)
-		a.SetUserNames(msg.UserNames)
-		a.SetCustomEmoji(msg.CustomEmoji)
-		a.currentUserID = msg.UserID
-		a.activeTeamID = msg.TeamID
-		if st, ok := a.statusByTeam[a.activeTeamID]; ok {
-			a.statusbar.SetStatus(st.Presence, st.DNDEnabled, st.DNDEndTS)
-		} else {
-			a.statusbar.SetStatus("", false, time.Time{})
-		}
-		// Apply per-workspace theme. Must run on Update goroutine so the
-		// component cache invalidations and compose-style refreshes below
-		// take effect on the next render.
-		if msg.Theme != "" {
-			styles.Apply(msg.Theme, a.themeOverrides)
-			a.messagepane.InvalidateCache()
-			a.threadPanel.InvalidateCache()
-			a.sidebar.InvalidateCache()
-			a.compose.RefreshStyles()
-			a.threadCompose.RefreshStyles()
-		}
-		a.workspaceRail.SelectByID(msg.TeamID)
-		// Restore the last-viewed channel for this workspace if we have
-		// one and it still exists; otherwise fall back to the first
-		// channel in the sidebar. Move the sidebar cursor to that
-		// channel as well so the highlight matches the messages pane.
-		if len(msg.Channels) > 0 {
-			target := msg.Channels[0]
-			if savedID, ok := a.lastChannelByTeam[msg.TeamID]; ok && savedID != "" {
-				for _, ch := range msg.Channels {
-					if ch.ID == savedID {
-						target = ch
-						break
-					}
-				}
-			}
-			a.sidebar.SelectByID(target.ID)
-			cmds = append(cmds, func() tea.Msg {
-				return ChannelSelectedMsg{ID: target.ID, Name: target.Name, Type: target.Type}
-			})
-		} else {
-			a.sidebar.SelectThreadsRow()
-			a.messagepane.SetLoading(false)
-			a.messagepane.SetMessages(nil)
-		}
-		// Kick off an initial threads-list fetch so the sidebar Threads
-		// row badge populates before the user opens the view.
-		if a.threadsListFetcher != nil {
-			fetcher := a.threadsListFetcher
-			team := msg.TeamID
-			cmds = append(cmds, func() tea.Msg { return fetcher(team) })
-		}
-
-	case ReadStateChangedMsg:
-		// Persistent read state changed in the cache. Invalidate the
-		// sidebar and refresh the workspace rail so both re-read
-		// from the DB.
-		a.notifyReadStateChanged()
-		return a, nil
-
-	case ConversationOpenedMsg:
-		if msg.TeamID == a.activeTeamID {
-			a.sidebar.UpsertItem(msg.Item)
-		}
-		// Inactive-workspace events update WorkspaceContext.Channels
-		// from the rtmEventHandler in cmd/slk/main.go (Task 6); App.Update
-		// only mutates the active sidebar.
-
-	case SectionsRefreshedMsg:
-		if msg.TeamID == a.activeTeamID {
-			a.SetChannels(msg.Channels)
-		}
-		// Inactive-workspace events have already updated the
-		// WorkspaceContext.Channels in cmd/slk; App.Update only mutates
-		// the active sidebar.
-
-	case ChannelMembershipMsg:
-		a.SetChannelMembership(msg.ChannelID, msg.MemberIDs)
-		return a, nil
-
-	case SpinnerTickMsg:
-		if a.loading || a.messagepane.IsLoading() {
-			a.spinnerFrame = (a.spinnerFrame + 1) % len(styles.SpinnerChars)
-			a.messagepane.SetSpinnerFrame(a.spinnerFrame)
-			return a, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-				return SpinnerTickMsg{}
-			})
-		}
-
-	case LoadingTimeoutMsg:
-		if a.loading {
-			for i := range a.loadingStates {
-				if a.loadingStates[i].Status == "connecting" {
-					a.loadingStates[i].Status = "failed"
-				}
-			}
-			a.loading = false
-		}
-
-	case WorkspaceReadyMsg:
-		a.MarkWorkspaceReady(msg.TeamName)
-		// Only the workspace flagged InitialActive auto-claims active state.
-		// main.go computes this deterministically (default_workspace match,
-		// else first to connect) so two simultaneous WorkspaceReadyMsgs
-		// can no longer race on (activeChannelID == "") and both claim.
-		// bootstrapActiveClaimed is a defensive one-shot guard against any
-		// future bug that delivers InitialActive=true twice.
-		if msg.InitialActive && !a.bootstrapActiveClaimed {
-			a.bootstrapActiveClaimed = true
-			a.view = ViewChannels
-			a.sidebar.SetThreadsActive(false)
-			a.threadsView.SetSummaries(nil)
-			a.sidebar.SetThreadsUnreadCount(0)
-			a.lastOpenedChannelID = ""
-			a.lastOpenedThreadTS = ""
-			// Apply the resolved theme for the initial active workspace.
-			// Without this, per-workspace themes silently revert to the
-			// global default on startup until the user manually switches
-			// workspaces.
-			if msg.Theme != "" {
-				styles.Apply(msg.Theme, a.themeOverrides)
-				a.messagepane.InvalidateCache()
-				a.threadPanel.InvalidateCache()
-				a.sidebar.InvalidateCache()
-				a.compose.RefreshStyles()
-				a.threadCompose.RefreshStyles()
-			}
-			a.sidebar.SetSectionsProvider(msg.SectionsProvider)
-			a.SetChannels(msg.Channels)
-			a.channelFinder.SetItems(msg.FinderItems)
-			// SetExternalUsers re-pushes user-names; calling SetUserNames
-			// last is the canonical state.
-			a.SetExternalUsers(msg.ExternalUsers)
-			a.SetUserNames(msg.UserNames)
-			a.SetCustomEmoji(msg.CustomEmoji)
-			a.currentUserID = msg.UserID
-			a.activeTeamID = msg.TeamID
-			if st, ok := a.statusByTeam[a.activeTeamID]; ok {
-				a.statusbar.SetStatus(st.Presence, st.DNDEnabled, st.DNDEndTS)
-			} else {
-				a.statusbar.SetStatus("", false, time.Time{})
-			}
-			a.workspaceRail.SelectByID(msg.TeamID)
-			if len(msg.Channels) > 0 {
-				first := msg.Channels[0]
-				a.messagepane.SetLoading(true)
-				a.messagepane.SetMessages(nil)
-				cmds = append(cmds, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-					return SpinnerTickMsg{}
-				}))
-				cmds = append(cmds, func() tea.Msg {
-					return ChannelSelectedMsg{ID: first.ID, Name: first.Name, Type: first.Type}
-				})
-			}
-		}
-		// Initial threads-list fetch fires for every workspace as it
-		// becomes ready; the result is gated by ThreadsListLoadedMsg's
-		// TeamID == activeTeamID check, so background fetches are
-		// dropped without affecting the active sidebar.
-		if a.threadsListFetcher != nil {
-			fetcher := a.threadsListFetcher
-			team := msg.TeamID
-			cmds = append(cmds, func() tea.Msg { return fetcher(team) })
-		}
-
-	case CustomEmojisLoadedMsg:
-		if msg.TeamID == a.activeTeamID {
-			a.SetCustomEmoji(msg.CustomEmoji)
-		}
-
-	case ChannelJoinedMsg:
-		// Add the newly-joined channel to the sidebar (so it shows up in the
-		// regular list) and mark it joined in the finder. Then dispatch a
-		// ChannelSelectedMsg to open it.
-		newItem := sidebar.ChannelItem{
-			ID:   msg.ID,
-			Name: msg.Name,
-			Type: "channel",
-		}
-		items := a.sidebar.Items()
-		// Avoid double-add if a presence/list event raced ahead.
-		alreadyInSidebar := false
-		for _, it := range items {
-			if it.ID == msg.ID {
-				alreadyInSidebar = true
-				break
-			}
-		}
-		if !alreadyInSidebar {
-			items = append(items, newItem)
-			a.SetChannels(items)
-		}
-		a.channelFinder.MarkJoined(msg.ID)
-		a.sidebar.SelectByID(msg.ID)
-		cmds = append(cmds, func() tea.Msg {
-			// ChannelJoinedMsg only fires for public channels via the
-			// channel finder; type is always "channel".
-			return ChannelSelectedMsg{ID: msg.ID, Name: msg.Name, Type: "channel"}
-		})
-
-	case ChannelJoinFailedMsg:
-		// Nothing fancy yet -- could surface a status-bar toast in future.
-		log.Printf("warning: failed to join channel %s: %v", msg.Name, msg.Err)
-
-	case BrowseableChannelsLoadedMsg:
-		// Only apply to the channel finder if this matches the workspace
-		// whose items are currently loaded. Per-workspace browseable items
-		// are kept in main.go's WorkspaceContext for any future switch.
-		if msg.TeamID == a.activeTeamID {
-			a.channelFinder.SetBrowseable(msg.Items)
-		}
-
-	case WorkspaceFailedMsg:
-		a.MarkWorkspaceFailed(msg.TeamName)
-
-	case UserTypingMsg:
-		if !a.typingEnabled {
-			return a, nil
-		}
-		a.addTypingUser(msg.ChannelID, msg.UserID)
-		if !a.typingTickerOn {
-			a.typingTickerOn = true
-			cmds = append(cmds, tea.Tick(time.Second, func(time.Time) tea.Msg {
-				return TypingExpiredMsg{}
-			}))
-		}
-
-	case PresenceChangeMsg:
-		a.sidebar.UpdatePresenceByUser(msg.UserID, msg.Presence)
-
-	case StatusChangeMsg:
-		st := workspaceStatus{
-			Presence:   msg.Presence,
-			DNDEnabled: msg.DNDEnabled,
-			DNDEndTS:   msg.DNDEndTS,
-		}
-		a.statusByTeam[msg.TeamID] = st
-		if msg.TeamID == a.activeTeamID {
-			a.statusbar.SetStatus(st.Presence, st.DNDEnabled, st.DNDEndTS)
-			// Start the once-a-minute countdown tick if DND is active.
-			// Guard with dndTickerOn (mirroring typingTickerOn) so repeated
-			// StatusChangeMsgs don't accumulate parallel tick chains.
-			if st.DNDEnabled && !st.DNDEndTS.IsZero() && time.Now().Before(st.DNDEndTS) && !a.dndTickerOn {
-				a.dndTickerOn = true
-				cmds = append(cmds, tea.Tick(time.Minute, func(time.Time) tea.Msg {
-					return statusbar.DNDTickMsg{}
-				}))
-			}
-		}
-
-	case statusbar.DNDTickMsg:
-		st, ok := a.statusByTeam[a.activeTeamID]
-		if !ok {
-			a.dndTickerOn = false
-			break
-		}
-		if st.DNDEnabled && !st.DNDEndTS.IsZero() && !time.Now().Before(st.DNDEndTS) {
-			// DND expired locally — flip the flag so the segment falls back to presence.
-			st.DNDEnabled = false
-			st.DNDEndTS = time.Time{}
-			a.statusByTeam[a.activeTeamID] = st
-			a.statusbar.SetStatus(st.Presence, false, time.Time{})
-			a.dndTickerOn = false
-			break
-		}
-		a.statusbar.SetStatus(st.Presence, st.DNDEnabled, st.DNDEndTS)
-		if st.DNDEnabled && !st.DNDEndTS.IsZero() {
-			// still in DND — reschedule the tick (dndTickerOn stays true)
-			cmds = append(cmds, tea.Tick(time.Minute, func(time.Time) tea.Msg {
-				return statusbar.DNDTickMsg{}
-			}))
-		} else {
-			// Active workspace no longer in DND (e.g. user switched away
-			// from a DND'd workspace). Stop the chain.
-			a.dndTickerOn = false
-		}
-
-	case ToastMsg:
-		a.statusbar.SetToast(msg.Text)
-		cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
-			return statusbar.CopiedClearMsg{}
-		}))
-
-	case TypingExpiredMsg:
-		a.expireTypingUsers()
-		// Continue ticking if there are still active typers
-		hasTypers := len(a.typingUsers) > 0
-		a.typingTickerOn = hasTypers
-		if hasTypers {
-			cmds = append(cmds, tea.Tick(time.Second, func(time.Time) tea.Msg {
-				return TypingExpiredMsg{}
-			}))
-		}
+	// All non-WindowSize, non-Key message types are owned by Phase 4
+	// reducers; see the dispatch chain at the top of Update and the
+	// per-family reducer_*.go files / controller Handle methods.
 	}
 
 	return a, tea.Batch(cmds...)
@@ -2741,66 +464,14 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	if a.loading {
+	if a.bootstrap.IsLoading() {
 		return nil
 	}
 
-	// Mode-specific handling
-	switch a.mode {
-	case ModeInsert:
-		return a.handleInsertMode(msg)
-	case ModeCommand:
-		return a.handleCommandMode(msg)
-	case ModeChannelFinder:
-		return a.handleChannelFinderMode(msg)
-	case ModeReactionPicker:
-		return a.handleReactionPickerMode(msg)
-	case ModeConfirm:
-		return a.handleConfirmMode(msg)
-	case ModeWorkspaceFinder:
-		return a.handleWorkspaceFinderMode(msg)
-	case ModeThemeSwitcher:
-		return a.handleThemeSwitcherMode(msg)
-	case ModePresenceMenu:
-		return a.handlePresenceMenuMode(msg)
-	case ModePresenceCustomSnooze:
-		return a.handlePresenceCustomSnoozeMode(msg)
-	case ModeHelp:
-		return a.handleHelpMode(msg)
-	default:
-		return a.handleNormalMode(msg)
-	}
-}
-
-// pushNavHistory appends channelID onto the team's navigation stack.
-// Behavior:
-//   - Lazy-creates the stack on first push.
-//   - Dedupes consecutive: a no-op if entries[cursor] == channelID.
-//   - Truncates the forward path: cursor < len-1 entries beyond cursor
-//     are dropped (browser-style "new visit kills forward history").
-//   - Caps at navStackMax: drops oldest entries and shifts cursor.
-func (a *App) pushNavHistory(teamID, channelID string) {
-	if teamID == "" || channelID == "" {
-		return
-	}
-	stack, ok := a.navHistory[teamID]
-	if !ok {
-		stack = &navStack{cursor: -1}
-		a.navHistory[teamID] = stack
-	}
-	if stack.cursor >= 0 && stack.cursor < len(stack.entries) && stack.entries[stack.cursor] == channelID {
-		return
-	}
-	if stack.cursor < len(stack.entries)-1 {
-		stack.entries = stack.entries[:stack.cursor+1]
-	}
-	stack.entries = append(stack.entries, channelID)
-	stack.cursor = len(stack.entries) - 1
-	if len(stack.entries) > navStackMax {
-		drop := len(stack.entries) - navStackMax
-		stack.entries = stack.entries[drop:]
-		stack.cursor -= drop
-	}
+	// Mode-specific handling. Dispatch table lives in
+	// mode_handlers.go; unmapped modes fall back to Normal
+	// (mirrors the pre-Phase-5 `default:` arm).
+	return dispatchModeKey(a, msg)
 }
 
 // navigateBack walks the per-workspace history stack one step
@@ -2809,832 +480,48 @@ func (a *App) pushNavHistory(teamID, channelID string) {
 // that synthesizes a ChannelSelectedMsg{FromHistory: true} for the
 // new target, or nil if there's no valid earlier entry.
 func (a *App) navigateBack() tea.Cmd {
-	return a.walkNav(-1)
+	return a.walkNavCmd(-1)
 }
 
 // navigateForward is the symmetric opposite of navigateBack.
 func (a *App) navigateForward() tea.Cmd {
-	return a.walkNav(+1)
+	return a.walkNavCmd(+1)
 }
 
-// walkNav implements the shared logic for navigateBack / navigateForward.
-// step must be -1 or +1.
-func (a *App) walkNav(step int) tea.Cmd {
-	stack, ok := a.navHistory[a.activeTeamID]
-	if !ok || stack.cursor < 0 {
+// walkNavCmd is the shared wrapper that turns navHistoryStore.Walk's
+// pure result into the ChannelSelectedMsg{FromHistory: true} tea.Cmd
+// the App emits. step must be -1 or +1.
+func (a *App) walkNavCmd(step int) tea.Cmd {
+	id, name, ctype, ok := a.navHistory.Walk(a.activeTeamID, step, a.channels.Lookup)
+	if !ok {
 		return nil
 	}
-
-	// Walk in `step` direction looking for the first valid entry.
-	// As we go, accumulate stale indices to drop afterwards.
-	var stale []int
-	idx := stack.cursor + step
-	var (
-		foundID    string
-		foundName  string
-		foundType  string
-		foundIndex = -1
-	)
-	for idx >= 0 && idx < len(stack.entries) {
-		id := stack.entries[idx]
-		if a.channelLookup != nil {
-			name, ctype, valid := a.channelLookup(id)
-			if valid {
-				foundID, foundName, foundType, foundIndex = id, name, ctype, idx
-				break
-			}
-			stale = append(stale, idx)
-		} else {
-			// No lookup wired (tests/early init): treat all as valid.
-			foundID, foundName, foundType, foundIndex = id, id, "channel", idx
-			break
-		}
-		idx += step
-	}
-
-	if foundIndex < 0 {
-		// No valid target. Still drop the stale entries we discovered
-		// so the stack doesn't keep walking past them next time, and
-		// shift the cursor back to compensate for any drops below it.
-		droppedBeforeCursor := 0
-		for _, s := range stale {
-			if s < stack.cursor {
-				droppedBeforeCursor++
-			}
-		}
-		a.dropStaleStackEntries(stack, stale)
-		stack.cursor -= droppedBeforeCursor
-		return nil
-	}
-
-	// Compute foundIndex's new position after stale drops:
-	// every dropped index < foundIndex shifts foundIndex down by 1.
-	newFoundIndex := foundIndex
-	for _, s := range stale {
-		if s < foundIndex {
-			newFoundIndex--
-		}
-	}
-	a.dropStaleStackEntries(stack, stale)
-	stack.cursor = newFoundIndex
-
-	id, name, ctype := foundID, foundName, foundType
 	return func() tea.Msg {
 		return ChannelSelectedMsg{ID: id, Name: name, Type: ctype, FromHistory: true}
 	}
 }
 
-// dropStaleStackEntries returns a new entries slice with the indices
-// in stale removed. Order of indices in stale doesn't matter.
-func (a *App) dropStaleStackEntries(stack *navStack, stale []int) {
-	if len(stale) == 0 {
-		return
-	}
-	drop := make(map[int]struct{}, len(stale))
-	for _, s := range stale {
-		drop[s] = struct{}{}
-	}
-	out := make([]string, 0, len(stack.entries)-len(stale))
-	for i, e := range stack.entries {
-		if _, ok := drop[i]; !ok {
-			out = append(out, e)
-		}
-	}
-	stack.entries = out
-}
+// handleNormalMode moved to mode_normal.go (Phase 5k).
 
-func (a *App) handleNormalMode(msg tea.KeyMsg) tea.Cmd {
-	// Reaction-nav sub-state (intercept before normal keys)
-	if a.focusedPanel == PanelMessages && a.messagepane.ReactionNavActive() {
-		return a.handleReactionNav(msg)
-	}
-	if a.focusedPanel == PanelThread && a.threadPanel.ReactionNavActive() {
-		return a.handleThreadReactionNav(msg)
-	}
+// handleInsertMode moved to mode_insert.go (Phase 5l).
 
-	switch {
-	case key.Matches(msg, a.keys.InsertMode):
-		a.SetMode(ModeInsert)
-		// In the Threads view there is no main compose box — the only
-		// way to type is into the right-side thread panel's compose.
-		// Force focus there even when the threads list itself was the
-		// focused panel.
-		if a.focusedPanel == PanelThread || (a.view == ViewThreads && a.threadVisible) {
-			a.focusedPanel = PanelThread
-			return a.threadCompose.Focus()
-		}
-		a.focusedPanel = PanelMessages
-		return a.compose.Focus()
+// handleCommandMode moved to mode_command.go (Phase 5b).
 
-	case key.Matches(msg, a.keys.Escape):
-		a.cancelEdit()
-		a.SetMode(ModeNormal)
-		a.compose.Blur()
-		if a.threadVisible {
-			a.CloseThread()
-		}
+// handleChannelFinderMode moved to mode_channel_finder.go (Phase 5h).
 
-	case key.Matches(msg, a.keys.Tab):
-		a.FocusNext()
+// handleWorkspaceFinderMode moved to mode_workspace_finder.go (Phase 5e).
 
-	case key.Matches(msg, a.keys.ShiftTab):
-		a.FocusPrev()
+// handleThemeSwitcherMode moved to mode_theme_switcher.go (Phase 5g).
 
-	case key.Matches(msg, a.keys.ToggleSidebar):
-		a.ToggleSidebar()
+// handleHelpMode moved to mode_help.go (Phase 5c).
 
-	case key.Matches(msg, a.keys.ToggleThread):
-		a.ToggleThread()
+// handlePresenceMenuMode moved to mode_presence_menu.go (Phase 5f).
 
-	case key.Matches(msg, a.keys.NavBack):
-		if cmd := a.navigateBack(); cmd != nil {
-			return cmd
-		}
+// handlePresenceCustomSnoozeMode moved to mode_presence_snooze.go (Phase 5d).
 
-	case key.Matches(msg, a.keys.NavForward):
-		if cmd := a.navigateForward(); cmd != nil {
-			return cmd
-		}
+// handleReactionPickerMode moved to mode_reaction_picker.go (Phase 5i).
 
-	case key.Matches(msg, a.keys.Down):
-		if cmd := a.handleDown(); cmd != nil {
-			return cmd
-		}
-
-	case key.Matches(msg, a.keys.Up):
-		if cmd := a.handleUp(); cmd != nil {
-			return cmd
-		}
-
-	case key.Matches(msg, a.keys.Left):
-		a.FocusPrev()
-
-	case key.Matches(msg, a.keys.Right):
-		a.FocusNext()
-
-	case key.Matches(msg, a.keys.Enter):
-		return a.handleEnter()
-
-	case key.Matches(msg, a.keys.ToggleSection):
-		// Space on a sidebar section header toggles its collapsed
-		// state; elsewhere it falls through to whatever the focused
-		// panel does with a literal space (typically nothing in
-		// normal mode).
-		if a.focusedPanel == PanelSidebar {
-			if a.sidebar.ToggleCollapseSelected() {
-				return nil
-			}
-		}
-
-	case key.Matches(msg, a.keys.Bottom):
-		if cmd := a.handleGoToBottom(); cmd != nil {
-			return cmd
-		}
-
-	case key.Matches(msg, a.keys.PageUp):
-		if cmd := a.scrollFocusedPanel(-a.pageSize()); cmd != nil {
-			return cmd
-		}
-
-	case key.Matches(msg, a.keys.PageDown):
-		if cmd := a.scrollFocusedPanel(a.pageSize()); cmd != nil {
-			return cmd
-		}
-
-	case key.Matches(msg, a.keys.HalfPageUp):
-		if cmd := a.scrollFocusedPanel(-a.halfPageSize()); cmd != nil {
-			return cmd
-		}
-
-	case key.Matches(msg, a.keys.HalfPageDown):
-		if cmd := a.scrollFocusedPanel(a.halfPageSize()); cmd != nil {
-			return cmd
-		}
-
-	case key.Matches(msg, a.keys.Help):
-		a.help.SetEntries(help.FromKeyMap(a.keys))
-		a.help.Open()
-		a.SetMode(ModeHelp)
-
-	case key.Matches(msg, a.keys.WorkspaceFinder):
-		a.workspaceFinder.Open()
-		a.SetMode(ModeWorkspaceFinder)
-
-	case key.Matches(msg, a.keys.ThemeSwitcher):
-		// Per-workspace scope. Header text shows the current workspace name.
-		header := "Theme for " + a.activeTeamName()
-		a.themeSwitcher.OpenWithScope(themeswitcher.ScopeWorkspace, header)
-		a.SetMode(ModeThemeSwitcher)
-		return nil
-	case key.Matches(msg, a.keys.ThemeSwitcherGlobal):
-		a.themeSwitcher.OpenWithScope(themeswitcher.ScopeGlobal, "Default theme for new workspaces")
-		a.SetMode(ModeThemeSwitcher)
-		return nil
-
-	case key.Matches(msg, a.keys.PresenceMenu):
-		header := a.workspaceNameForActive()
-		pres, dndEnabled, dndEnd := a.activeWorkspaceStatus()
-		a.presenceMenu.OpenWith(header, pres, dndEnabled, dndEnd)
-		a.SetMode(ModePresenceMenu)
-
-	case key.Matches(msg, a.keys.FuzzyFinder) || key.Matches(msg, a.keys.FuzzyFinderAlt):
-		a.channelFinder.Open()
-		a.SetMode(ModeChannelFinder)
-
-	case key.Matches(msg, a.keys.Reaction):
-		if a.focusedPanel == PanelMessages {
-			return a.openPickerFromMessage()
-		} else if a.focusedPanel == PanelThread {
-			return a.openPickerFromThread()
-		}
-
-	case key.Matches(msg, a.keys.ReactionNav):
-		if a.focusedPanel == PanelMessages {
-			a.messagepane.EnterReactionNav()
-		} else if a.focusedPanel == PanelThread {
-			a.threadPanel.EnterReactionNav()
-		}
-
-	case key.Matches(msg, a.keys.CopyPermalink):
-		return a.copyPermalinkOfSelected()
-
-	case key.Matches(msg, a.keys.Edit):
-		return a.beginEditOfSelected()
-
-	case key.Matches(msg, a.keys.Delete):
-		return a.beginDeleteOfSelected()
-
-	case key.Matches(msg, a.keys.OpenPreview):
-		return a.openImagePreviewOfSelected()
-
-	case key.Matches(msg, a.keys.MarkUnread):
-		return a.markUnreadOfSelected()
-
-	case key.Matches(msg, a.keys.CloseThreadView):
-		// Lowercase q is "close thread view" when one is open; if no
-		// thread panel is visible it's a no-op (Q and Ctrl+C are the
-		// quit keys). The vim-style pairing: q closes the transient
-		// pane, Q closes the whole app.
-		if a.threadVisible {
-			a.CloseThread()
-		}
-		return nil
-
-	case key.Matches(msg, a.keys.QuitConfirm):
-		a.openQuitConfirm()
-		return nil
-
-	default:
-		// Number keys 1-9 switch workspaces
-		keyStr := msg.String()
-		if len(keyStr) == 1 && keyStr[0] >= '1' && keyStr[0] <= '9' {
-			idx := int(keyStr[0] - '1') // 0-indexed
-			if idx < len(a.workspaceItems) && a.workspaceSwitcher != nil {
-				if a.workspaceItems[idx].ID != a.workspaceRail.SelectedID() {
-					switcher := a.workspaceSwitcher
-					teamID := a.workspaceItems[idx].ID
-					return func() tea.Msg {
-						return switcher(teamID)
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func (a *App) handleInsertMode(msg tea.KeyMsg) tea.Cmd {
-	if (a.compose.Uploading() || a.threadCompose.Uploading()) && key.Matches(msg, a.keys.Escape) {
-		return a.uploadToastCmd("Upload in progress", 2*time.Second)
-	}
-	if a.editing.active && key.Matches(msg, a.keys.Escape) {
-		// If a picker is active in the relevant compose, close it
-		// instead of cancelling the edit.
-		if a.editing.panel == PanelThread {
-			if a.threadCompose.IsEmojiActive() {
-				a.threadCompose.CloseEmoji()
-				return nil
-			}
-			if a.threadCompose.IsMentionActive() {
-				a.threadCompose.CloseMention()
-				return nil
-			}
-			if a.threadCompose.IsChannelActive() {
-				a.threadCompose.CloseChannel()
-				return nil
-			}
-		} else {
-			if a.compose.IsEmojiActive() {
-				a.compose.CloseEmoji()
-				return nil
-			}
-			if a.compose.IsMentionActive() {
-				a.compose.CloseMention()
-				return nil
-			}
-			if a.compose.IsChannelActive() {
-				a.compose.CloseChannel()
-				return nil
-			}
-		}
-		a.cancelEdit()
-		return nil
-	}
-	if key.Matches(msg, a.keys.Escape) {
-		// If a picker is active, close it instead of exiting insert mode.
-		if a.focusedPanel == PanelThread && a.threadVisible {
-			if a.threadCompose.IsEmojiActive() {
-				a.threadCompose.CloseEmoji()
-				return nil
-			}
-			if a.threadCompose.IsMentionActive() {
-				a.threadCompose.CloseMention()
-				return nil
-			}
-			if a.threadCompose.IsChannelActive() {
-				a.threadCompose.CloseChannel()
-				return nil
-			}
-		} else {
-			if a.compose.IsEmojiActive() {
-				a.compose.CloseEmoji()
-				return nil
-			}
-			if a.compose.IsMentionActive() {
-				a.compose.CloseMention()
-				return nil
-			}
-			if a.compose.IsChannelActive() {
-				a.compose.CloseChannel()
-				return nil
-			}
-		}
-		a.SetMode(ModeNormal)
-		a.compose.Blur()
-		a.threadCompose.Blur()
-		return nil
-	}
-
-	code := msg.Key().Code
-	mod := msg.Key().Mod
-	isPaste := code == 'v' && mod == tea.ModCtrl
-	if isPaste {
-		return a.smartPaste()
-	}
-
-	// Insert-mode shortcuts that operate on the active compose:
-	//   Ctrl+U  → clear compose (text + attachments + uploading flag)
-	//   Up      → if cursor on first line, jump to start of textarea
-	//   Down    → if cursor on last line,  jump to end of textarea
-	target := &a.compose
-	if a.focusedPanel == PanelThread && a.threadVisible {
-		target = &a.threadCompose
-	}
-	if code == 'u' && mod == tea.ModCtrl {
-		target.Reset()
-		return nil
-	}
-	// If a compose-overlay picker (emoji / @mention / #channel) is active,
-	// let it own Up/Down so users can navigate the suggestion list. Without
-	// this guard, the jump-to-start/end shortcuts below swallow the arrow
-	// keys before the picker ever sees them.
-	pickerActive := target.IsEmojiActive() || target.IsMentionActive() || target.IsChannelActive()
-	if !pickerActive {
-		if code == tea.KeyUp && mod == 0 && target.CursorAtFirstLine() {
-			target.MoveCursorToStart()
-			return nil
-		}
-		if code == tea.KeyDown && mod == 0 && target.CursorAtLastLine() {
-			target.MoveCursorToEnd()
-			return nil
-		}
-	}
-	// Plain Enter sends; Shift+Enter (and Ctrl+J as a fallback for terminals
-	// that don't disambiguate modifiers) inserts a newline.
-	isSend := code == tea.KeyEnter && !mod.Contains(tea.ModShift)
-	isNewline := (code == tea.KeyEnter && mod.Contains(tea.ModShift)) ||
-		(code == 'j' && mod == tea.ModCtrl)
-
-	// Determine which compose box is active based on focused panel
-	if a.focusedPanel == PanelThread && a.threadVisible {
-		// If a picker is active, forward all keys to compose (including Enter).
-		if a.threadCompose.IsEmojiActive() || a.threadCompose.IsMentionActive() || a.threadCompose.IsChannelActive() {
-			var cmd tea.Cmd
-			a.threadCompose, cmd = a.threadCompose.Update(msg)
-			return cmd
-		}
-
-		// Thread reply compose
-		if isNewline {
-			var cmd tea.Cmd
-			a.threadCompose, cmd = a.threadCompose.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-			return cmd
-		}
-		if isSend {
-			if len(a.threadCompose.Attachments()) > 0 {
-				cmd := a.submitWithAttachments(&a.threadCompose)
-				if a.threadCompose.Uploading() {
-					a.exitInsertAfterSend()
-				}
-				return cmd
-			}
-			if a.editing.active && a.editing.panel == PanelThread {
-				return a.submitEdit(a.threadCompose.Value(), a.threadCompose.TranslateMentionsForSend(a.threadCompose.Value()))
-			}
-			text := a.threadCompose.Value()
-			if text != "" {
-				text = a.threadCompose.TranslateMentionsForSend(text)
-				a.threadCompose.Reset()
-				threadTS := a.threadPanel.ThreadTS()
-				channelID := a.threadPanel.ChannelID()
-				a.exitInsertAfterSend()
-				return func() tea.Msg {
-					return SendThreadReplyMsg{
-						ChannelID: channelID,
-						ThreadTS:  threadTS,
-						Text:      text,
-					}
-				}
-			}
-			return nil
-		}
-		var cmd tea.Cmd
-		a.threadCompose, cmd = a.threadCompose.Update(msg)
-		a.maybeSendTyping()
-		return cmd
-	}
-
-	// Channel message compose
-	// If a picker is active, forward all keys to compose (including Enter).
-	if a.compose.IsEmojiActive() || a.compose.IsMentionActive() || a.compose.IsChannelActive() {
-		var cmd tea.Cmd
-		a.compose, cmd = a.compose.Update(msg)
-		return cmd
-	}
-
-	if isNewline {
-		var cmd tea.Cmd
-		a.compose, cmd = a.compose.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-		return cmd
-	}
-	if isSend {
-		if len(a.compose.Attachments()) > 0 {
-			cmd := a.submitWithAttachments(&a.compose)
-			if a.compose.Uploading() {
-				a.exitInsertAfterSend()
-			}
-			return cmd
-		}
-		if a.editing.active && a.editing.panel == PanelMessages {
-			return a.submitEdit(a.compose.Value(), a.compose.TranslateMentionsForSend(a.compose.Value()))
-		}
-		text := a.compose.Value()
-		if text != "" {
-			text = a.compose.TranslateMentionsForSend(text)
-			a.compose.Reset()
-			a.exitInsertAfterSend()
-			return func() tea.Msg {
-				return SendMessageMsg{
-					ChannelID: a.activeChannelID,
-					Text:      text,
-				}
-			}
-		}
-		return nil
-	}
-
-	var cmd tea.Cmd
-	a.compose, cmd = a.compose.Update(msg)
-	a.maybeSendTyping()
-	return cmd
-}
-
-func (a *App) handleCommandMode(msg tea.KeyMsg) tea.Cmd {
-	if key.Matches(msg, a.keys.Escape) {
-		a.SetMode(ModeNormal)
-	}
-	return nil
-}
-
-func (a *App) handleChannelFinderMode(msg tea.KeyMsg) tea.Cmd {
-	// Map tea.KeyMsg to string for the finder
-	keyStr := msg.String()
-	switch msg.Key().Code {
-	case tea.KeyEnter:
-		keyStr = "enter"
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyUp:
-		keyStr = "up"
-	case tea.KeyDown:
-		keyStr = "down"
-	case tea.KeyBackspace:
-		keyStr = "backspace"
-	}
-
-	result := a.channelFinder.HandleKey(keyStr)
-	if result != nil {
-		a.channelFinder.Close()
-		a.SetMode(ModeNormal)
-		// Synthetic destinations (e.g. Threads view) live alongside
-		// channels in the finder but route to a view activation rather
-		// than a channel switch.
-		if result.Type == "threads" {
-			return func() tea.Msg { return ThreadsViewActivatedMsg{} }
-		}
-		// Already-joined: switch immediately. Not joined: kick off a join
-		// command; ChannelJoinedMsg will fold the channel into the sidebar
-		// and switch to it.
-		if result.Joined {
-			a.sidebar.SelectByID(result.ID)
-			return func() tea.Msg {
-				return ChannelSelectedMsg{ID: result.ID, Name: result.Name, Type: result.Type}
-			}
-		}
-		if a.channelJoiner != nil {
-			joiner := a.channelJoiner
-			id, name := result.ID, result.Name
-			return func() tea.Msg {
-				return joiner(id, name)
-			}
-		}
-	}
-
-	// Check if finder closed itself (Esc)
-	if !a.channelFinder.IsVisible() {
-		a.SetMode(ModeNormal)
-	}
-
-	return nil
-}
-
-func (a *App) handleWorkspaceFinderMode(msg tea.KeyMsg) tea.Cmd {
-	keyStr := msg.String()
-	switch msg.Key().Code {
-	case tea.KeyEnter:
-		keyStr = "enter"
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyUp:
-		keyStr = "up"
-	case tea.KeyDown:
-		keyStr = "down"
-	case tea.KeyBackspace:
-		keyStr = "backspace"
-	}
-
-	result := a.workspaceFinder.HandleKey(keyStr)
-	if result != nil {
-		a.workspaceFinder.Close()
-		a.SetMode(ModeNormal)
-		if a.workspaceSwitcher != nil && result.ID != a.workspaceRail.SelectedID() {
-			switcher := a.workspaceSwitcher
-			teamID := result.ID
-			return func() tea.Msg {
-				return switcher(teamID)
-			}
-		}
-	}
-	if !a.workspaceFinder.IsVisible() {
-		a.SetMode(ModeNormal)
-	}
-	return nil
-}
-
-func (a *App) handleThemeSwitcherMode(msg tea.KeyMsg) tea.Cmd {
-	keyStr := msg.String()
-	switch msg.Key().Code {
-	case tea.KeyEnter:
-		keyStr = "enter"
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyUp:
-		keyStr = "up"
-	case tea.KeyDown:
-		keyStr = "down"
-	case tea.KeyBackspace:
-		keyStr = "backspace"
-	}
-
-	result := a.themeSwitcher.HandleKey(keyStr)
-	if result != nil {
-		a.themeSwitcher.Close()
-		a.SetMode(ModeNormal)
-		// Apply theme immediately
-		styles.Apply(result.Name, a.themeOverrides)
-		// Invalidate render caches so they rebuild with new theme colors
-		a.messagepane.InvalidateCache()
-		a.threadPanel.InvalidateCache()
-		a.sidebar.InvalidateCache()
-		// Refresh compose textarea styles for new theme
-		a.compose.RefreshStyles()
-		a.threadCompose.RefreshStyles()
-		// Save selection
-		if a.themeSaveFn != nil {
-			a.themeSaveFn(result.Name, result.Scope)
-		}
-		return nil
-	}
-	if !a.themeSwitcher.IsVisible() {
-		a.SetMode(ModeNormal)
-	}
-	return nil
-}
-
-// handleHelpMode dispatches key events to the help overlay and tears down
-// the mode when the overlay closes itself (esc/q/?).
-func (a *App) handleHelpMode(msg tea.KeyMsg) tea.Cmd {
-	keyStr := msg.String()
-	switch msg.Key().Code {
-	case tea.KeyEnter:
-		keyStr = "enter"
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyUp:
-		keyStr = "up"
-	case tea.KeyDown:
-		keyStr = "down"
-	case tea.KeyBackspace:
-		keyStr = "backspace"
-	}
-	a.help.HandleKey(keyStr)
-	if !a.help.IsVisible() {
-		a.SetMode(ModeNormal)
-	}
-	return nil
-}
-
-func (a *App) handlePresenceMenuMode(msg tea.KeyMsg) tea.Cmd {
-	keyStr := msg.String()
-	switch msg.Key().Code {
-	case tea.KeyEnter:
-		keyStr = "enter"
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyUp:
-		keyStr = "up"
-	case tea.KeyDown:
-		keyStr = "down"
-	case tea.KeyBackspace:
-		keyStr = "backspace"
-	}
-
-	result := a.presenceMenu.HandleKey(keyStr)
-	if result != nil {
-		a.presenceMenu.Close()
-		// Custom snooze opens a sub-mode instead of firing immediately.
-		if result.Action == presencemenu.ActionCustomSnooze {
-			a.presenceCustomBuf = ""
-			a.SetMode(ModePresenceCustomSnooze)
-			return nil
-		}
-		a.SetMode(ModeNormal)
-		// Optimistic UI: update local state + status bar before the API
-		// call returns. The WS echo will reaffirm it.
-		a.applyOptimisticStatus(result.Action, result.SnoozeMinutes)
-		if a.setStatusFn != nil {
-			a.setStatusFn(result.Action, result.SnoozeMinutes)
-		}
-		return nil
-	}
-	if !a.presenceMenu.IsVisible() {
-		a.SetMode(ModeNormal)
-	}
-	return nil
-}
-
-// applyOptimisticStatus updates the App's status cache and status bar
-// based on the picked action, before the API round-trip completes.
-func (a *App) applyOptimisticStatus(action presencemenu.Action, snoozeMinutes int) {
-	st := a.statusByTeam[a.activeTeamID]
-	switch action {
-	case presencemenu.ActionSetActive:
-		st.Presence = "active"
-	case presencemenu.ActionSetAway:
-		st.Presence = "away"
-	case presencemenu.ActionSnooze:
-		st.DNDEnabled = true
-		st.DNDEndTS = time.Now().Add(time.Duration(snoozeMinutes) * time.Minute)
-	case presencemenu.ActionEndDND:
-		st.DNDEnabled = false
-		st.DNDEndTS = time.Time{}
-	}
-	a.statusByTeam[a.activeTeamID] = st
-	a.statusbar.SetStatus(st.Presence, st.DNDEnabled, st.DNDEndTS)
-}
-
-func (a *App) handlePresenceCustomSnoozeMode(msg tea.KeyMsg) tea.Cmd {
-	switch msg.Key().Code {
-	case tea.KeyEscape:
-		a.presenceCustomBuf = ""
-		a.SetMode(ModeNormal)
-		return nil
-	case tea.KeyEnter:
-		mins, err := strconv.Atoi(a.presenceCustomBuf)
-		a.presenceCustomBuf = ""
-		a.SetMode(ModeNormal)
-		if err != nil || mins <= 0 {
-			a.statusbar.SetToast("Invalid snooze duration")
-			return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return statusbar.CopiedClearMsg{} })
-		}
-		a.applyOptimisticStatus(presencemenu.ActionSnooze, mins)
-		if a.setStatusFn != nil {
-			a.setStatusFn(presencemenu.ActionSnooze, mins)
-		}
-		return nil
-	case tea.KeyBackspace:
-		if len(a.presenceCustomBuf) > 0 {
-			a.presenceCustomBuf = a.presenceCustomBuf[:len(a.presenceCustomBuf)-1]
-		}
-		return nil
-	}
-	r := msg.String()
-	if len(r) == 1 && r[0] >= '0' && r[0] <= '9' {
-		if len(a.presenceCustomBuf) < 6 {
-			a.presenceCustomBuf += r
-		}
-	}
-	return nil
-}
-
-func (a *App) handleReactionPickerMode(msg tea.KeyMsg) tea.Cmd {
-	keyStr := msg.String()
-
-	switch msg.Key().Code {
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyEnter:
-		keyStr = "enter"
-	case tea.KeyUp:
-		keyStr = "up"
-	case tea.KeyDown:
-		keyStr = "down"
-	case tea.KeyBackspace:
-		keyStr = "backspace"
-	}
-
-	// Capture values before HandleKey (which may call Close and reset them)
-	channelID := a.reactionPicker.ChannelID()
-	messageTS := a.reactionPicker.MessageTS()
-
-	result := a.reactionPicker.HandleKey(keyStr)
-
-	if !a.reactionPicker.IsVisible() {
-		// Esc was pressed
-		a.SetMode(ModeNormal)
-		return nil
-	}
-
-	if result != nil {
-		emojiName := result.Emoji
-
-		a.reactionPicker.Close()
-		a.SetMode(ModeNormal)
-
-		// Record frecent usage on add (not remove)
-		if !result.Remove && a.frecentRecordFn != nil {
-			a.frecentRecordFn(emojiName)
-		}
-
-		// Optimistic update
-		a.updateReactionOnMessage(channelID, messageTS, emojiName, a.currentUserID, result.Remove)
-
-		// Fire API call
-		if result.Remove {
-			if a.reactionRemoveFn != nil {
-				return func() tea.Msg {
-					err := a.reactionRemoveFn(channelID, messageTS, emojiName)
-					return ReactionSentMsg{Err: err}
-				}
-			}
-		} else {
-			if a.reactionAddFn != nil {
-				return func() tea.Msg {
-					err := a.reactionAddFn(channelID, messageTS, emojiName)
-					return ReactionSentMsg{Err: err}
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-func (a *App) handleConfirmMode(msg tea.KeyMsg) tea.Cmd {
-	keyStr := msg.String()
-	switch msg.Key().Code {
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyEnter:
-		keyStr = "enter"
-	}
-
-	res := a.confirmPrompt.HandleKey(keyStr)
-	if !a.confirmPrompt.IsVisible() {
-		a.SetMode(ModeNormal)
-	}
-	return res.Cmd
-}
+// handleConfirmMode moved to mode_confirm.go (Phase 5j).
 
 func (a *App) updateReactionOnMessage(channelID, messageTS, emojiName, userID string, remove bool) {
 	a.messagepane.UpdateReaction(messageTS, emojiName, userID, remove)
@@ -3693,9 +580,7 @@ func (a *App) openPickerFromMessage() tea.Cmd {
 		}
 	}
 	a.messagepane.ExitReactionNav()
-	if a.frecentLoadFn != nil {
-		a.reactionPicker.SetFrecentEmoji(a.frecentLoadFn(10))
-	}
+	a.reactionPicker.SetFrecentEmoji(a.reactions.LoadFrecent(10))
 	a.reactionPicker.Open(a.activeChannelID, msg.TS, existing)
 	a.SetMode(ModeReactionPicker)
 	return nil
@@ -3713,9 +598,7 @@ func (a *App) openPickerFromThread() tea.Cmd {
 		}
 	}
 	a.threadPanel.ExitReactionNav()
-	if a.frecentLoadFn != nil {
-		a.reactionPicker.SetFrecentEmoji(a.frecentLoadFn(10))
-	}
+	a.reactionPicker.SetFrecentEmoji(a.reactions.LoadFrecent(10))
 	a.reactionPicker.Open(a.threadPanel.ChannelID(), reply.TS, existing)
 	a.SetMode(ModeReactionPicker)
 	return nil
@@ -3734,24 +617,18 @@ func (a *App) toggleReactionOnSelectedMessage(emojiName string) tea.Cmd {
 		}
 	}
 	a.updateReactionOnMessage(a.activeChannelID, msg.TS, emojiName, a.currentUserID, remove)
-	channelID := a.activeChannelID
-	ts := msg.TS
+	channelID := ids.ChannelID(a.activeChannelID)
+	ts := ids.MessageTS(msg.TS)
 	if remove {
-		if a.reactionRemoveFn != nil {
-			return func() tea.Msg {
-				err := a.reactionRemoveFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
-		}
-	} else {
-		if a.reactionAddFn != nil {
-			return func() tea.Msg {
-				err := a.reactionAddFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
+		return func() tea.Msg {
+			err := a.reactions.Remove(channelID, ts, emojiName)
+			return ReactionSentMsg{Err: err}
 		}
 	}
-	return nil
+	return func() tea.Msg {
+		err := a.reactions.Add(channelID, ts, emojiName)
+		return ReactionSentMsg{Err: err}
+	}
 }
 
 func (a *App) toggleReactionOnSelectedThread(emojiName string) tea.Cmd {
@@ -3766,25 +643,20 @@ func (a *App) toggleReactionOnSelectedThread(emojiName string) tea.Cmd {
 			break
 		}
 	}
-	channelID := a.threadPanel.ChannelID()
-	a.updateReactionOnMessage(channelID, reply.TS, emojiName, a.currentUserID, remove)
-	ts := reply.TS
+	threadChannelID := a.threadPanel.ChannelID()
+	a.updateReactionOnMessage(threadChannelID, reply.TS, emojiName, a.currentUserID, remove)
+	channelID := ids.ChannelID(threadChannelID)
+	ts := ids.MessageTS(reply.TS)
 	if remove {
-		if a.reactionRemoveFn != nil {
-			return func() tea.Msg {
-				err := a.reactionRemoveFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
-		}
-	} else {
-		if a.reactionAddFn != nil {
-			return func() tea.Msg {
-				err := a.reactionAddFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
+		return func() tea.Msg {
+			err := a.reactions.Remove(channelID, ts, emojiName)
+			return ReactionSentMsg{Err: err}
 		}
 	}
-	return nil
+	return func() tea.Msg {
+		err := a.reactions.Add(channelID, ts, emojiName)
+		return ReactionSentMsg{Err: err}
+	}
 }
 
 // toggleReactionOnMessageItem toggles the current user's reaction on
@@ -3793,7 +665,7 @@ func (a *App) toggleReactionOnSelectedThread(emojiName string) tea.Cmd {
 // rendered hit rect rather than by selection. Behavior matches
 // toggleReactionOnSelectedMessage: optimistic in-memory update + an
 // async tea.Cmd that issues the Slack add/remove call.
-func (a *App) toggleReactionOnMessageItem(channelID string, msg messages.MessageItem, emojiName string) tea.Cmd {
+func (a *App) toggleReactionOnMessageItem(channelIDStr string, msg messages.MessageItem, emojiName string) tea.Cmd {
 	remove := false
 	for _, r := range msg.Reactions {
 		if r.Emoji == emojiName && r.HasReacted {
@@ -3801,33 +673,25 @@ func (a *App) toggleReactionOnMessageItem(channelID string, msg messages.Message
 			break
 		}
 	}
-	a.updateReactionOnMessage(channelID, msg.TS, emojiName, a.currentUserID, remove)
-	ts := msg.TS
+	a.updateReactionOnMessage(channelIDStr, msg.TS, emojiName, a.currentUserID, remove)
+	channelID := ids.ChannelID(channelIDStr)
+	ts := ids.MessageTS(msg.TS)
 	if remove {
-		if a.reactionRemoveFn != nil {
-			return func() tea.Msg {
-				err := a.reactionRemoveFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
-		}
-	} else {
-		if a.reactionAddFn != nil {
-			return func() tea.Msg {
-				err := a.reactionAddFn(channelID, ts, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
+		return func() tea.Msg {
+			err := a.reactions.Remove(channelID, ts, emojiName)
+			return ReactionSentMsg{Err: err}
 		}
 	}
-	return nil
+	return func() tea.Msg {
+		err := a.reactions.Add(channelID, ts, emojiName)
+		return ReactionSentMsg{Err: err}
+	}
 }
 
 // copyPermalinkOfSelected resolves the currently-selected message or thread
 // reply, calls the permalink fetcher, and returns a tea.Cmd that writes the
 // URL to the clipboard and emits a status-bar toast.
 func (a *App) copyPermalinkOfSelected() tea.Cmd {
-	if a.permalinkFetchFn == nil {
-		return nil
-	}
 	var channelID, ts string
 	switch a.focusedPanel {
 	case PanelMessages:
@@ -3850,14 +714,22 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 	if channelID == "" || ts == "" {
 		return nil
 	}
-	fetch := a.permalinkFetchFn
+	messageSvc := a.messageSvc
+	cID := ids.ChannelID(channelID)
+	mTS := ids.MessageTS(ts)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		url, err := fetch(ctx, channelID, ts)
+		url, err := messageSvc.Permalink(ctx, cID, mTS)
 		if err != nil {
 			log.Printf("copy permalink: %v", err)
 			return statusbar.PermalinkCopyFailedMsg{}
+		}
+		if url == "" {
+			// No permalink wired (noop service) or Slack returned an
+			// empty URL. Silent no-op rather than copying "" with a
+			// false success toast.
+			return nil
 		}
 		return tea.BatchMsg{
 			tea.SetClipboard(url),
@@ -3928,15 +800,7 @@ func (a *App) handleGoToBottom() tea.Cmd {
 // currently-focused panel. Falls back to a sensible default if the layout
 // hasn't been measured yet (i.e. before the first render).
 func (a *App) pageSize() int {
-	var h int
-	switch a.focusedPanel {
-	case PanelSidebar:
-		h = a.layoutSidebarHeight
-	case PanelMessages:
-		h = a.layoutMsgHeight
-	case PanelThread:
-		h = a.layoutThreadHeight
-	}
+	h := a.layout.PageHeight(a.focusedPanel)
 	if h < 4 {
 		h = 4
 	}
@@ -3953,28 +817,10 @@ func (a *App) halfPageSize() int {
 	return n
 }
 
-// panelAt classifies the (x, y) coordinate into the panel under the
-// cursor and returns pane-local content coordinates (after subtracting
-// layout offsets and the 1-row top border). ok=false means the cursor
-// is outside the messages/thread panes (status bar, sidebar, rail —
-// drag selection is not supported there).
+// panelAt is a thin wrapper around panelLayout.PanelAt that forwards
+// the App's current height + visibility flags.
 func (a *App) panelAt(x, y int) (panel Panel, paneX, paneY int, ok bool) {
-	if y >= a.height-1 {
-		return PanelWorkspace, 0, 0, false // status bar
-	}
-	switch {
-	case x < a.layoutRailWidth:
-		return PanelWorkspace, 0, 0, false
-	case a.sidebarVisible && x < a.layoutSidebarEnd:
-		return PanelSidebar, 0, 0, false
-	case x < a.layoutMsgEnd:
-		// Messages pane content: subtract the message-pane left edge
-		// (after sidebar) and account for the panel's top border (1 row).
-		return PanelMessages, x - a.layoutSidebarEnd - 1, y - 1, true
-	case a.threadVisible && x < a.layoutThreadEnd:
-		return PanelThread, x - a.layoutMsgEnd - 1, y - 1, true
-	}
-	return PanelWorkspace, 0, 0, false
+	return a.layout.PanelAt(x, y, a.height, a.sidebarVisible, a.threadVisible)
 }
 
 // scrollFocusedPanel scrolls the focused panel by delta lines (negative = up)
@@ -4031,14 +877,14 @@ func (a *App) scrollFocusedPanel(delta int) tea.Cmd {
 // Returns nil otherwise. Centralizes the spinner-tick + fetch-cmd batching
 // previously duplicated across handleUp / the mouse-wheel handler / page-up.
 func (a *App) maybeFetchOlderHistory(atTop bool) tea.Cmd {
-	if !atTop || a.fetchingOlder || a.olderMessagesFetcher == nil {
+	if !atTop || a.fetchingOlder {
 		return nil
 	}
 	a.fetchingOlder = true
 	a.messagepane.SetLoading(true)
-	chID := a.activeChannelID
-	oldestTS := a.messagepane.OldestTS()
-	fetcher := a.olderMessagesFetcher
+	chID := ids.ChannelID(a.activeChannelID)
+	oldestTS := ids.MessageTS(a.messagepane.OldestTS())
+	channels := a.channels
 	// Kick the spinner tick: if a.loading is already false (workspace
 	// fully loaded), no tick is alive and the glyph would freeze on its
 	// last frame.
@@ -4047,7 +893,7 @@ func (a *App) maybeFetchOlderHistory(atTop bool) tea.Cmd {
 			return SpinnerTickMsg{}
 		}),
 		func() tea.Msg {
-			return fetcher(chID, oldestTS)
+			return channels.FetchOlder(chID, oldestTS)
 		},
 	)
 }
@@ -4141,22 +987,18 @@ func (a *App) openThreadForSelectedMessage() tea.Cmd {
 	a.threadCompose.SetChannel("thread")
 	a.applyThreadUnreadBoundary(a.activeChannelID)
 
-	if a.threadFetcher == nil {
-		return nil
-	}
-	fetcher := a.threadFetcher
-	chID := a.activeChannelID
-	ts := threadTS
+	threads := a.threads
+	chID := ids.ChannelID(a.activeChannelID)
+	ts := ids.ThreadTS(threadTS)
+	parentTS := threadTS
 	var batch []tea.Cmd
-	if a.threadCacheReader != nil {
-		if cached := a.threadCacheReader(chID, ts); len(cached) > 1 {
-			replies := cached[1:] // strip parent; reducer expects replies-only
-			batch = append(batch, func() tea.Msg {
-				return ThreadRepliesLoadedMsg{ThreadTS: ts, Replies: replies}
-			})
-		}
+	if cached := threads.CacheRead(chID, ts); len(cached) > 1 {
+		replies := cached[1:] // strip parent; reducer expects replies-only
+		batch = append(batch, func() tea.Msg {
+			return ThreadRepliesLoadedMsg{ThreadTS: parentTS, Replies: replies}
+		})
 	}
-	batch = append(batch, func() tea.Msg { return fetcher(chID, ts) })
+	batch = append(batch, func() tea.Msg { return threads.Fetch(chID, ts) })
 	return tea.Batch(batch...)
 }
 
@@ -4322,22 +1164,19 @@ func (a *App) openSelectedThreadCmd(debounce bool) tea.Cmd {
 	if a.threadsView.MarkSelectedRead() {
 		a.sidebar.SetThreadsUnreadCount(a.threadsView.UnreadCount())
 	}
-	if a.threadFetcher == nil {
-		return nil
-	}
-	fetcher := a.threadFetcher
+	threads := a.threads
 	chID, threadTS := sum.ChannelID, sum.ThreadTS
+	tChID := ids.ChannelID(chID)
+	tThreadTS := ids.ThreadTS(threadTS)
 	if !debounce {
 		var batch []tea.Cmd
-		if a.threadCacheReader != nil {
-			if cached := a.threadCacheReader(chID, threadTS); len(cached) > 1 {
-				replies := cached[1:] // strip parent; reducer expects replies-only
-				batch = append(batch, func() tea.Msg {
-					return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: replies}
-				})
-			}
+		if cached := threads.CacheRead(tChID, tThreadTS); len(cached) > 1 {
+			replies := cached[1:] // strip parent; reducer expects replies-only
+			batch = append(batch, func() tea.Msg {
+				return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: replies}
+			})
 		}
-		batch = append(batch, func() tea.Msg { return fetcher(chID, threadTS) })
+		batch = append(batch, func() tea.Msg { return threads.Fetch(tChID, tThreadTS) })
 		return tea.Batch(batch...)
 	}
 	a.pendingThreadFetchGen++
@@ -4352,10 +1191,10 @@ func (a *App) openSelectedThreadCmd(debounce bool) tea.Cmd {
 // before the first reply the user hasn't seen. No-op when no last-read
 // fetcher is wired (e.g. in tests).
 func (a *App) applyThreadUnreadBoundary(channelID string) {
-	if a.channelLastReadFetcher == nil || channelID == "" {
+	if channelID == "" {
 		return
 	}
-	a.threadPanel.SetUnreadBoundary(a.channelLastReadFetcher(channelID))
+	a.threadPanel.SetUnreadBoundary(a.threads.ChannelLastRead(ids.ChannelID(channelID)))
 }
 
 // scheduleThreadsDirty returns a tea.Cmd that fires a ThreadsListDirtyMsg
@@ -4391,84 +1230,18 @@ func (a *App) userNameFor(userID string) string {
 	return userID
 }
 
-// Loading overlay methods
-
+// SetLoadingWorkspaces seeds the startup overlay. Called from
+// cmd/slk/main.go at program start. Delegates to workspaceBootstrap;
+// kept as an App method for backwards-compatible wiring.
 func (a *App) SetLoadingWorkspaces(names []string) {
-	a.loading = true
-	a.loadingStates = nil
-	for _, name := range names {
-		a.loadingStates = append(a.loadingStates, loadingEntry{
-			TeamName: name,
-			Status:   "connecting",
-		})
-	}
+	a.bootstrap.SetWorkspaces(names)
 }
 
-func (a *App) MarkWorkspaceReady(teamName string) {
-	for i := range a.loadingStates {
-		if a.loadingStates[i].TeamName == teamName {
-			a.loadingStates[i].Status = "ready"
-			break
-		}
-	}
-	a.checkLoadingDone()
-}
-
-func (a *App) MarkWorkspaceFailed(teamName string) {
-	for i := range a.loadingStates {
-		if a.loadingStates[i].TeamName == teamName {
-			a.loadingStates[i].Status = "failed"
-			break
-		}
-	}
-	a.checkLoadingDone()
-}
-
-func (a *App) checkLoadingDone() {
-	// Dismiss loading as soon as at least one workspace is ready.
-	// Other workspaces continue connecting in the background.
-	for _, e := range a.loadingStates {
-		if e.Status == "ready" {
-			a.loading = false
-			return
-		}
-	}
-	// If none ready, check if all are failed/done
-	for _, e := range a.loadingStates {
-		if e.Status == "connecting" {
-			return
-		}
-	}
-	a.loading = false
-}
-
-func (a *App) renderLoadingOverlay(width, height int) string {
-	var rows []string
-	spinner := string(styles.SpinnerChars[a.spinnerFrame])
-
-	for _, entry := range a.loadingStates {
-		switch entry.Status {
-		case "ready":
-			rows = append(rows, lipgloss.NewStyle().Foreground(styles.Accent).Render("✓")+" "+entry.TeamName)
-		case "failed":
-			rows = append(rows, lipgloss.NewStyle().Foreground(styles.Error).Render("✗")+" "+entry.TeamName+" (failed)")
-		default:
-			rows = append(rows, lipgloss.NewStyle().Foreground(styles.Primary).Render(spinner)+" Connecting to "+entry.TeamName+"...")
-		}
-	}
-
-	content := lipgloss.JoinVertical(lipgloss.Left, rows...)
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(styles.Primary).
-		Padding(1, 2).
-		Render(content)
-
-	return lipgloss.Place(width, height,
-		lipgloss.Center, lipgloss.Center,
-		box,
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(styles.SurfaceDark)),
-	)
+// spinnerGlyph returns the current spinner character for both the
+// bootstrap overlay and the messages-pane in-channel spinner. Sourced
+// from styles.SpinnerChars indexed by the shared spinnerFrame counter.
+func (a *App) spinnerGlyph() string {
+	return string(styles.SpinnerChars[a.spinnerFrame])
 }
 
 // SetInitialLastReadTS sets the last read timestamp for the initial channel load.
@@ -4524,59 +1297,24 @@ func (a *App) SetChannels(items []sidebar.ChannelItem) {
 	a.threadsView.SetChannelNames(names)
 }
 
-// SetChannelFetcher sets the callback used to load messages when a channel is selected.
-func (a *App) SetChannelFetcher(fn ChannelFetchFunc) {
-	a.channelFetcher = fn
+// SetChannelService wires the App's ChannelService collaborator
+// (Slack channels API + local cache + session bookkeeping). Build
+// one via NewChannelService from a ChannelServiceFuncs bundle.
+func (a *App) SetChannelService(s ChannelService) {
+	if s == nil {
+		s = noopChannelService
+	}
+	a.channels = s
 }
 
-// SetChannelReadMarker installs the mark-as-read callback. Wired in
-// cmd/slk/main.go alongside SetChannelFetcher (the fetcher keeps its
-// own mark-as-read side-effect for Tier 2/3; this callback exists
-// purely so Tier 1 can mark-as-read without GetHistory).
-func (a *App) SetChannelReadMarker(fn func(channelID, ts string) tea.Msg) {
-	a.channelReadMarker = fn
-}
-
-// SetChannelCacheReader sets the callback consulted synchronously on
-// channel selection to render cached messages before the network fetch
-// completes. Pass nil to disable cache-first rendering.
-func (a *App) SetChannelCacheReader(fn ChannelCacheReadFunc) {
-	a.channelCacheReader = fn
-}
-
-// SetChannelSyncedAtReader installs the cache-freshness reader. Wired
-// in cmd/slk/main.go's wireCallbacks to db.GetChannelSyncedAt.
-func (a *App) SetChannelSyncedAtReader(fn func(channelID string) int64) {
-	a.channelSyncedAtReader = fn
-}
-
-// SetOlderMessagesFetcher sets the callback used to load older messages when scrolling up.
-func (a *App) SetOlderMessagesFetcher(fn OlderMessagesFetchFunc) {
-	a.olderMessagesFetcher = fn
-}
-
-// SetMessageSender sets the callback used to send messages.
-func (a *App) SetMessageSender(fn MessageSendFunc) {
-	a.messageSender = fn
-}
-
-// SetMessageEditor wires the chat.update callback used by edit submit.
-func (a *App) SetMessageEditor(fn MessageEditFunc) {
-	a.messageEditor = fn
-}
-
-// SetMessageDeleter wires the chat.delete callback used by delete confirm.
-func (a *App) SetMessageDeleter(fn MessageDeleteFunc) {
-	a.messageDeleter = fn
-}
-
-// SetMessageMarkUnreader wires the conversations.mark / subscriptions.thread.mark
-// callback used by the U key. Implementations should perform the HTTP call
-// best-effort, persist the new last_read_ts to SQLite via
-// cache.UpdateChannelReadState for channel-level marks (no-op for
-// thread-level until per-thread state lands), and return MessageMarkedUnreadMsg.
-func (a *App) SetMessageMarkUnreader(fn MarkUnreadFunc) {
-	a.messageMarkUnreader = fn
+// SetMessageService wires the App's MessageService collaborator
+// (send / edit / delete / mark-unread / permalink). Build one via
+// NewMessageService from a MessageServiceFuncs bundle.
+func (a *App) SetMessageService(s MessageService) {
+	if s == nil {
+		s = noopMessageService
+	}
+	a.messageSvc = s
 }
 
 // SetUploader wires the upload callback used by Ctrl+V smart-paste
@@ -4603,31 +1341,14 @@ func (a *App) SetClipboardReader(fn clipboardReader) {
 	a.clipboardRead = fn
 }
 
-// SetThreadFetcher sets the callback used to load thread replies.
-func (a *App) SetThreadFetcher(fn ThreadFetchFunc) {
-	a.threadFetcher = fn
-}
-
-// SetThreadCacheReader sets the callback consulted synchronously when
-// a thread is opened to render cached replies before the network
-// fetch completes. Pass nil to disable cache-first thread rendering.
-func (a *App) SetThreadCacheReader(fn ThreadCacheReadFunc) {
-	a.threadCacheReader = fn
-}
-
-// SetThreadMarker wires the callback that marks a thread as read on Slack's
-// servers. Fired automatically when a thread's replies finish loading after
-// the user opens the thread (from either the messages pane or the threads
-// view). Optional — when nil, only the local UI mark runs.
-func (a *App) SetThreadMarker(fn ThreadMarkFunc) {
-	a.threadMarker = fn
-}
-
-// SetChannelLastReadFetcher wires a callback that returns the parent
-// channel's last_read_ts so the thread panel can show the user where
-// the unread boundary sits when they open a thread. Optional.
-func (a *App) SetChannelLastReadFetcher(fn func(channelID string) string) {
-	a.channelLastReadFetcher = fn
+// SetThreadService wires the App's ThreadService collaborator
+// (fetch / mark / reply / list-fetch + parent-channel last-read).
+// Build one via NewThreadService from a ThreadServiceFuncs bundle.
+func (a *App) SetThreadService(s ThreadService) {
+	if s == nil {
+		s = noopThreadService
+	}
+	a.threads = s
 }
 
 // SetReadStateReader installs a callback the sidebar (and any future
@@ -4642,32 +1363,6 @@ func (a *App) SetReadStateReader(f func() map[string]cache.ReadState) {
 // channel with has_unread=true.
 func (a *App) SetWorkspaceUnreadReader(f func() []string) {
 	a.workspaceRail.SetUnreadReader(f)
-}
-
-// SetChannelVisitRecorder wires the callback that persists a channel
-// visit (SQLite write + WorkspaceContext map update). Called once per
-// ChannelSelectedMsg.
-func (a *App) SetChannelVisitRecorder(fn ChannelVisitRecorder) {
-	a.channelVisitRecorder = fn
-}
-
-// SetChannelLookupFunc wires the callback used by navigateBack /
-// navigateForward to validate channel IDs from the history stack
-// before re-opening them. Stale IDs (return ok=false) are silently
-// dropped and skipped.
-func (a *App) SetChannelLookupFunc(fn ChannelLookupFunc) {
-	a.channelLookup = fn
-}
-
-// SetThreadReplySender sets the callback used to send thread replies.
-func (a *App) SetThreadReplySender(fn ThreadReplySendFunc) {
-	a.threadReplySender = fn
-}
-
-// SetThreadsListFetcher wires the function that loads the involved-threads
-// list for a workspace. Called by main.go.
-func (a *App) SetThreadsListFetcher(f ThreadsListFetchFunc) {
-	a.threadsListFetcher = f
 }
 
 func (a *App) SetChannelFinderItems(items []channelfinder.Item) {
@@ -4949,13 +1644,6 @@ func (a *App) SetChannelMembership(channelID string, memberIDs []string) {
 	a.threadCompose.SetChannelMembership(channelID, memberIDs)
 }
 
-// SetChannelMembershipFetcher registers a callback invoked on every
-// ChannelSelectedMsg with the newly active channel ID. main.go wires
-// this to membership.Manager.EnsureFresh.
-func (a *App) SetChannelMembershipFetcher(fn func(channelID string)) {
-	a.channelMembershipFetcher = fn
-}
-
 // SetCustomEmoji rebuilds the emoji entry list (built-ins + the active
 // workspace's customs) and pushes it into both compose boxes.
 func (a *App) SetCustomEmoji(customs map[string]string) {
@@ -4976,15 +1664,15 @@ func (a *App) SetInitialChannel(channelID, channelName string, msgs []messages.M
 	a.statusbar.SetChannel(channelName)
 }
 
-func (a *App) SetReactionSender(add ReactionAddFunc, remove ReactionRemoveFunc) {
-	a.reactionAddFn = add
-	a.reactionRemoveFn = remove
-}
-
-// SetPermalinkFetcher sets the callback used to look up message permalinks
-// for the copy-permalink action.
-func (a *App) SetPermalinkFetcher(fn PermalinkFetchFunc) {
-	a.permalinkFetchFn = fn
+// SetReactionService wires the App's ReactionService collaborator.
+// The supplied service handles both reaction add/remove and frecent
+// emoji bookkeeping; build one via NewReactionService from
+// internal/ui/services.go.
+func (a *App) SetReactionService(r ReactionService) {
+	if r == nil {
+		r = noopReactionService
+	}
+	a.reactions = r
 }
 
 func (a *App) SetCurrentUserID(userID string) {
@@ -5010,19 +1698,7 @@ func (a *App) nowFormatted() string {
 	return time.Now().Format("3:04 PM")
 }
 
-// nextLocalTS mints a unique placeholder id for an optimistic instant-
-// display message. The "local:" prefix makes it trivially
-// distinguishable from a Slack-assigned TS (which is always of the
-// form "<seconds>.<microseconds>").
-func (a *App) nextLocalTS() string {
-	a.localTSCounter++
-	return fmt.Sprintf("local:%d", a.localTSCounter)
-}
 
-func (a *App) SetFrecentFuncs(load FrecentLoadFunc, record FrecentRecordFunc) {
-	a.frecentLoadFn = load
-	a.frecentRecordFn = record
-}
 
 // ActiveChannelID returns the ID of the currently viewed channel.
 func (a *App) ActiveChannelID() string {
@@ -5068,16 +1744,6 @@ func (a *App) workspaceNameForActive() string {
 	return ""
 }
 
-// activeWorkspaceStatus returns the cached presence/DND state for the
-// active workspace (zero values if none cached yet).
-func (a *App) activeWorkspaceStatus() (string, bool, time.Time) {
-	st, ok := a.statusByTeam[a.activeTeamID]
-	if !ok {
-		return "", false, time.Time{}
-	}
-	return st.Presence, st.DNDEnabled, st.DNDEndTS
-}
-
 // SetThemeSaver sets the callback for saving the theme selection. The
 // callback receives the chosen theme name and the scope (workspace vs.
 // global) so the implementation can route to the correct save target.
@@ -5099,7 +1765,7 @@ func (a *App) SetThemeOverrides(overrides config.Theme) {
 
 // SetTypingEnabled controls whether typing indicators are shown and sent.
 func (a *App) SetTypingEnabled(enabled bool) {
-	a.typingEnabled = enabled
+	a.typing.SetEnabled(enabled)
 }
 
 // SetMouseWheelLines configures the number of lines the viewport scrolls per
@@ -5120,161 +1786,21 @@ func (a *App) SetSidebarStaleThreshold(d time.Duration) {
 
 // SetTypingSender sets the callback for sending typing indicators.
 func (a *App) SetTypingSender(fn TypingSendFunc) {
-	a.typingSendFn = fn
+	a.typingOut.SetSender(fn)
 }
 
-// SetChannelJoiner sets the callback for joining a channel via the Slack API.
-func (a *App) SetChannelJoiner(fn JoinChannelFunc) {
-	a.channelJoiner = fn
-}
-
-// shouldSendTyping returns true if enough time has passed since the last typing send.
-func (a *App) shouldSendTyping() bool {
-	if !a.typingEnabled {
-		return false
-	}
-	return time.Since(a.lastTypingSent) >= 3*time.Second
-}
-
-// maybeSendTyping sends a typing indicator if the throttle allows it.
-func (a *App) maybeSendTyping() {
-	if a.typingSendFn == nil || !a.shouldSendTyping() {
-		return
-	}
-	a.lastTypingSent = time.Now()
-	channelID := a.activeChannelID
-	if a.focusedPanel == PanelThread && a.threadVisible {
-		channelID = a.threadPanel.ChannelID()
-	}
-	go a.typingSendFn(channelID)
-}
-
-// selfSendWindow is the maximum time we expect between a user's slk-
-// originated send (SendMessageMsg / EditMessageMsg / etc. dispatch) and
-// the matching chat.postMessage HTTP response landing as MessageSentMsg.
-// While markSelfSendInFlight has been called within this window for a
-// channel, NewMessageMsg suppresses self-user echoes for that channel
-// to avoid the visible flicker between WS echo and HTTP response.
-const selfSendWindow = 3 * time.Second
-
-// markSelfSendInFlight records that the user just submitted a slk-
-// originated send (chat.postMessage / chat.update / thread reply) for
-// channelID. While the timestamp is within selfSendWindow, the WS echo
-// for self-user messages on this channel is dropped so the optimistic
-// path is the sole renderer (and we don't flicker through Slack's
-// normalised text).
-func (a *App) markSelfSendInFlight(channelID string) {
-	if channelID == "" {
-		return
-	}
-	a.lastSelfSendByChannel[channelID] = time.Now()
-}
-
-// selfSendInFlight reports whether the user submitted an slk-originated
-// send for channelID within the last selfSendWindow. Cross-session
-// sends (e.g. from the official Slack client) never update the map,
-// so their WS echoes are not suppressed.
-func (a *App) selfSendInFlight(channelID string) bool {
-	t, ok := a.lastSelfSendByChannel[channelID]
-	if !ok {
-		return false
-	}
-	return time.Since(t) < selfSendWindow
-}
-
-// recordSelfSent marks a message TS as one the user just posted from this
-// session, so the WS echo (if any) can be skipped to avoid double-rendering.
-// Old entries are GC'd opportunistically; even if they leak, they're tiny
-// and only checked when echoes arrive.
-func (a *App) recordSelfSent(ts string) {
-	if ts == "" {
-		return
-	}
-	a.selfSentTSes[ts] = time.Now()
-	// Opportunistic cleanup: drop entries older than 5 minutes. WS echoes
-	// arrive within seconds; anything older is stale.
-	if len(a.selfSentTSes) > 64 {
-		cutoff := time.Now().Add(-5 * time.Minute)
-		for k, v := range a.selfSentTSes {
-			if v.Before(cutoff) {
-				delete(a.selfSentTSes, k)
-			}
-		}
-	}
-}
-
-// isSelfSent reports whether ts matches a message we recently posted from
-// this session.
-func (a *App) isSelfSent(ts string) bool {
-	if ts == "" {
-		return false
-	}
-	_, ok := a.selfSentTSes[ts]
-	return ok
-}
-
-// addTypingUser records that a user is typing in a channel.
-func (a *App) addTypingUser(channelID, userID string) {
-	if a.typingUsers[channelID] == nil {
-		a.typingUsers[channelID] = make(map[string]time.Time)
-	}
-	a.typingUsers[channelID][userID] = time.Now().Add(5 * time.Second)
-}
-
-// expireTypingUsers removes expired typing entries.
-func (a *App) expireTypingUsers() {
-	now := time.Now()
-	for ch, users := range a.typingUsers {
-		for uid, expires := range users {
-			if now.After(expires) {
-				delete(users, uid)
-			}
-		}
-		if len(users) == 0 {
-			delete(a.typingUsers, ch)
-		}
-	}
-}
-
-// getTypingUsers returns user IDs currently typing in the given channel.
-func (a *App) getTypingUsers(channelID string) []string {
-	users := a.typingUsers[channelID]
-	if len(users) == 0 {
-		return nil
-	}
-	now := time.Now()
-	var result []string
-	for uid, expires := range users {
-		if now.Before(expires) {
-			result = append(result, uid)
-		}
-	}
-	return result
-}
-
-// getTypingUsersFiltered returns typing user IDs excluding the current user.
-func (a *App) getTypingUsersFiltered(channelID string) []string {
-	all := a.getTypingUsers(channelID)
-	var filtered []string
-	for _, uid := range all {
-		if uid != a.currentUserID {
-			filtered = append(filtered, uid)
-		}
-	}
-	return filtered
-}
-
-// renderTypingLine returns the styled typing indicator for the current channel,
-// or an empty string if no one is typing.
+// renderTypingLine returns the styled typing indicator for the current
+// channel, or an empty string if no one is typing. Stays on App because
+// it pulls in messagepane name resolution and styles. State and
+// formatting live in internal/ui/typing.go.
 func (a *App) renderTypingLine() string {
-	if !a.typingEnabled {
+	if !a.typing.Enabled() {
 		return ""
 	}
-	userIDs := a.getTypingUsersFiltered(a.activeChannelID)
+	userIDs := a.typing.UsersExcluding(a.activeChannelID, a.currentUserID)
 	if len(userIDs) == 0 {
 		return ""
 	}
-
 	// Resolve user IDs to display names
 	names := make([]string, 0, len(userIDs))
 	for _, uid := range userIDs {
@@ -5284,485 +1810,55 @@ func (a *App) renderTypingLine() string {
 		}
 		names = append(names, name)
 	}
-
-	text := a.typingIndicatorText(names)
-	return styles.TypingIndicator.Render(text)
-}
-
-// typingIndicatorText formats the typing indicator string from display names.
-func (a *App) typingIndicatorText(names []string) string {
-	switch len(names) {
-	case 0:
-		return ""
-	case 1:
-		return names[0] + " is typing..."
-	case 2:
-		return names[0] + " and " + names[1] + " are typing..."
-	default:
-		return "Several people are typing..."
-	}
+	return styles.TypingIndicator.Render(typingIndicatorText(names))
 }
 
 func (a *App) View() tea.View {
-	// Before the terminal reports its size, we can't lay out the
-	// real three-panel UI. Render the loading overlay (or a minimal
-	// "Initializing..." fallback) using a sane default canvas so the
-	// user sees something immediately instead of a blank altscreen
-	// while workspaces connect.
-	if a.width == 0 || a.height == 0 {
-		var screen string
-		if a.loading {
-			// Use a generous default canvas so the centered overlay
-			// lands roughly where the user's eye expects it. The
-			// real WindowSizeMsg arrives within a frame and the
-			// overlay re-renders correctly.
-			screen = a.renderLoadingOverlay(80, 24)
-		} else {
-			screen = "Initializing..."
-		}
-		v := tea.NewView(screen)
-		v.AltScreen = true
+	if v, handled := a.renderEarlyFallback(); handled {
 		return v
 	}
 
-	statusHeight := 1
-	contentHeight := a.height - statusHeight
-
-	// Calculate widths, accounting for borders (2 cols each for left+right)
-	railWidth := a.workspaceRail.Width()
-	sidebarWidth := 0
-	sidebarBorder := 0
-	if a.sidebarVisible {
-		sidebarWidth = a.sidebar.Width()
-		sidebarBorder = 2 // left + right border
-	}
-
-	// Calculate the message area (everything right of sidebar)
-	msgAreaWidth := a.width - railWidth - sidebarWidth - sidebarBorder
-
-	// Determine thread and message pane widths
-	msgBorder := 2
-	threadWidth := 0
-	threadBorder := 0
-	if a.threadVisible {
-		threadBorder = 2
-		// 35% of message area for thread, but enforce minimums
-		threadWidth = msgAreaWidth * 35 / 100
-		msgPaneWidth := msgAreaWidth - threadWidth - msgBorder - threadBorder
-		// Enforce minimum widths
-		if msgPaneWidth < 40 || threadWidth < 30 {
-			// Too narrow -- auto-hide thread
-			a.threadVisible = false
-			threadWidth = 0
-			threadBorder = 0
-			if a.focusedPanel == PanelThread {
-				a.focusedPanel = PanelMessages
-			}
+	// Resolve per-pane widths/borders. Compute stores horizontal bands
+	// for subsequent mouse hit-testing (panelAt) and surfaces a
+	// ThreadAutoHidden flag when the available width can't fit the
+	// thread pane at its minimum.
+	frame := a.layout.Compute(a.width, a.height, a.workspaceRail.Width(), a.sidebar.Width(), a.sidebarVisible, a.threadVisible)
+	if frame.ThreadAutoHidden {
+		a.threadVisible = false
+		if a.focusedPanel == PanelThread {
+			a.focusedPanel = PanelMessages
 		}
 	}
-
-	msgWidth := msgAreaWidth - msgBorder - threadWidth - threadBorder
-	if msgWidth < 10 {
-		msgWidth = 10
-	}
-
-	// Store layout widths for mouse hit-testing in Update()
-	a.layoutRailWidth = railWidth
-	a.layoutSidebarEnd = railWidth + sidebarWidth + sidebarBorder
-	a.layoutMsgEnd = a.layoutSidebarEnd + msgWidth + msgBorder
-	if a.threadVisible && threadWidth > 0 {
-		a.layoutThreadEnd = a.layoutMsgEnd + threadWidth + threadBorder
-	} else {
-		a.layoutThreadEnd = a.layoutMsgEnd
-	}
-
-	// Helper to force a panel to an exact width and height with a given
-	// background color. Uses an explicit width parameter instead of
-	// lipgloss.Width(s) to avoid ANSI miscounting in complex rendered content.
-	exactSizeBg := func(s string, w, h int, bg color.Color) string {
-		return lipgloss.NewStyle().Width(w).Height(h).MaxHeight(h).Background(bg).Render(s)
-	}
-	exactSize := func(s string, w, h int) string {
-		return exactSizeBg(s, w, h, styles.Background)
-	}
-
 	themeVer := styles.Version()
 
-	// Render workspace rail (uses rail background so empty cells around
-	// the workspace tiles match the rail color, not the message pane).
-	railLayoutKey := themeVer
-	if c := &a.panelCacheRail; !c.hit(a.workspaceRail.Version(), railWidth, contentHeight, railLayoutKey) {
-		out := exactSizeBg(a.workspaceRail.View(contentHeight), railWidth, contentHeight, styles.RailBackground)
-		c.store(out, a.workspaceRail.Version(), railWidth, contentHeight, railLayoutKey)
-	}
-	rail := a.panelCacheRail.output
+	// If the full-screen image preview is open, the messages and
+	// thread regions are skipped (renderMessagesRegion returns ""
+	// and the thread-region gate below short-circuits); the
+	// preview panel takes their place as a single overlay
+	// spanning the combined width. Rail, sidebar, and status row
+	// still render normally so the user can see context.
+	previewActive := a.preview.Active()
 
 	var panels []string
-	panels = append(panels, rail)
-
-	// Render sidebar. Sidebar uses SidebarBackground so themes with a
-	// distinct dark sidebar (e.g. Slack Default) render correctly: both the
-	// rounded border's own background and the right-padding fill match the
-	// sidebar's panel color rather than the message pane's.
+	panels = append(panels, a.renderRail(frame.RailWidth, frame.ContentHeight, themeVer))
 	if a.sidebarVisible {
-		sbFocused := a.focusedPanel == PanelSidebar && a.mode != ModeInsert
-		// Push focus into the sidebar so the cursor "▌" glyph dims when
-		// the panel is unfocused. This must happen BEFORE the panelCache
-		// hit-check below, since SetFocused bumps the panel's Version on
-		// a flip and the cache key includes that version.
-		a.sidebar.SetFocused(sbFocused)
-		sbLayoutKey := themeVer<<1 | boolToInt(sbFocused)
-		if c := &a.panelCacheSidebar; !c.hit(a.sidebar.Version(), sidebarWidth, contentHeight, sbLayoutKey) {
-			borderStyle := lipgloss.NewStyle().
-				BorderStyle(lipgloss.RoundedBorder()).
-				BorderForeground(styles.Border).
-				BorderBackground(styles.SidebarBackground).
-				Background(styles.SidebarBackground).
-				Width(sidebarWidth)
-			if sbFocused {
-				borderStyle = lipgloss.NewStyle().
-					BorderStyle(lipgloss.ThickBorder()).
-					BorderForeground(styles.Primary).
-					BorderBackground(styles.SidebarBackground).
-					Background(styles.SidebarBackground).
-					Width(sidebarWidth)
-			}
-			sidebarView := a.sidebar.View(contentHeight-2, sidebarWidth)
-			sidebarView = borderStyle.Render(sidebarView)
-			out := exactSizeBg(sidebarView, sidebarWidth+sidebarBorder, contentHeight, styles.SidebarBackground)
-			c.store(out, a.sidebar.Version(), sidebarWidth, contentHeight, sbLayoutKey)
-		}
-		panels = append(panels, a.panelCacheSidebar.output)
-		a.layoutSidebarHeight = contentHeight - 2
+		panels = append(panels, a.renderSidebar(frame.SidebarWidth, frame.SidebarBorder, frame.ContentHeight, themeVer))
 	}
-
-	// If the full-screen image preview is open, render a single panel
-	// covering the combined messages + thread region instead of the
-	// usual two-pane layout. The sidebar, rail, and status bar still
-	// render normally so the user can see context. The flag below
-	// guards the messages-pane and thread-pane render blocks and is
-	// also checked to substitute a single preview panel after them.
-	previewActive := a.previewOverlay != nil && !a.previewOverlay.IsClosed()
-
-	// Render message pane with border.
-	//
-	// PERF: The naive single-cache approach (key = mix(messagepane.Version,
-	// compose.Version)) was the dominant per-keystroke cost at large
-	// terminal sizes. Compose dirty()s on every keystroke, which would
-	// invalidate the entire bordered+exact-sized panel string and force
-	// 5-7 full O(height x width) ansi-aware rescans (JoinVertical x2,
-	// ReapplyBgAfterResets, border.Render x3, exactSize x2) over the
-	// messages region that hadn't actually changed.
-	//
-	// Split rendering: cache the bordered messages region (top edge +
-	// sides only, no bottom edge) keyed only on messagepane.Version --
-	// independent of compose. Render the typing line + compose box with
-	// the matching bottom-edge border fresh each frame. Stack them; the
-	// border glyphs line up because BorderBottom(false) on top + sides
-	// +  BorderTop(false) on bottom + sides yields a continuous panel.
-	msgFocused := a.focusedPanel == PanelMessages && a.mode != ModeInsert
-	// Push focus into the messages pane so the selected-message "▌"
-	// border dims when unfocused. Must happen before the panelCache
-	// hit-check (the cache key includes Version, which SetFocused bumps).
-	a.messagepane.SetFocused(msgFocused)
-	composeFocused := a.mode == ModeInsert && a.focusedPanel != PanelThread
-	// Mix the view-mode bit into the layout key so a Channels<->Threads
-	// switch invalidates the cached output (the cache is otherwise
-	// indistinguishable across views at the same focus/mode/theme).
-	msgLayoutKey := themeVer<<3 |
-		boolToInt(a.view == ViewThreads)<<2 |
-		boolToInt(msgFocused)<<1
-	a.compose.SetWidth(msgWidth - 2)
+	if s := a.renderMessagesRegion(frame, themeVer, previewActive); s != "" {
+		panels = append(panels, s)
+	}
+	if a.threadVisible && frame.ThreadWidth > 0 && !previewActive {
+		panels = append(panels, a.renderThreadRegion(frame, themeVer))
+	}
 	if previewActive {
-		// Skip the messages pane render entirely; we'll emit the
-		// preview panel after the thread block.
-	} else if a.view == ViewThreads {
-		// Threads view: no compose, no typing line. The whole bordered
-		// panel is content-stable per threadsView.Version, so we keep
-		// the old single-cache path here.
-		// Push the current user-name map and self-user id into the
-		// threadsview model BEFORE snapshotting its version. SetUserNames
-		// and SetSelfUserID are equality-checked (threadsview/model.go), so
-		// identical input is a no-op. Reading Version() after these calls
-		// means the panel-cache key reflects the post-Set state — fixes a
-		// regression where the cache stored output under a stale version
-		// and never hit on subsequent renders.
-		//
-		// Note: channel names are *not* pushed here. They're fanned out
-		// from SetChannels (app.go:3295) when the channel list changes,
-		// which is rare relative to render frequency, so we keep that
-		// allocation off this hot path.
-		a.threadsView.SetUserNames(a.userNames)
-		a.threadsView.SetSelfUserID(a.currentUserID)
-		tvVersion := a.threadsView.Version()
-		if c := &a.panelCacheMsgPanel; !c.hit(tvVersion, msgWidth, contentHeight, msgLayoutKey) {
-			msgBorderStyle := styles.UnfocusedBorder.Width(msgWidth)
-			if msgFocused {
-				msgBorderStyle = styles.FocusedBorder.Width(msgWidth)
-			}
-			msgContentHeight := contentHeight - 2
-			a.layoutMsgHeight = msgContentHeight
-			if msgContentHeight < 3 {
-				msgContentHeight = 3
-			}
-			tvView := a.threadsView.View(msgContentHeight, msgWidth-2)
-			tvView = messages.ReapplyBgAfterResets(tvView, messages.BgANSI())
-			out := exactSize(
-				msgBorderStyle.Render(tvView),
-				msgWidth+msgBorder, contentHeight,
-			)
-			c.store(out, tvVersion, msgWidth, contentHeight, msgLayoutKey)
-		}
-		panels = append(panels, a.panelCacheMsgPanel.output)
-	} else {
-		// Channel view: split into cached top region + fresh bottom region.
-		composeView := a.compose.View(msgWidth-2, composeFocused)
-		// Inline pickers stack above the compose box. Both should never be
-		// visible simultaneously (mutually exclusive in compose.Update);
-		// emoji wins if somehow both are.
-		if pickerView := a.compose.EmojiPickerView(msgWidth - 2); pickerView != "" {
-			composeView = pickerView + "\n" + composeView
-		} else if mentionView := a.compose.MentionPickerView(msgWidth - 2); mentionView != "" {
-			composeView = mentionView + "\n" + composeView
-		} else if channelView := a.compose.ChannelPickerView(msgWidth - 2); channelView != "" {
-			composeView = channelView + "\n" + composeView
-		}
-		// Add a background-colored spacer line above the compose box
-		// (replaces MarginTop which produced unstyled/black margin cells)
-		composeSpacer := lipgloss.NewStyle().Background(styles.Background).Width(msgWidth - 2).Render("")
-		composeView = composeSpacer + "\n" + composeView
-		composeHeight := lipgloss.Height(composeView)
-		// Always reserve one row above the compose box for the typing
-		// indicator. When nobody is typing we render a blank
-		// background-colored spacer in that row so the messages-pane
-		// height stays constant -- otherwise a transient typing line
-		// would shrink the messages area by one row, producing a
-		// spurious "more below" indicator and a visible scroll jump.
-		typingLine := a.renderTypingLine()
-		if typingLine == "" {
-			typingLine = lipgloss.NewStyle().
-				Background(styles.Background).
-				Width(msgWidth - 2).
-				Render("")
-		}
-		typingHeight := 1
-		bottomHeight := composeHeight + typingHeight
-		msgContentHeight := contentHeight - 2 - bottomHeight
-		a.layoutMsgHeight = msgContentHeight
-		if msgContentHeight < 3 {
-			msgContentHeight = 3
-		}
-
-		// Cached top region: messages + top edge + side edges.
-		// NOTE: lipgloss/v2 quirk -- calling .BorderBottom(false) on a
-		// style that has BorderStyle() set disables ALL borders unless
-		// the other three sides are explicitly enabled with
-		// .BorderTop(true).BorderLeft(true).BorderRight(true). Without
-		// these, the entire panel renders without any border at all.
-		topPanelVersion := a.messagepane.Version()
-		topLayoutKey := msgLayoutKey | int64(composeHeight)<<16
-		topHeight := msgContentHeight + 1 // +1 for top border edge
-		if c := &a.panelCacheMsgTop; !c.hit(topPanelVersion, msgWidth, topHeight, topLayoutKey) {
-			topBorderStyle := styles.UnfocusedBorder.Width(msgWidth).
-				BorderTop(true).BorderLeft(true).BorderRight(true).BorderBottom(false)
-			if msgFocused {
-				topBorderStyle = styles.FocusedBorder.Width(msgWidth).
-					BorderTop(true).BorderLeft(true).BorderRight(true).BorderBottom(false)
-			}
-			msgView := a.messagepane.View(msgContentHeight, msgWidth-2)
-			msgView = messages.ReapplyBgAfterResets(msgView, messages.BgANSI())
-			out := exactSize(
-				topBorderStyle.Render(msgView),
-				msgWidth+msgBorder, topHeight,
-			)
-			c.store(out, topPanelVersion, msgWidth, topHeight, topLayoutKey)
-		}
-		topBordered := a.panelCacheMsgTop.output
-
-		// Fresh bottom region: typing line + compose, with bottom edge.
-		// Same lipgloss/v2 quirk applies -- explicit BorderBottom/Left/Right(true)
-		// required alongside BorderTop(false), or no border renders.
-		bottomBorderStyle := styles.UnfocusedBorder.Width(msgWidth).
-			BorderTop(false).BorderLeft(true).BorderRight(true).BorderBottom(true)
-		if msgFocused {
-			bottomBorderStyle = styles.FocusedBorder.Width(msgWidth).
-				BorderTop(false).BorderLeft(true).BorderRight(true).BorderBottom(true)
-		}
-		bottomInner := lipgloss.JoinVertical(lipgloss.Left, typingLine, composeView)
-		bottomInner = messages.ReapplyBgAfterResets(bottomInner, messages.BgANSI())
-		bottomBordered := exactSize(
-			bottomBorderStyle.Render(bottomInner),
-			msgWidth+msgBorder, bottomHeight+1, // +1 for bottom border edge
-		)
-
-		panels = append(panels, topBordered+"\n"+bottomBordered)
-	}
-
-	// Render thread side panel if visible. Same split-render pattern as
-	// the message panel: bordered top region (replies + sides + top edge)
-	// is cached on threadPanel.Version; bottom region (compose + sides +
-	// bottom edge) is rendered fresh each frame so threadCompose
-	// keystrokes don't invalidate the (much larger) replies render.
-	if a.threadVisible && threadWidth > 0 && !previewActive {
-		threadFocused := a.focusedPanel == PanelThread && a.mode != ModeInsert
-		// Push focus into the thread panel so the selected-reply "▌"
-		// border dims when unfocused. Must happen before the panelCache
-		// hit-check (the cache key includes Version, which SetFocused
-		// bumps via dirty()).
-		a.threadPanel.SetFocused(threadFocused)
-		threadComposeFocused := a.mode == ModeInsert && a.focusedPanel == PanelThread
-		threadLayoutKey := themeVer<<2 | boolToInt(threadFocused)<<1 | boolToInt(threadComposeFocused)
-		a.threadCompose.SetWidth(threadWidth - 2)
-
-		threadComposeView := a.threadCompose.View(threadWidth-2, threadComposeFocused)
-		if pickerView := a.threadCompose.EmojiPickerView(threadWidth - 2); pickerView != "" {
-			threadComposeView = pickerView + "\n" + threadComposeView
-		} else if mentionView := a.threadCompose.MentionPickerView(threadWidth - 2); mentionView != "" {
-			threadComposeView = mentionView + "\n" + threadComposeView
-		} else if channelView := a.threadCompose.ChannelPickerView(threadWidth - 2); channelView != "" {
-			threadComposeView = channelView + "\n" + threadComposeView
-		}
-		threadComposeSpacer := lipgloss.NewStyle().Background(styles.Background).Width(threadWidth - 2).Render("")
-		threadComposeView = threadComposeSpacer + "\n" + threadComposeView
-		threadComposeHeight := lipgloss.Height(threadComposeView)
-		threadContentHeight := contentHeight - 2 - threadComposeHeight
-		a.layoutThreadHeight = threadContentHeight
-		if threadContentHeight < 3 {
-			threadContentHeight = 3
-		}
-
-		// Cached top region.
-		threadTopVersion := a.threadPanel.Version()
-		threadTopLayoutKey := threadLayoutKey | int64(threadComposeHeight)<<16
-		threadTopHeight := threadContentHeight + 1 // +1 top border edge
-		if c := &a.panelCacheThread; !c.hit(threadTopVersion, threadWidth, threadTopHeight, threadTopLayoutKey) {
-			// See lipgloss/v2 quirk note on the message-pane top region.
-			topBorderStyle := styles.UnfocusedBorder.Width(threadWidth).
-				BorderTop(true).BorderLeft(true).BorderRight(true).BorderBottom(false)
-			if threadFocused {
-				topBorderStyle = styles.FocusedBorder.Width(threadWidth).
-					BorderTop(true).BorderLeft(true).BorderRight(true).BorderBottom(false)
-			}
-			threadView := a.threadPanel.View(threadContentHeight, threadWidth-2)
-			threadView = messages.ReapplyBgAfterResets(threadView, messages.BgANSI())
-			out := exactSize(
-				topBorderStyle.Render(threadView),
-				threadWidth+threadBorder, threadTopHeight,
-			)
-			c.store(out, threadTopVersion, threadWidth, threadTopHeight, threadTopLayoutKey)
-		}
-		threadTopBordered := a.panelCacheThread.output
-
-		// Fresh bottom region.
-		bottomBorderStyle := styles.UnfocusedBorder.Width(threadWidth).
-			BorderTop(false).BorderLeft(true).BorderRight(true).BorderBottom(true)
-		if threadFocused {
-			bottomBorderStyle = styles.FocusedBorder.Width(threadWidth).
-				BorderTop(false).BorderLeft(true).BorderRight(true).BorderBottom(true)
-		}
-		threadBottomInner := messages.ReapplyBgAfterResets(threadComposeView, messages.BgANSI())
-		threadBottomBordered := exactSize(
-			bottomBorderStyle.Render(threadBottomInner),
-			threadWidth+threadBorder, threadComposeHeight+1, // +1 bottom border edge
-		)
-
-		panels = append(panels, threadTopBordered+"\n"+threadBottomBordered)
-	}
-
-	// Substitute the preview panel for the messages+thread region.
-	// Both branches above were skipped when previewActive was true, so
-	// the panels slice currently has rail (+sidebar) and we now append
-	// a single overlay panel that spans the combined width.
-	if previewActive {
-		overlayW := msgWidth + msgBorder
-		if a.threadVisible && threadWidth > 0 {
-			overlayW += threadWidth + threadBorder
-		}
-		overlayContent := a.previewOverlay.View(overlayW, contentHeight, a.imgProtocol)
-		overlayPanel := exactSize(overlayContent, overlayW, contentHeight)
-		panels = append(panels, overlayPanel)
+		panels = append(panels, a.renderPreviewPanel(frame))
 	}
 
 	content := lipgloss.JoinHorizontal(lipgloss.Top, panels...)
-	statusWidth := a.width - railWidth
-
-	// Cache the status row (rail-spacer + statusbar). It depends only on
-	// statusbar.Version, statusWidth, and theme.
-	if c := &a.panelCacheStatus; !c.hit(a.statusbar.Version(), statusWidth, 1, themeVer) {
-		railSpacer := lipgloss.NewStyle().
-			Width(railWidth).
-			Background(styles.RailBackground).
-			Render("")
-		out := lipgloss.JoinHorizontal(lipgloss.Center, railSpacer, a.statusbar.View(statusWidth))
-		c.store(out, a.statusbar.Version(), statusWidth, 1, themeVer)
-	}
-	status := a.panelCacheStatus.output
-
+	status := a.renderStatusRow(frame.RailWidth, a.width-frame.RailWidth, themeVer)
 	screen := lipgloss.JoinVertical(lipgloss.Left, content, status)
-
-	// Render channel finder overlay on top of existing layout
-	if a.channelFinder.IsVisible() {
-		screen = a.channelFinder.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.reactionPicker.IsVisible() {
-		screen = a.reactionPicker.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.confirmPrompt.IsVisible() {
-		screen = a.confirmPrompt.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.workspaceFinder.IsVisible() {
-		screen = a.workspaceFinder.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.themeSwitcher.IsVisible() {
-		screen = a.themeSwitcher.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.presenceMenu.IsVisible() {
-		screen = a.presenceMenu.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.help.IsVisible() {
-		screen = a.help.ViewOverlay(a.width, a.height, screen)
-	}
-
-	if a.mode == ModePresenceCustomSnooze {
-		screen = presencemenu.CustomSnoozeView(a.width, a.height, screen, a.presenceCustomBuf)
-	}
-
-	if a.loading {
-		screen = a.renderLoadingOverlay(a.width, a.height)
-	}
-
-	// All panels are wrapped in exactSize / exactSizeBg before joining, so
-	// `screen` is already exactly (a.width, a.height) with every cell themed.
-	// We skip the previously-mandatory full-screen lipgloss wrapper -- it
-	// walked every cell of the entire ANSI output (~3.4 ms / frame, the
-	// single largest cost in the prior profile) just to apply background
-	// padding that's already there. If an overlay is active we still need
-	// the wrapper because overlay compositors don't always produce exact-
-	// sized output; conservatively re-wrap in that case.
-	finalScreen := screen
-	overlayActive := a.channelFinder.IsVisible() ||
-		a.reactionPicker.IsVisible() ||
-		a.confirmPrompt.IsVisible() ||
-		a.workspaceFinder.IsVisible() ||
-		a.themeSwitcher.IsVisible() ||
-		a.presenceMenu.IsVisible() ||
-		a.mode == ModePresenceCustomSnooze ||
-		a.loading
-	if overlayActive {
-		finalScreen = lipgloss.NewStyle().
-			Width(a.width).
-			Height(a.height).
-			MaxHeight(a.height).
-			Background(styles.Background).
-			Render(screen)
-	}
-	v := tea.NewView(finalScreen)
+	screen = a.applyOverlays(screen)
+	v := tea.NewView(a.maybeWrapFinalScreen(screen))
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	return v
@@ -5771,18 +1867,19 @@ func (a *App) View() tea.View {
 // cancelEdit exits edit mode, restoring the stashed draft to its
 // source compose. Safe to call when no edit is active (no-op).
 func (a *App) cancelEdit() {
-	if !a.editing.active {
+	if !a.editing.IsActive() {
 		return
 	}
-	switch a.editing.panel {
+	stashed := a.editing.StashedDraft()
+	switch a.editing.Panel() {
 	case PanelMessages:
-		a.compose.SetValue(a.editing.stashedDraft)
+		a.compose.SetValue(stashed)
 		a.compose.SetPlaceholderOverride("")
 	case PanelThread:
-		a.threadCompose.SetValue(a.editing.stashedDraft)
+		a.threadCompose.SetValue(stashed)
 		a.threadCompose.SetPlaceholderOverride("")
 	}
-	a.editing = editState{}
+	a.editing.Clear()
 	a.SetMode(ModeNormal)
 	a.compose.Blur()
 	a.threadCompose.Blur()
@@ -5826,7 +1923,7 @@ const maxAttachmentSize = 10 * 1024 * 1024 // 10 MB cap
 // dispatch, the compose's uploading flag is set so the UI can show
 // progress; the actual UploadResultMsg arm in Update clears it.
 func (a *App) submitWithAttachments(c *compose.Model) tea.Cmd {
-	if a.editing.active {
+	if a.editing.IsActive() {
 		return a.uploadToastCmd("Cannot attach files to an edit (send a new message)", 3*time.Second)
 	}
 	attachments := c.Attachments()
@@ -5973,13 +2070,7 @@ func (a *App) beginEditOfSelected() tea.Cmd {
 		a.threadCompose.SetPlaceholderOverride("Editing message — Enter to save, Esc to cancel")
 	}
 
-	a.editing = editState{
-		active:       true,
-		channelID:    channelID,
-		ts:           ts,
-		panel:        panel,
-		stashedDraft: stashed,
-	}
+	a.editing.Begin(channelID, ts, panel, stashed)
 	a.SetMode(ModeInsert)
 	a.focusedPanel = panel
 	if panel == PanelThread {
@@ -6193,8 +2284,8 @@ func (a *App) submitEdit(rawValue, translated string) tea.Cmd {
 			return editEmptyToastMsg{}
 		}
 	}
-	chID := a.editing.channelID
-	ts := a.editing.ts
+	chID := a.editing.ChannelID()
+	ts := a.editing.TS()
 	return func() tea.Msg {
 		return EditMessageMsg{
 			ChannelID: chID,
@@ -6203,10 +2294,6 @@ func (a *App) submitEdit(rawValue, translated string) tea.Cmd {
 		}
 	}
 }
-
-// editEmptyToastMsg is delivered when the user tries to submit an
-// edit with empty text.
-type editEmptyToastMsg struct{}
 
 // truncateReason returns s truncated to max characters with an ellipsis.
 // Used for status-bar error toasts.
