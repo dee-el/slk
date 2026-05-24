@@ -1344,6 +1344,58 @@ func (m *Model) renderLoadingOlderHint(_ int) string {
 	return hintStyle.Render("  " + string(frame) + " Loading older messages...")
 }
 
+// entryPerfStats accumulates per-sub-step timing across a single
+// buildCache invocation. Populated only when debuglog.Enabled();
+// callers pass nil otherwise. renderMessageEntry / renderMessagePlain
+// guard every measurement with `if stats != nil` so the nil path adds
+// only a couple of branch-predicted checks per message — negligible
+// compared to the lipgloss / regex / blockkit work it surrounds.
+//
+// Fields measure cumulative time across the loop, paired with a count
+// so the [perf] log can report "blockKit n=12 avg=8ms total=96ms"
+// (most messages skip blockkit; only ones with msg.Blocks pay).
+type entryPerfStats struct {
+	count int // number of messages processed
+
+	// renderMessagePlain sub-steps
+	bodyTotal        time.Duration // RenderSlackMarkdown + WordWrap + styles.MessageText.Render
+	reactionsTotal   time.Duration // pill rendering, emoji width, wrap math
+	reactionsCount   int
+	blockKitTotal    time.Duration // blockkit.Render for msg.Blocks
+	blockKitCount    int
+	legacyTotal      time.Duration // blockkit.RenderLegacy for msg.LegacyAttachments
+	legacyCount      int
+	// Sub-breakdown within legacyTotal. Sums across all
+	// blockkit.RenderLegacy calls in the loop, attributing the cost
+	// across text rendering (renderTextLines for pretext / text /
+	// fields / footer), image work (computeBlockImageTarget +
+	// fetchOrPlaceholder), and other (stripe styling, title
+	// formatting, width-and-truncate math). Populated only when
+	// ctx.Perf was non-nil during the call.
+	legacyTextTotal  time.Duration
+	legacyImageTotal time.Duration
+	legacyOtherTotal time.Duration
+	legacyAttCount   int // total LegacyAttachment values processed
+
+	// Sub-breakdown within legacyImageTotal, populated by
+	// blockkit.fetchOrPlaceholder. Each (total, count) pair lets the
+	// host log avg-per-call.
+	legacyImgCachedCheckTotal time.Duration
+	legacyImgCachedCheckCount int
+	legacyImgKittyTotal       time.Duration
+	legacyImgKittyCount       int
+	legacyImgRenderImageTotal time.Duration
+	legacyImgRenderImageCount int
+	legacyImgPlaceholderTotal time.Duration
+	legacyImgPlaceholderCount int
+	attachmentsTotal time.Duration // imgRenderer.RenderBlock loop over msg.Attachments
+	attachmentsCount int
+
+	// renderMessageEntry sub-steps (post renderMessagePlain)
+	borderWrapTotal time.Duration // borderFill/borderInvis/borderSelect renders + RepaintBgToSelectionTint
+	plainLinesTotal time.Duration // ANSI-stripping for the plain-text mirror
+}
+
 // renderMessageEntry builds a single viewEntry for m.messages[i] using
 // the shared cacheStyles. The returned entry is fully populated with
 // both the unselected and selected pre-bordered line slices, the
@@ -1357,13 +1409,18 @@ func (m *Model) renderLoadingOlderHint(_ int) string {
 // stale slot (when an image lands for one message) without walking
 // every other message in the channel. Runs zero string-scanning over
 // sibling messages' content -- the perf win this method exists for.
-func (m *Model) renderMessageEntry(i int, width int, cs cacheStyles) viewEntry {
+//
+// stats may be nil. When non-nil, per-sub-step durations are added to
+// it for later aggregation. Callers must NOT increment stats.count --
+// renderMessageEntry does that itself so the count always matches the
+// number of entries produced.
+func (m *Model) renderMessageEntry(i int, width int, cs cacheStyles, stats *entryPerfStats) viewEntry {
 	msg := m.messages[i]
 	avatarStr := ""
 	if m.avatarFn != nil {
 		avatarStr = m.avatarFn(msg.UserID)
 	}
-	rendered, attachFlushes, attachSixel, attachHits, reactHits := m.renderMessagePlain(msg, width, avatarStr, m.userNames, m.channelNames, i == m.selected)
+	rendered, attachFlushes, attachSixel, attachHits, reactHits := m.renderMessagePlain(msg, width, avatarStr, m.userNames, m.channelNames, i == m.selected, stats)
 	// Two filled variants: borderFill (Background) for the unselected
 	// pre-render, and the SelectionTintColor for the selected pre-render.
 	// Without per-variant fills, the trailing whitespace of every wrapped
@@ -1376,11 +1433,18 @@ func (m *Model) renderMessageEntry(i int, width int, cs cacheStyles) viewEntry {
 	// emitted by RenderSlackMarkdown) explicitly paint Background, and
 	// without this substitution they show through as dark patches on
 	// the tinted row.
+	var bwT0 time.Time
+	if stats != nil {
+		bwT0 = time.Now()
+	}
 	filledNormal := cs.borderFill.Width(width - 1).Render(rendered)
 	renderedTinted := RepaintBgToSelectionTint(rendered, m.focused)
 	selectedFill := lipgloss.NewStyle().Background(styles.SelectionTintColor(m.focused)).Width(width - 1).Render(renderedTinted)
 	normal := cs.borderInvis.Render(filledNormal)
 	selected := cs.borderSelect.Render(selectedFill)
+	if stats != nil {
+		stats.borderWrapTotal += time.Since(bwT0)
+	}
 
 	linesN := strings.Split(normal, "\n")
 	linesS := strings.Split(selected, "\n")
@@ -1388,7 +1452,15 @@ func (m *Model) renderMessageEntry(i int, width int, cs cacheStyles) viewEntry {
 	// thick left-border column is NOT present in plain text and never
 	// bleeds into clipboard output via SelectionText. The mouse-column
 	// to plain-column mapping happens in anchorAt via contentColOffset.
+	var plT0 time.Time
+	if stats != nil {
+		plT0 = time.Now()
+	}
 	linesP := plainLines(filledNormal)
+	if stats != nil {
+		stats.plainLinesTotal += time.Since(plT0)
+		stats.count++
+	}
 	// Append a trailing spacer line after every message except the last.
 	// Both variants share the same spacer (it has no border styling).
 	// The plain mirror of the spacer is the empty string -- selection
@@ -1457,6 +1529,18 @@ func (m *Model) buildCache(width int) {
 
 	cs := m.buildCacheStyles(width)
 
+	// Perf instrumentation: allocate the per-sub-step stats sink when
+	// SLK_DEBUG is on so we can attribute buildCache's wall-clock across
+	// body / reactions / blockKit / legacy / attachments / borderWrap /
+	// plainLines. Aggregated into a single [perf] line after the loop
+	// to keep log volume O(1) per buildCache rather than O(N) per
+	// message. nil disables every call site's timing (see
+	// renderMessageEntry / renderMessagePlain).
+	var stats *entryPerfStats
+	if debuglog.Enabled() {
+		stats = &entryPerfStats{}
+	}
+
 	if cap(m.cache) < len(m.messages)+8 {
 		m.cache = make([]viewEntry, 0, len(m.messages)+8)
 	}
@@ -1497,10 +1581,25 @@ func (m *Model) buildCache(width int) {
 		}
 
 		m.messageIDToEntryIdx[msg.TS] = len(m.cache)
-		m.cache = append(m.cache, m.renderMessageEntry(i, width, cs))
+		m.cache = append(m.cache, m.renderMessageEntry(i, width, cs, stats))
 	}
 
 	m.recomputeEntryOffsets()
+
+	if stats != nil {
+		debuglog.Perf("messages.buildCache.breakdown N=%d body=%s reactions(n=%d)=%s blockKit(n=%d)=%s legacy(n=%d, atts=%d)=%s [text=%s image=%s other=%s] img[cachedCheck(n=%d)=%s kitty(n=%d)=%s renderImage(n=%d)=%s placeholder(n=%d)=%s] attachments(n=%d)=%s borderWrap=%s plainLines=%s",
+			stats.count, stats.bodyTotal,
+			stats.reactionsCount, stats.reactionsTotal,
+			stats.blockKitCount, stats.blockKitTotal,
+			stats.legacyCount, stats.legacyAttCount, stats.legacyTotal,
+			stats.legacyTextTotal, stats.legacyImageTotal, stats.legacyOtherTotal,
+			stats.legacyImgCachedCheckCount, stats.legacyImgCachedCheckTotal,
+			stats.legacyImgKittyCount, stats.legacyImgKittyTotal,
+			stats.legacyImgRenderImageCount, stats.legacyImgRenderImageTotal,
+			stats.legacyImgPlaceholderCount, stats.legacyImgPlaceholderTotal,
+			stats.attachmentsCount, stats.attachmentsTotal,
+			stats.borderWrapTotal, stats.plainLinesTotal)
+	}
 }
 
 // partialRebuild re-renders only the cache slots whose source-message
@@ -1539,7 +1638,7 @@ func (m *Model) partialRebuild(width int) {
 		if old.msgIdx < 0 || old.msgIdx >= len(m.messages) {
 			continue
 		}
-		m.cache[idx] = m.renderMessageEntry(old.msgIdx, width, cs)
+		m.cache[idx] = m.renderMessageEntry(old.msgIdx, width, cs, nil)
 	}
 	for k := range m.staleEntries {
 		delete(m.staleEntries, k)
@@ -1602,7 +1701,7 @@ func (m *Model) blockkitContext(msg MessageItem, userNames, channelNames map[str
 // columns within linesNormal, including the border (col 0) and the
 // avatar gutter (5 cols when an avatar is present), so View() can
 // translate directly to pane-local mouse columns.
-func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string, userNames map[string]string, channelNames map[string]string, isSelected bool) (
+func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string, userNames map[string]string, channelNames map[string]string, isSelected bool, stats *entryPerfStats) (
 	content string, flushes []func(io.Writer) error, sixelRows map[int]sixelEntry, hits []entryHit, reactionHits []reactionEntryHit,
 ) {
 	line := styles.Username.Render(msg.UserName) + lipgloss.NewStyle().Background(styles.Background).Render("  ") + styles.Timestamp.Render(msg.Timestamp)
@@ -1616,7 +1715,14 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 		contentWidth = 20
 	}
 
+	var bodyT0 time.Time
+	if stats != nil {
+		bodyT0 = time.Now()
+	}
 	text := styles.MessageText.Render(WordWrap(RenderSlackMarkdown(MessageTextSource(msg), userNames, channelNames), contentWidth))
+	if stats != nil {
+		stats.bodyTotal += time.Since(bodyT0)
+	}
 
 	var threadLine string
 	if msg.ReplyCount > 0 {
@@ -1644,6 +1750,10 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 		emoji    string
 	}
 	var pillSpecs []pillSpec
+	var reactT0 time.Time
+	if stats != nil && len(msg.Reactions) > 0 {
+		reactT0 = time.Now()
+	}
 	if len(msg.Reactions) > 0 {
 		var pills []string
 		// pillEmojis parallels pills; empty string marks the trailing
@@ -1741,6 +1851,10 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 		reactionLine = "\n" + strings.Join(reactionLines, "\n")
 		reactionLineCount = len(reactionLines)
 	}
+	if stats != nil && len(msg.Reactions) > 0 {
+		stats.reactionsTotal += time.Since(reactT0)
+		stats.reactionsCount++
+	}
 
 	var editedMark string
 	if msg.IsEdited {
@@ -1792,8 +1906,16 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 	var bkLines []string
 	bkInteractive := false
 	if len(msg.Blocks) > 0 {
+		var bkT0 time.Time
+		if stats != nil {
+			bkT0 = time.Now()
+		}
 		startInBk := len(bkLines)
 		res := blockkit.Render(msg.Blocks, bkCtx, contentWidth)
+		if stats != nil {
+			stats.blockKitTotal += time.Since(bkT0)
+			stats.blockKitCount++
+		}
 		bkLines = append(bkLines, res.Lines...)
 		allFlushes = append(allFlushes, res.Flushes...)
 		rowOffset := preAttachmentRows + startInBk
@@ -1810,8 +1932,36 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 		bkInteractive = bkInteractive || res.Interactive
 	}
 	if len(msg.LegacyAttachments) > 0 {
+		var lgT0 time.Time
+		var lgPerf *blockkit.LegacyPerf
+		legacyCtx := bkCtx
+		if stats != nil {
+			lgT0 = time.Now()
+			lgPerf = &blockkit.LegacyPerf{}
+			legacyCtx.Perf = lgPerf
+		}
 		startInBk := len(bkLines)
-		res := blockkit.RenderLegacy(msg.LegacyAttachments, bkCtx, contentWidth)
+		res := blockkit.RenderLegacy(msg.LegacyAttachments, legacyCtx, contentWidth)
+		if stats != nil {
+			stats.legacyTotal += time.Since(lgT0)
+			stats.legacyCount++
+			stats.legacyTextTotal += lgPerf.TextTotal()
+			stats.legacyImageTotal += lgPerf.ImageTotal()
+			stats.legacyOtherTotal += lgPerf.OtherTotal()
+			stats.legacyAttCount += lgPerf.AttachmentCount()
+			ccTotal, ccCount := lgPerf.ImgCachedCheck()
+			stats.legacyImgCachedCheckTotal += ccTotal
+			stats.legacyImgCachedCheckCount += ccCount
+			kTotal, kCount := lgPerf.ImgKitty()
+			stats.legacyImgKittyTotal += kTotal
+			stats.legacyImgKittyCount += kCount
+			riTotal, riCount := lgPerf.ImgRenderImage()
+			stats.legacyImgRenderImageTotal += riTotal
+			stats.legacyImgRenderImageCount += riCount
+			phTotal, phCount := lgPerf.ImgPlaceholder()
+			stats.legacyImgPlaceholderTotal += phTotal
+			stats.legacyImgPlaceholderCount += phCount
+		}
 		bkLines = append(bkLines, res.Lines...)
 		allFlushes = append(allFlushes, res.Flushes...)
 		rowOffset := preAttachmentRows + startInBk
@@ -1839,6 +1989,10 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 	}
 
 	if len(msg.Attachments) > 0 {
+		var attT0 time.Time
+		if stats != nil {
+			attT0 = time.Now()
+		}
 		rowCursor := preAttachmentRows
 		for attIdx, att := range msg.Attachments {
 			if m.imgRenderer == nil {
@@ -1868,6 +2022,10 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 				hits = append(hits, convertHit(res.Hit))
 			}
 			rowCursor += res.Height
+		}
+		if stats != nil {
+			stats.attachmentsTotal += time.Since(attT0)
+			stats.attachmentsCount++
 		}
 	}
 	var attachmentLines string
