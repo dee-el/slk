@@ -11,7 +11,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/gammons/slk/internal/debuglog"
 	emojiutil "github.com/gammons/slk/internal/emoji"
-	emoji "github.com/kyokomi/emoji/v2"
 
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/imgrender"
@@ -19,6 +18,7 @@ import (
 	"github.com/gammons/slk/internal/ui/scrollbar"
 	"github.com/gammons/slk/internal/ui/selection"
 	"github.com/gammons/slk/internal/ui/styles"
+	kyoemoji "github.com/kyokomi/emoji/v2"
 )
 
 var thickLeftBorder = lipgloss.Border{Left: "▌"}
@@ -1592,7 +1592,23 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 			// base emoji at a well-known width. Skin-toned glyphs render
 			// inconsistently across terminals and tend to break border
 			// alignment regardless of how we measure them.
-			emojiStr := emoji.Sprint(":" + emojiutil.StripSkinTone(r.Emoji) + ":")
+			//
+			// Resolve the shortcode to Unicode and check whether the
+			// resolved form is composition-safe. Multi-codepoint
+			// sequences (ZWJ flags, regional-indicator flag pairs,
+			// any residual skin-tone modifiers) render as broken
+			// glyphs in many terminal fonts and break right-border
+			// alignment; in those cases we display the readable
+			// :shortcode: text instead. Mirror of the message-pane
+			// fix; see internal/emoji/shouldrender.go.
+			nameForLookup := emojiutil.StripSkinTone(r.Emoji)
+			resolved := kyoemoji.Sprint(":" + nameForLookup + ":")
+			var emojiStr string
+			if emojiutil.ShouldRenderUnicode(resolved) {
+				emojiStr = resolved
+			} else {
+				emojiStr = ":" + nameForLookup + ":"
+			}
 			pillText := fmt.Sprintf("%s%d", emojiStr, r.Count)
 			var style lipgloss.Style
 			if isSelected && m.reactionNavActive && i == m.reactionNavIndex {
