@@ -37,6 +37,28 @@ func TestPickerRendersFireGlyph(t *testing.T) {
 	}
 }
 
+// TestViewOverlayPreservesFireGlyph guards that going through
+// ViewOverlay (which uses lipgloss.NewCanvas cell-by-cell compositing)
+// preserves the wide emoji glyph. Caught a real bug where the canvas
+// overlay path was dropping wide-character cells.
+func TestViewOverlayPreservesFireGlyph(t *testing.T) {
+	m := New()
+	m.SetFrecentEmoji([]EmojiEntry{})
+	m.Open("Cxxx", "1.0", nil)
+	for _, ch := range "fire" {
+		m.HandleKey(string(ch))
+	}
+	background := strings.Repeat(" \n", 30)
+	overlaid := m.ViewOverlay(120, 30, background)
+	if !strings.Contains(overlaid, "\U0001F525") {
+		t.Errorf("ViewOverlay output does NOT contain 🔥 glyph (canvas/overlay compositing stripped it)")
+		// Compare against View() output to confirm it's the overlay path
+		view := m.View(120)
+		hasFireInView := strings.Contains(view, "\U0001F525")
+		t.Logf("View() contains 🔥: %v (if true, bug is in ViewOverlay/DimmedOverlay)", hasFireInView)
+	}
+}
+
 // TestPickerRendersHeartGlyph guards that VS16-anchored emoji
 // (single base + U+FE0F) DO render as a glyph. This is the case
 // that the picker's previous len(runes)==1 rule incorrectly
