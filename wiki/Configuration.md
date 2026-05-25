@@ -119,8 +119,10 @@ changing your terminal colorscheme (light/dark, solarized,
 accessibility palettes, etc.) immediately changes slk's UI colors to
 match.
 
-    [appearance]
-    theme = "ansi-dark"   # or "ansi-light"
+```toml
+[appearance]
+theme = "ansi-dark"   # or "ansi-light"
+```
 
 Pick the variant whose background matches your terminal's background.
 
