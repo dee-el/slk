@@ -154,6 +154,60 @@ func TestViewRendersContent(t *testing.T) {
 	}
 }
 
+// TestViewInsertsDateSeparatorAcrossDays asserts that the thread view
+// inserts a centered date-divider row above a reply whose local day
+// differs from the parent's, and that no divider is emitted when every
+// reply lands on the parent's day. Mirrors the channel pane's
+// day-boundary divider so threads that span days are legible at a
+// glance.
+func TestViewInsertsDateSeparatorAcrossDays(t *testing.T) {
+	const parentTS = "1700000000.000000" // 2023-11-14 22:13:20 UTC
+	// 48 hours later — guaranteed to land on a different LOCAL day in
+	// every timezone, so the assertion is timezone-independent.
+	const dayLaterTS = "1700172800.000000"
+	// Same minute as the parent — same local day in every timezone.
+	const sameDayTS = "1700000060.000000"
+
+	parentDateLabel := messages.FormatDateSeparator(messages.DateFromTS(parentTS))
+	laterDateLabel := messages.FormatDateSeparator(messages.DateFromTS(dayLaterTS))
+	if parentDateLabel == laterDateLabel {
+		t.Fatalf("test fixture broken: parent (%q) and later (%q) resolved to the same label", parentDateLabel, laterDateLabel)
+	}
+
+	// Case 1: reply spans into a new day -> divider for the later day
+	// must appear; the parent's own day must NOT appear as a divider
+	// (the parent sits in its own chrome block, not a divider row).
+	m := New()
+	parent := messages.MessageItem{TS: parentTS, UserName: "alice", Text: "parent", Timestamp: "10:30 PM"}
+	replies := []messages.MessageItem{
+		{TS: sameDayTS, UserName: "bob", Text: "same-day reply", Timestamp: "10:31 PM"},
+		{TS: dayLaterTS, UserName: "carol", Text: "next-day reply", Timestamp: "10:33 PM"},
+	}
+	m.SetThread(parent, replies, "C1", parentTS)
+
+	plain := ansi.Strip(m.View(40, 80))
+	if !strings.Contains(plain, laterDateLabel) {
+		t.Errorf("expected view to contain day-divider label %q for reply on a later day; got:\n%s", laterDateLabel, plain)
+	}
+	if strings.Contains(plain, "── "+parentDateLabel+" ──") {
+		t.Errorf("did not expect a date divider for the parent's own day (%q); got:\n%s", parentDateLabel, plain)
+	}
+	// Sanity: the centered divider is bracketed by box-drawing dashes.
+	if !strings.Contains(plain, "── "+laterDateLabel+" ──") {
+		t.Errorf("expected centered divider \"── %s ──\"; got:\n%s", laterDateLabel, plain)
+	}
+
+	// Case 2: every reply on the parent's day -> no divider at all.
+	m2 := New()
+	m2.SetThread(parent, []messages.MessageItem{
+		{TS: sameDayTS, UserName: "bob", Text: "same-day reply", Timestamp: "10:31 PM"},
+	}, "C1", parentTS)
+	plain2 := ansi.Strip(m2.View(40, 80))
+	if strings.Contains(plain2, "── "+parentDateLabel+" ──") || strings.Contains(plain2, "── "+laterDateLabel+" ──") {
+		t.Errorf("did not expect any date divider when all replies share the parent's day; got:\n%s", plain2)
+	}
+}
+
 func TestUpdateMessageInPlace_Found(t *testing.T) {
 	m := New()
 	parent := messages.MessageItem{TS: "P1", Text: "parent"}

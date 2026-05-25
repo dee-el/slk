@@ -1393,6 +1393,23 @@ func (m *Model) View(height, width int) string {
 		}
 		landmarkInserted := false
 
+		// Day-divider style for "── Today ──" / "── Yesterday ──" /
+		// weekday / fully-qualified date rows inserted between replies on
+		// different local days. Mirrors the channel pane's date separator
+		// (see internal/ui/messages/model.go: buildCache). Like
+		// replySeparator and newLandmark, these rows live OUTSIDE any
+		// cache entry so selection overlay and extraction skip them
+		// naturally. lastDate is seeded from the parent so the divider
+		// only fires when a reply lands on a day different from the
+		// parent's day.
+		dateSeparatorStyle := lipgloss.NewStyle().
+			Width(width).
+			Background(styles.Background).
+			Foreground(styles.TextMuted).
+			Bold(true).
+			Align(lipgloss.Center)
+		lastDate := messages.DateFromTS(m.parent.TS)
+
 		// viewContent begins with the parent message block so the parent
 		// scrolls together with the replies. entryOffsets / selectedStartLine
 		// / m.totalLines are built in parent-inclusive coordinates from here
@@ -1421,6 +1438,23 @@ func (m *Model) View(height, width int) string {
 		m.entryOffsets = m.entryOffsets[:0]
 
 		for i, e := range m.cache {
+			// Insert a centered day-divider row when this reply's local
+			// day differs from the previous one (seeded with the parent's
+			// day). Sits ABOVE both the unread landmark and the reply
+			// itself so users see e.g. "── Yesterday ──" before any
+			// replies from yesterday — matching the channel pane's
+			// behavior. Falls through silently when the TS can't be
+			// parsed.
+			if i < len(m.replies) {
+				replyDate := messages.DateFromTS(m.replies[i].TS)
+				if replyDate != "" && replyDate != lastDate {
+					divider := dateSeparatorStyle.Render("── " + messages.FormatDateSeparator(replyDate) + " ──")
+					allRows = append(allRows, divider)
+					currentLine++
+					lastDate = replyDate
+				}
+			}
+
 			// Insert the new-reply landmark before the first reply whose
 			// TS exceeds the unread boundary. We check this BEFORE
 			// recording the entry offset so the landmark sits above

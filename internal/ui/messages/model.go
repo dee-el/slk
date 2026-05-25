@@ -1559,9 +1559,9 @@ func (m *Model) buildCache(width int) {
 	var lastDate string
 	newMsgLandmarkInserted := false
 	for i, msg := range m.messages {
-		msgDate := dateFromTS(msg.TS)
+		msgDate := DateFromTS(msg.TS)
 		if msgDate != "" && msgDate != lastDate {
-			label := formatDateSeparator(msgDate)
+			label := FormatDateSeparator(msgDate)
 			sepStr := "── " + label + " ──"
 			sep := lipgloss.NewStyle().Background(styles.Background).Foreground(styles.TextMuted).Bold(true).
 				Width(width).Align(lipgloss.Center).
@@ -3000,7 +3000,11 @@ func (m *Model) applySelectionOverlay(visible []string, skipFirst, skipLast bool
 	return visible
 }
 
-func dateFromTS(ts string) string {
+// DateFromTS returns the local-day date string ("2006-01-02") for a
+// Slack timestamp (e.g. "1700000000.000100"), or "" if the TS can't be
+// parsed. Exported so the thread pane can reuse the same day-boundary
+// computation that drives the channel pane's date separators.
+func DateFromTS(ts string) string {
 	parts := strings.SplitN(ts, ".", 2)
 	if len(parts) == 0 {
 		return ""
@@ -3012,7 +3016,12 @@ func dateFromTS(ts string) string {
 	return time.Unix(sec, 0).Format("2006-01-02")
 }
 
-func formatDateSeparator(dateStr string) string {
+// FormatDateSeparator turns a "2006-01-02" date string into the
+// human-readable label used in day-divider rows ("Today", "Yesterday",
+// a weekday name within the last week, or a fully-qualified date).
+// Exported so the thread pane renders identical labels to the channel
+// pane.
+func FormatDateSeparator(dateStr string) string {
 	d, err := time.Parse("2006-01-02", dateStr)
 	if err != nil {
 		return dateStr
