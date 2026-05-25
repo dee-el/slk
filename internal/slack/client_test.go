@@ -2014,8 +2014,8 @@ func TestOpenConversation_APIErrorIsWrapped(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "OpenConversation") {
-		t.Errorf("expected error to be wrapped with OpenConversation prefix, got %q", err.Error())
+	if !strings.Contains(err.Error(), "opening conversation") {
+		t.Errorf("expected error to be wrapped with opening conversation prefix, got %q", err.Error())
 	}
 	if !strings.Contains(err.Error(), "rate_limited") {
 		t.Errorf("expected error to contain underlying message, got %q", err.Error())

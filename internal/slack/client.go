@@ -647,19 +647,19 @@ func (c *Client) SendMessage(ctx context.Context, channelID, text string) (strin
 //
 // Defends inputs: rejects 0 users or more than 8. Slack's hard cap on
 // MPIM size is 9 participants total, so up to 8 OTHER user IDs.
-func (c *Client) OpenConversation(ctx context.Context, userIDs []string) (channelID string, alreadyOpen bool, err error) {
+func (c *Client) OpenConversation(ctx context.Context, userIDs []string) (string, bool, error) {
 	if len(userIDs) == 0 {
-		return "", false, fmt.Errorf("OpenConversation: at least one user ID required")
+		return "", false, fmt.Errorf("opening conversation: at least one user ID required")
 	}
 	if len(userIDs) > 8 {
-		return "", false, fmt.Errorf("OpenConversation: at most 8 user IDs allowed (got %d)", len(userIDs))
+		return "", false, fmt.Errorf("opening conversation: at most 8 user IDs allowed (got %d)", len(userIDs))
 	}
 	ch, _, alreadyOpen, err := c.api.OpenConversationContext(ctx, &slack.OpenConversationParameters{
 		Users:    userIDs,
 		ReturnIM: true,
 	})
 	if err != nil {
-		return "", false, fmt.Errorf("OpenConversation: %w", err)
+		return "", false, fmt.Errorf("opening conversation: %w", err)
 	}
 	return ch.ID, alreadyOpen, nil
 }
