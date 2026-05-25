@@ -460,3 +460,61 @@ func TestHandleKey_EscClosesPickerAndReturnsNil(t *testing.T) {
 		t.Error("expected picker to be hidden after Esc")
 	}
 }
+
+func TestHandleKey_SpaceClearsQueryAfterAdd(t *testing.T) {
+	m := New()
+	m.SetUsers(testUsers())
+	m.Open()
+
+	// Type "ali" to filter down to Alice.
+	m.HandleKey("a")
+	m.HandleKey("l")
+	m.HandleKey("i")
+	if m.query != "ali" {
+		t.Fatalf("precondition: expected query=ali, got %q", m.query)
+	}
+
+	// Space selects Alice. Query should clear so the user can type the
+	// next name without backspacing.
+	m.HandleKey(" ")
+	if m.query != "" {
+		t.Errorf("expected query cleared after add, got %q", m.query)
+	}
+	if _, ok := m.selected["U1"]; !ok {
+		t.Error("expected U1 selected")
+	}
+	// Filter should now show all non-self users (5 minus none = 5).
+	if len(m.filtered) != 5 {
+		t.Errorf("expected filtered to be reset to all users, got %d", len(m.filtered))
+	}
+}
+
+func TestHandleKey_SpaceDoesNotClearQueryOnRemove(t *testing.T) {
+	m := New()
+	m.SetUsers(testUsers())
+	m.Open()
+
+	// Select Alice first (with no query so we have a clean starting state).
+	m.HandleKey(" ")
+	if _, ok := m.selected["U1"]; !ok {
+		t.Fatal("precondition: expected U1 selected after space")
+	}
+
+	// Now type a query that matches Alice.
+	m.HandleKey("a")
+	m.HandleKey("l")
+	m.HandleKey("i")
+	if m.query != "ali" {
+		t.Fatalf("precondition: expected query=ali, got %q", m.query)
+	}
+
+	// Space on the highlighted (already-selected) Alice should REMOVE her,
+	// and the query should be preserved (user is course-correcting).
+	m.HandleKey(" ")
+	if _, ok := m.selected["U1"]; ok {
+		t.Error("expected U1 removed")
+	}
+	if m.query != "ali" {
+		t.Errorf("expected query preserved after remove, got %q", m.query)
+	}
+}

@@ -163,6 +163,14 @@ func (m *Model) toggleHighlightedSelection() {
 		return
 	}
 	m.selected[userID] = struct{}{}
+	// Clear the query on ADD so the user can immediately type the next
+	// recipient. On REMOVE (handled above), keep the query — that path
+	// is a course-correction, not a move to the next person.
+	if m.query != "" {
+		m.query = ""
+		m.highlight = 0
+		m.filter()
+	}
 }
 
 // handleBackspace deletes the last rune of the query. If the query is
