@@ -31,6 +31,7 @@ import (
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/mentionpicker"
 	"github.com/gammons/slk/internal/ui/messages"
+	"github.com/gammons/slk/internal/ui/newmessagepicker"
 	"github.com/gammons/slk/internal/ui/presencemenu"
 	"github.com/gammons/slk/internal/ui/reactionpicker"
 	"github.com/gammons/slk/internal/ui/sidebar"
@@ -78,19 +79,20 @@ const openThreadDebounceDelay = 200 * time.Millisecond
 
 type App struct {
 	// Sub-models
-	workspaceRail   workspace.Model
-	sidebar         sidebar.Model
-	messagepane     messages.Model
-	compose         compose.Model
-	statusbar       statusbar.Model
-	channelFinder   channelfinder.Model
-	workspaceFinder workspacefinder.Model
-	themeSwitcher   themeswitcher.Model
-	presenceMenu    presencemenu.Model
-	help            help.Model
-	threadPanel     *thread.Model
-	threadCompose   compose.Model
-	threadsView     threadsview.Model
+	workspaceRail    workspace.Model
+	sidebar          sidebar.Model
+	messagepane      messages.Model
+	compose          compose.Model
+	statusbar        statusbar.Model
+	channelFinder    channelfinder.Model
+	newMessagePicker newmessagepicker.Model
+	workspaceFinder  workspacefinder.Model
+	themeSwitcher    themeswitcher.Model
+	presenceMenu     presencemenu.Model
+	help             help.Model
+	threadPanel      *thread.Model
+	threadCompose    compose.Model
+	threadsView      threadsview.Model
 
 	// State
 	mode           Mode
@@ -196,6 +198,17 @@ type App struct {
 	// internal/ui/edit.go.
 	editing *editController
 
+	// newMessageInFlightID is the monotonic counter for in-flight
+	// OpenConversation requests dispatched from the new-message
+	// picker. 0 means no submit is in flight. The reducer drops late
+	// results whose RequestID doesn't match.
+	newMessageInFlightID uint64
+	// newMessageCancelled is set to true when the user Escs the
+	// modal while a submit is in flight. A subsequent
+	// NewMessageOpenedMsg with the matching RequestID is dropped
+	// rather than switching channels behind the user's back.
+	newMessageCancelled bool
+
 	// Workspace switching
 	workspaceSwitcher SwitchWorkspaceFunc
 	workspaceItems    []workspace.WorkspaceItem // cached for lookup
@@ -294,6 +307,7 @@ func NewApp() *App {
 		compose:              compose.New(""),
 		statusbar:            statusbar.New(),
 		channelFinder:        channelfinder.New(),
+		newMessagePicker:     newmessagepicker.New(),
 		workspaceFinder:      workspacefinder.New(),
 		themeSwitcher:        themeswitcher.New(),
 		presenceMenu:         presencemenu.New(),
