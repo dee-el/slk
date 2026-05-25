@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/gammons/slk/internal/config"
 )
 
@@ -140,6 +141,49 @@ func TestLightThemesHaveDarkSidebars(t *testing.T) {
 		}
 		if c.RailBackground == "" {
 			t.Errorf("light theme %q must set RailBackground", key)
+		}
+	}
+}
+
+// TestANSIDarkThemeRegistered asserts the ansi-dark theme is present
+// in the theme switcher and that every color field is populated with
+// a value that resolves to ansi.BasicColor — confirming the theme
+// will inherit the user's terminal palette rather than emit truecolor.
+func TestANSIDarkThemeRegistered(t *testing.T) {
+	names := ThemeNames()
+	found := false
+	for _, n := range names {
+		if n == "ANSI Dark" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected \"ANSI Dark\" in ThemeNames, got %v", names)
+	}
+
+	c := lookupTheme("ansi-dark")
+	required := map[string]string{
+		"Primary":     c.Primary,
+		"Accent":      c.Accent,
+		"Warning":     c.Warning,
+		"Error":       c.Error,
+		"Background":  c.Background,
+		"Surface":     c.Surface,
+		"SurfaceDark": c.SurfaceDark,
+		"Text":        c.Text,
+		"TextMuted":   c.TextMuted,
+		"Border":      c.Border,
+	}
+	for name, val := range required {
+		if val == "" {
+			t.Errorf("ansi-dark.%s is empty", name)
+			continue
+		}
+		col := lipgloss.Color(val)
+		if _, ok := col.(ansi.BasicColor); !ok {
+			t.Errorf("ansi-dark.%s = %q resolves to %T, want ansi.BasicColor",
+				name, val, col)
 		}
 	}
 }

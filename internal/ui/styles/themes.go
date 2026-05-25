@@ -277,6 +277,25 @@ var builtinThemes = map[string]struct {
 		SidebarTextMuted:  "#FFCC00",
 		RailBackground:    "#800000", // dark red rail
 	}},
+	"ansi-dark": {
+		Name: "ANSI Dark",
+		Colors: ThemeColors{
+			// All values are ANSI 16 color numbers ("0"–"15"). They are
+			// passed through lipgloss.Color() which returns ansi.BasicColor,
+			// so rendering uses native 16-color SGR escapes and inherits the
+			// user's terminal palette.
+			Primary:     "4",  // blue
+			Accent:      "6",  // cyan
+			Warning:     "3",  // yellow
+			Error:       "1",  // red
+			Background:  "0",  // black
+			Surface:     "8",  // bright black (slightly lifted panel bg)
+			SurfaceDark: "0",  // black (matches background)
+			Text:        "15", // bright white
+			TextMuted:   "8",  // bright black
+			Border:      "8",  // bright black
+		},
+	},
 }
 
 // customThemes stores themes loaded from the user's themes directory.
