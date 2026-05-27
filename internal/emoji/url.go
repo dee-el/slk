@@ -3,6 +3,8 @@ package emoji
 import (
 	"fmt"
 	"strings"
+
+	emojilib "github.com/kyokomi/emoji/v2"
 )
 
 // CDNBaseURL is the prefix Slack uses for its standard-emoji asset
@@ -42,4 +44,23 @@ func BuildStandardEmojiURL(codepoints []rune) string {
 		return ""
 	}
 	return CDNBaseURL + strings.Join(parts, "-") + ".png"
+}
+
+// CodepointsForShortcode resolves a Slack-style shortcode name (no
+// colons) to its Unicode codepoint sequence using the kyokomi
+// codemap. Returns (codepoints, true) on hit, (nil, false) on miss.
+//
+// Shortcodes that aren't in the kyokomi codemap (Slack-specific
+// names, workspace customs) are not resolved here — call
+// BuildCustomEmojiURL with the workspace customs map for those.
+//
+// VS16 and ZWJ are returned verbatim; URL construction strips VS16
+// at BuildStandardEmojiURL time.
+func CodepointsForShortcode(name string) ([]rune, bool) {
+	key := ":" + name + ":"
+	u, ok := emojilib.CodeMap()[key]
+	if !ok {
+		return nil, false
+	}
+	return []rune(u), true
 }

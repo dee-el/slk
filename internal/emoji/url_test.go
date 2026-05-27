@@ -45,3 +45,44 @@ func TestBuildStandardEmojiURL(t *testing.T) {
 		}
 	}
 }
+
+func TestCodepointsForShortcode_Builtin(t *testing.T) {
+	cases := []struct {
+		name string
+		want []rune // expected codepoints
+	}{
+		{"thumbsup", []rune{0x1F44D}},
+		{"heart", []rune{0x2764, 0xFE0F}},
+		{"man_astronaut", []rune{0x1F468, 0x200D, 0x1F680}},
+		{"warning", []rune{0x26A0, 0xFE0F}},
+		{"fire", []rune{0x1F525}},
+	}
+	for _, c := range cases {
+		got, ok := CodepointsForShortcode(c.name)
+		if !ok {
+			t.Errorf("CodepointsForShortcode(%q): ok=false, want a kyokomi hit", c.name)
+			continue
+		}
+		if !runesEqual(got, c.want) {
+			t.Errorf("CodepointsForShortcode(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestCodepointsForShortcode_Unknown(t *testing.T) {
+	if _, ok := CodepointsForShortcode("definitely_not_an_emoji_name_xyz"); ok {
+		t.Errorf("CodepointsForShortcode(unknown): ok=true, want false")
+	}
+}
+
+func runesEqual(a, b []rune) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
