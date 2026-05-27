@@ -115,3 +115,23 @@ func BuildCustomEmojiURL(name string, customs map[string]string) (string, bool) 
 	}
 	return "", false // exceeded max hops
 }
+
+// URLForShortcode resolves a Slack-style shortcode name (no colons)
+// to a Slack CDN URL using the workspace customs map first
+// (including alias resolution) and then the kyokomi codemap.
+// Returns (url, true) on hit, ("", false) when both lookups miss
+// or when an alias chain cycles.
+//
+// Workspace customs win over kyokomi for the same name — this
+// matches the precedence already used in
+// internal/emoji/entries.go:resolveCustomDisplay and the picker
+// preview behavior.
+func URLForShortcode(name string, customs map[string]string) (string, bool) {
+	if u, ok := BuildCustomEmojiURL(name, customs); ok {
+		return u, true
+	}
+	if cps, ok := CodepointsForShortcode(name); ok {
+		return BuildStandardEmojiURL(cps), true
+	}
+	return "", false
+}

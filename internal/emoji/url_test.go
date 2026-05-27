@@ -133,3 +133,34 @@ func TestBuildCustomEmojiURL(t *testing.T) {
 		}
 	}
 }
+
+func TestURLForShortcode(t *testing.T) {
+	customs := map[string]string{
+		"party_parrot": "https://emoji.slack-edge.com/T01/party_parrot/abc.gif",
+		"thumbsup":     "https://emoji.slack-edge.com/T01/our_thumbs/def.png", // workspace override
+	}
+	cases := []struct {
+		name    string
+		wantURL string
+		wantOK  bool
+	}{
+		// Workspace custom wins over kyokomi for the same name.
+		{"thumbsup", "https://emoji.slack-edge.com/T01/our_thumbs/def.png", true},
+
+		// Custom-only name.
+		{"party_parrot", "https://emoji.slack-edge.com/T01/party_parrot/abc.gif", true},
+
+		// kyokomi-only name.
+		{"heart", CDNBaseURL + "2764.png", true},
+
+		// Unknown.
+		{"never_defined", "", false},
+	}
+	for _, c := range cases {
+		got, ok := URLForShortcode(c.name, customs)
+		if ok != c.wantOK || got != c.wantURL {
+			t.Errorf("URLForShortcode(%q) = (%q, %v), want (%q, %v)",
+				c.name, got, ok, c.wantURL, c.wantOK)
+		}
+	}
+}
