@@ -18,10 +18,17 @@ import (
 	"time"
 
 	"github.com/gammons/slk/internal/cache"
+	emojiutil "github.com/gammons/slk/internal/emoji"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/sidebar"
 )
+
+// EmojiImageReadyMsg re-exports emoji.EmojiImageReadyMsg so reducers
+// can refer to it without an extra import. Dispatched when a previously
+// cold-cache emoji finishes fetching and is now warm-renderable across
+// every UI surface that renders emoji.
+type EmojiImageReadyMsg = emojiutil.EmojiImageReadyMsg
 
 // Messages sent between components
 type (

@@ -172,6 +172,16 @@ var reduceIO reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		}
 		return nil, true
 
+	case EmojiImageReadyMsg:
+		debuglog.ImgFetch("recv: kind=emoji-ready url=%s", m.URL)
+		// An emoji-image fetch landed. Invalidate every surface
+		// that renders emoji so the next View() picks up the warm-
+		// cache placement. Cheap coarse invalidation in v1.
+		a.messagepane.HandleEmojiImageReady(m.URL)
+		// Phase 7 adds a.threadPanel.HandleEmojiImageReady(m.URL).
+		// Phase 8 adds picker invalidation. Phase 9 adds autocomplete.
+		return nil, true
+
 	case messages.AvatarReadyMsg:
 		// A lazy avatar fetch landed for m.UserID. Both the
 		// messages pane and the thread panel cache avatar slots

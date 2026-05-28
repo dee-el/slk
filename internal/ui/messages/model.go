@@ -387,6 +387,26 @@ func (m *Model) SetFocused(focused bool) {
 		focused, len(m.messages))
 }
 
+// HandleEmojiImageReady is invoked by the host (App.Update) when an
+// emoji.EmojiImageReadyMsg lands. The same emoji can appear in any
+// visible message, reaction pill, or block-kit element — so the
+// cheapest correct invariant is a wholesale render-cache
+// invalidation. The next View() rebuilds with the now-warm emoji
+// placement (single kitty transmit + N placements per the
+// registry's dedup contract).
+//
+// v1 keeps this coarse; if heavy-emoji channels show measurable
+// invalidation churn (multiple emoji arriving in a burst), a future
+// follow-up can index per-URL → per-message-TS for targeted
+// staleEntries population. Punt for now: kitty image placements are
+// cheap, full re-render of a viewport is sub-frame on the workloads
+// tested.
+func (m *Model) HandleEmojiImageReady(url string) {
+	debuglog.ImgFetch("messages.HandleEmojiImageReady: url=%s wholesale_invalidate", url)
+	m.cache = nil
+	m.dirty()
+}
+
 // HandleImageReady is invoked by the host (App.Update) when an
 // ImageReadyMsg lands. It marks the affected message's render-cache
 // entry as stale (so the next View() rebuilds only that slot, not the
