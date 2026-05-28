@@ -1419,6 +1419,11 @@ func (a *App) SetEmojiContext(ctx messages.EmojiContext) {
 		Cells:    ctx.Cells,
 		Customs:  ctx.Customs,
 	})
+	a.reactionPicker.SetEmojiContext(reactionpicker.EmojiContext{
+		PlaceCtx: ctx.PlaceCtx,
+		Cells:    ctx.Cells,
+		Customs:  ctx.Customs,
+	})
 }
 
 // SetImageFetcher records the image fetcher so the preview overlay can
@@ -1728,10 +1733,11 @@ func (a *App) SetCustomEmoji(customs map[string]string) {
 	if a.reactionPicker != nil {
 		a.reactionPicker.SetCustomEmoji(customs)
 	}
-	// Update both panes' emoji-image context so newly-known custom
+	// Update all panes' emoji-image context so newly-known custom
 	// emoji URLs become resolvable on the next render.
 	a.messagepane.SetEmojiCustoms(customs)
 	a.threadPanel.SetEmojiCustoms(customs)
+	a.reactionPicker.SetEmojiCustoms(customs)
 }
 
 // SetInitialChannel sets the active channel and its messages before the TUI starts.

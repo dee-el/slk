@@ -179,7 +179,8 @@ var reduceIO reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		// cache placement. Cheap coarse invalidation in v1.
 		a.messagepane.HandleEmojiImageReady(m.URL)
 		a.threadPanel.HandleEmojiImageReady(m.URL)
-		// Phase 8 adds picker invalidation. Phase 9 adds autocomplete.
+		a.reactionPicker.HandleEmojiImageReady(m.URL) // no-op in v1; future caching may use it
+		// Phase 9 adds autocomplete.
 		return nil, true
 
 	case messages.AvatarReadyMsg:
