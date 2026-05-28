@@ -57,6 +57,48 @@ var (
 	inflightEmojiMu sync.Mutex
 )
 
+// negativeEmojiCache records URLs whose fetch has failed at least once
+// in this process. Subsequent Place() calls for these URLs return
+// ok=false so callers fall back to legacy glyph/text rendering instead
+// of leaving a blank cold-cache reservation forever.
+//
+// This addresses kyokomi-codemap entries that don't correspond to any
+// Slack emoji (e.g., :heart_suit:, :diamond_suit:) — the URL builder
+// produces a syntactically-valid URL that 404s on Slack's CDN. Without
+// negative caching, these rows would show blank cells indefinitely.
+//
+// Lifetime: process-scoped. No TTL, no disk persistence. A slk restart
+// picks up emoji that Slack may have added since.
+var (
+	negativeEmojiCache   = map[string]struct{}{}
+	negativeEmojiCacheMu sync.RWMutex
+)
+
+// markEmojiURLFailed records url as a known-failing emoji fetch so
+// future Place() calls for it short-circuit to the legacy fallback.
+// Called from spawnEmojiFetch's goroutine on any fetch error.
+func markEmojiURLFailed(url string) {
+	negativeEmojiCacheMu.Lock()
+	negativeEmojiCache[url] = struct{}{}
+	negativeEmojiCacheMu.Unlock()
+}
+
+// isEmojiURLFailed reports whether url has been marked failed via
+// markEmojiURLFailed. Used by Place() as a short-circuit.
+func isEmojiURLFailed(url string) bool {
+	negativeEmojiCacheMu.RLock()
+	_, failed := negativeEmojiCache[url]
+	negativeEmojiCacheMu.RUnlock()
+	return failed
+}
+
+// resetNegativeEmojiCache clears the negative cache. Test-only.
+func resetNegativeEmojiCache() {
+	negativeEmojiCacheMu.Lock()
+	negativeEmojiCache = map[string]struct{}{}
+	negativeEmojiCacheMu.Unlock()
+}
+
 // EmojiCacheKey returns the cache key used by Place for url. Stable
 // hash of the URL with an "E-" prefix to isolate emoji entries from
 // avatars, attachments, and block-kit images in the shared disk cache.
@@ -88,6 +130,14 @@ func EmojiCacheKey(url string) string {
 // ctx.SendMsg.
 func Place(ctx PlaceContext, url string, cells int) (string, func(io.Writer) error, bool) {
 	if url == "" || ctx.Fetcher == nil || cells < 1 {
+		return "", nil, false
+	}
+
+	// Negative-cache short-circuit. If this URL's fetch has failed earlier
+	// in the process (e.g., kyokomi-codemap entry without a real Slack
+	// asset), bail out so the caller falls back to the legacy glyph/text
+	// rendering instead of showing a blank cold-cache reservation forever.
+	if isEmojiURLFailed(url) {
 		return "", nil, false
 	}
 
@@ -146,10 +196,20 @@ func spawnEmojiFetch(ctx PlaceContext, key, url string, target goimage.Point) {
 			// internally during RenderKey.
 		})
 		if err != nil {
-			// Fetcher logs the error in its own [imgfetch] surface;
-			// no need to duplicate here. The Place caller will keep
-			// rendering reservations on every frame until a successful
-			// fetch lands a prerender entry.
+			// Mark this URL as known-failing so subsequent Place() calls
+			// short-circuit to the legacy fallback. Common cases: kyokomi
+			// codemap entries that don't correspond to a real Slack emoji
+			// (404), the rare transient network error (also negative-cached
+			// for the rest of this session; a restart picks it up fresh).
+			// Fetcher logs the error in its own [imgfetch] surface; no
+			// need to duplicate here.
+			markEmojiURLFailed(url)
+			// Dispatch the same ready msg as success so the UI re-renders
+			// and the negative cache takes effect on next View(). Semantically
+			// "this URL's status is now resolved (to fallback)".
+			if send != nil {
+				send(EmojiImageReadyMsg{URL: url})
+			}
 			return
 		}
 		if send != nil {

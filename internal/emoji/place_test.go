@@ -245,13 +245,18 @@ func TestPlace_ColdPath_DedupsConcurrentCalls(t *testing.T) {
 }
 
 func TestPlace_ColdPath_FetchError_LeavesNoInflight(t *testing.T) {
+	resetNegativeEmojiCache()
+	t.Cleanup(resetNegativeEmojiCache)
+
 	ff := newFakeFetcher()
 	url := "https://a.slack-edge.com/...1f44d.png"
 	key := EmojiCacheKey(url)
 
-	// First fetch fails. The inflight registration must clear so a
-	// subsequent Place call re-tries (otherwise a transient error
-	// would permanently freeze the placeholder).
+	// First fetch fails. The inflight registration must clear so the
+	// negative-cache short-circuit on the next Place call observes a
+	// clean inflight map (the failure path must not leak inflight
+	// entries even though retries are now blocked by the negative
+	// cache).
 	first := make(chan struct{})
 	var once sync.Once
 	ff.fetchFn = func(ctx context.Context, req imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
@@ -278,20 +283,112 @@ func TestPlace_ColdPath_FetchError_LeavesNoInflight(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
 
-	// A second Place call should issue a new fetch.
-	Place(pctx, url, 2)
-	deadline = time.Now().Add(time.Second)
-	for {
-		ff.mu.Lock()
-		n := len(ff.fetchCalls)
-		ff.mu.Unlock()
-		if n >= 2 {
-			break
-		}
+// TestPlace_NegativeCache_ShortCircuitsAfterFetchFailure verifies that
+// once a URL has been marked failed (via spawnEmojiFetch's error path),
+// subsequent Place() calls return ok=false so the caller can fall back
+// to legacy glyph/text rendering instead of leaving a blank cold-cache
+// reservation.
+func TestPlace_NegativeCache_ShortCircuitsAfterFetchFailure(t *testing.T) {
+	resetNegativeEmojiCache()
+	t.Cleanup(resetNegativeEmojiCache)
+
+	ff := newFakeFetcher()
+	badURL := "https://a.slack-edge.com/...nonexistent.png"
+
+	// Fetch always errors (404-style).
+	fetchDone := make(chan struct{}, 1)
+	ff.fetchFn = func(ctx context.Context, req imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+		defer func() { fetchDone <- struct{}{} }()
+		return imgpkg.FetchResult{}, errors.New("HTTP 404")
+	}
+
+	pctx := PlaceContext{Fetcher: ff, SendMsg: func(any) {}}
+
+	// First Place: cold path, returns reservation + spawns fetch.
+	s1, _, ok1 := Place(pctx, badURL, 2)
+	if !ok1 {
+		t.Fatalf("first Place should return ok=true (cold-path reservation)")
+	}
+	if s1 != "  " {
+		t.Errorf("first Place placement = %q, want two spaces", s1)
+	}
+
+	// Wait for the fetch goroutine to complete and mark the URL failed.
+	<-fetchDone
+	// Allow the deferred inflight-cleanup + negative-cache mark to settle.
+	deadline := time.Now().Add(time.Second)
+	for !isEmojiURLFailed(badURL) {
 		if time.Now().After(deadline) {
-			t.Fatalf("second Place did not issue a retry fetch (n=%d)", n)
+			t.Fatalf("negative cache never marked %q as failed", badURL)
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Second Place: negative-cache short-circuit, returns ok=false.
+	s2, _, ok2 := Place(pctx, badURL, 2)
+	if ok2 {
+		t.Errorf("second Place after fetch failure should return ok=false, got placement=%q ok=true", s2)
+	}
+	if s2 != "" {
+		t.Errorf("second Place placement = %q, want \"\"", s2)
+	}
+}
+
+// TestPlace_NegativeCache_DoesNotAffectOtherURLs verifies that marking
+// one URL failed doesn't poison Place() for unrelated URLs.
+func TestPlace_NegativeCache_DoesNotAffectOtherURLs(t *testing.T) {
+	resetNegativeEmojiCache()
+	t.Cleanup(resetNegativeEmojiCache)
+
+	markEmojiURLFailed("https://x/bad.png")
+
+	goodURL := "https://x/good.png"
+	ff := newFakeFetcher()
+	ff.fetchFn = func(ctx context.Context, req imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+		return imgpkg.FetchResult{}, nil
+	}
+	pctx := PlaceContext{Fetcher: ff, SendMsg: func(any) {}}
+
+	// good URL should still take the cold path.
+	_, _, ok := Place(pctx, goodURL, 2)
+	if !ok {
+		t.Errorf("Place for unrelated URL after marking different URL failed: ok=false, want true")
+	}
+}
+
+// TestPlace_NegativeCache_DispatchesReadyMsgOnFailure verifies that
+// fetch failures still trigger an EmojiImageReadyMsg dispatch so the
+// UI re-renders and the negative-cache decision takes effect.
+func TestPlace_NegativeCache_DispatchesReadyMsgOnFailure(t *testing.T) {
+	resetNegativeEmojiCache()
+	t.Cleanup(resetNegativeEmojiCache)
+
+	ff := newFakeFetcher()
+	badURL := "https://x/bad.png"
+	ff.fetchFn = func(ctx context.Context, req imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+		return imgpkg.FetchResult{}, errors.New("HTTP 404")
+	}
+
+	gotMsg := make(chan EmojiImageReadyMsg, 1)
+	pctx := PlaceContext{
+		Fetcher: ff,
+		SendMsg: func(m any) {
+			if r, ok := m.(EmojiImageReadyMsg); ok {
+				gotMsg <- r
+			}
+		},
+	}
+
+	Place(pctx, badURL, 2)
+
+	select {
+	case msg := <-gotMsg:
+		if msg.URL != badURL {
+			t.Errorf("EmojiImageReadyMsg.URL = %q, want %q", msg.URL, badURL)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no EmojiImageReadyMsg dispatched after fetch failure")
 	}
 }
