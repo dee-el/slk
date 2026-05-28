@@ -2193,7 +2193,14 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 	if len(allSixel) == 0 {
 		allSixel = nil
 	}
-	return msgContent, allFlushes, allSixel, hits, reactionHits
+	// Merge body-text + reaction-pill emoji flushes (the named-return
+	// `flushes` slice, appended to at lines ~1811 / ~1914) with
+	// blockkit / legacy-attachment / image-attachment flushes
+	// (`allFlushes`). The two parallel accumulators are a v1 quirk of
+	// Phase 6's wiring; without this merge the body+reaction emoji
+	// kitty uploads would be silently dropped here and the terminal
+	// would show blank cells where placeholder runes were rendered.
+	return msgContent, append(allFlushes, flushes...), allSixel, hits, reactionHits
 }
 
 
