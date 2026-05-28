@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gammons/slk/internal/config"
+	emojiutil "github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -1132,5 +1133,26 @@ func TestHitTestReaction_NoHitsWithoutReactions(t *testing.T) {
 	}
 	if _, _, ok := m.HitTestReaction(0, 0); ok {
 		t.Error("HitTestReaction with no reactions should always return ok=false")
+	}
+}
+
+func TestModel_SetEmojiContext_InvalidatesCache(t *testing.T) {
+	msgs := []MessageItem{
+		{TS: "1.0", UserID: "U1", UserName: "alice", Text: "hello", Timestamp: "10:30 AM"},
+	}
+	m := New(msgs, "general")
+	// Force a render to populate m.cache.
+	_ = m.View(20, 60)
+	if m.cache == nil {
+		t.Fatalf("cache should be populated after View()")
+	}
+
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emojiutil.PlaceContext{},
+		Cells:    2,
+		Customs:  nil,
+	})
+	if m.cache != nil {
+		t.Errorf("cache should be nil after SetEmojiContext (forces re-render)")
 	}
 }

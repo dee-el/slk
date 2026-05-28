@@ -307,6 +307,13 @@ type Model struct {
 	// hyperlink form).
 	imgRenderer *imgrender.Renderer
 
+	// emojiCtx bundles the emoji-image rendering dependencies
+	// (PlaceContext, configured cell footprint, workspace customs).
+	// Configured at startup via Model.SetEmojiContext from
+	// cmd/slk/main.go. A zero value disables the image path; the
+	// legacy glyph/shortcode-text branch runs instead.
+	emojiCtx EmojiContext
+
 	// staleEntries is the set of message TSes whose render-cache slot
 	// must be rebuilt before the next View() commit, while sibling
 	// slots are reused verbatim. Populated by HandleImageReady when an
@@ -1238,6 +1245,41 @@ func (m *Model) PatchUserName(userID, displayName string) {
 // channel mentions without the embedded |name).
 func (m *Model) SetChannelNames(names map[string]string) {
 	m.channelNames = names
+	m.cache = nil
+	m.dirty()
+}
+
+// EmojiContext bundles the emoji-image rendering dependencies. Held
+// by the Model and threaded through RenderSlackMarkdownWith when
+// building each message's body and reaction pills.
+type EmojiContext struct {
+	PlaceCtx emojiutil.PlaceContext
+	Cells    int               // 1 or 2; 0 falls back to 2
+	Customs  map[string]string // workspace custom emoji map; nil = empty
+}
+
+// SetEmojiContext configures the emoji-image rendering path. Should
+// be called once at startup (from cmd/slk/main.go) after the
+// PlaceContext, Customs map, and EmojiCells are known. Subsequent
+// calls invalidate the render cache so the new context takes effect
+// on the next View().
+func (m *Model) SetEmojiContext(ctx EmojiContext) {
+	if ctx.Cells != 1 && ctx.Cells != 2 {
+		ctx.Cells = 2
+	}
+	m.emojiCtx = ctx
+	m.cache = nil
+	m.dirty()
+}
+
+// SetEmojiCustoms updates only the customs map on the active emoji
+// context, leaving PlaceCtx and Cells untouched. Invalidates the
+// render cache so the new map is consulted on the next View().
+//
+// Called from App.SetCustomEmoji when CustomEmojisLoadedMsg arrives
+// from the workspace bootstrap.
+func (m *Model) SetEmojiCustoms(customs map[string]string) {
+	m.emojiCtx.Customs = customs
 	m.cache = nil
 	m.dirty()
 }
