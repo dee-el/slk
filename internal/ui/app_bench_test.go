@@ -163,6 +163,26 @@ func BenchmarkAppViewScrollHeldKey(b *testing.B) {
 	}
 }
 
+// BenchmarkThreadToggle measures the cost of opening/closing the thread
+// panel. Flipping threadVisible shrinks the messages pane width, which
+// forces a full message-cache rebuild at the new width -- the ~500ms
+// redraw the user reported. Each iteration does one open + one close.
+func BenchmarkThreadToggle(b *testing.B) {
+	a := makeWideScrollApp()
+	parent := a.messagepane.Messages()[0]
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Open: thread visible -> messages pane narrows -> rebuild.
+		a.threadVisible = true
+		a.threadPanel.SetThread(parent, nil, "C1", parent.TS)
+		_ = a.View()
+		// Close: messages pane widens back -> rebuild again.
+		a.threadVisible = false
+		_ = a.View()
+	}
+}
+
 // TestComposeKeystrokeKeepsSidePanelsCached verifies that typing a single
 // character into the compose box does NOT bump the version counters of the
 // sidebar / messages / workspace rail panels. Without this guarantee, the
