@@ -360,3 +360,32 @@ func TestChannelsPanelContrast(t *testing.T) {
 		}
 	}
 }
+
+var darkEditorThemes = []string{
+	"Zenburn", "Gruvbox Material Dark", "Nightfox", "Carbonfox",
+	"Melange Dark", "Vesper", "Flexoki Dark", "Modus Vivendi",
+	"Night Owl", "Poimandres", "Ayu Dark", "Kanagawa Dragon",
+}
+
+func TestDarkEditorThemesRegistered(t *testing.T) {
+	have := map[string]bool{}
+	for _, n := range ThemeNames() {
+		have[n] = true
+	}
+	for _, want := range darkEditorThemes {
+		if !have[want] {
+			t.Errorf("dark editor theme %q not registered", want)
+		}
+	}
+}
+
+func TestDarkEditorThemesHaveRequiredColors(t *testing.T) {
+	for _, name := range darkEditorThemes {
+		c := lookupTheme(strings.ToLower(name))
+		if c.Primary == "" || c.Accent == "" || c.Warning == "" || c.Error == "" ||
+			c.Background == "" || c.Surface == "" || c.SurfaceDark == "" ||
+			c.Text == "" || c.TextMuted == "" || c.Border == "" {
+			t.Errorf("theme %q missing required color(s): %+v", name, c)
+		}
+	}
+}

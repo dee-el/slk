@@ -306,6 +306,78 @@ var builtinThemes = map[string]struct {
 		Text: "0", TextMuted: "8", Border: "8",
 		SelectionBgFocused: "8", SelectionBgUnfocused: "8",
 	}},
+	"zenburn": {"Zenburn", ThemeColors{
+		Primary: "#8CD0D3", Accent: "#7F9F7F", Warning: "#F0DFAF", Error: "#CC9393",
+		Background: "#3F3F3F", Surface: "#4F4F4F", SurfaceDark: "#2B2B2B",
+		Text: "#DCDCCC", TextMuted: "#989890", Border: "#5F5F5F",
+		SidebarBackground: "#2B2B2B", RailBackground: "#1F1F1F",
+	}},
+	"gruvbox material dark": {"Gruvbox Material Dark", ThemeColors{
+		Primary: "#7DAEA3", Accent: "#A9B665", Warning: "#D8A657", Error: "#EA6962",
+		Background: "#282828", Surface: "#32302F", SurfaceDark: "#1D2021",
+		Text: "#D4BE98", TextMuted: "#928374", Border: "#45403D",
+		SidebarBackground: "#1A1A1A", RailBackground: "#0F0F0F",
+	}},
+	"nightfox": {"Nightfox", ThemeColors{
+		Primary: "#719CD6", Accent: "#81B29A", Warning: "#DBC074", Error: "#C94F6D",
+		Background: "#192330", Surface: "#212E3F", SurfaceDark: "#131A24",
+		Text: "#CDCECF", TextMuted: "#738091", Border: "#2B3B51",
+		SidebarBackground: "#0E141C", RailBackground: "#080B11",
+	}},
+	"carbonfox": {"Carbonfox", ThemeColors{
+		Primary: "#78A9FF", Accent: "#25BE6A", Warning: "#FF832B", Error: "#EE5396",
+		Background: "#161616", Surface: "#262626", SurfaceDark: "#0C0C0C",
+		Text: "#F2F4F8", TextMuted: "#7B7C7E", Border: "#393939",
+		SidebarBackground: "#242424", RailBackground: "#0C0C0C",
+	}},
+	"melange dark": {"Melange Dark", ThemeColors{
+		Primary: "#A3A9CE", Accent: "#85B695", Warning: "#EBC06D", Error: "#D47766",
+		Background: "#292522", Surface: "#34302C", SurfaceDark: "#1F1B18",
+		Text: "#ECE1D7", TextMuted: "#867462", Border: "#403A36",
+		SidebarBackground: "#16130F", RailBackground: "#0D0B09",
+	}},
+	"vesper": {"Vesper", ThemeColors{
+		Primary: "#FFC799", Accent: "#99FFE4", Warning: "#FFC799", Error: "#FF8080",
+		Background: "#101010", Surface: "#1C1C1C", SurfaceDark: "#0A0A0A",
+		Text: "#FFFFFF", TextMuted: "#8B8B8B", Border: "#2A2A2A",
+		SidebarBackground: "#1F1F1F", RailBackground: "#000000",
+	}},
+	"flexoki dark": {"Flexoki Dark", ThemeColors{
+		Primary: "#4385BE", Accent: "#879A39", Warning: "#D0A215", Error: "#D14D41",
+		Background: "#100F0F", Surface: "#1C1B1A", SurfaceDark: "#0A0908",
+		Text: "#CECDC3", TextMuted: "#878580", Border: "#282726",
+		SidebarBackground: "#201F1E", RailBackground: "#0A0908",
+	}},
+	"modus vivendi": {"Modus Vivendi", ThemeColors{
+		Primary: "#2FAFFF", Accent: "#44BC44", Warning: "#FEC43F", Error: "#FF5F59",
+		Background: "#000000", Surface: "#1E1E1E", SurfaceDark: "#0A0A0A",
+		Text: "#FFFFFF", TextMuted: "#989898", Border: "#303030",
+		SidebarBackground: "#1A1A1A", RailBackground: "#0A0A0A",
+	}},
+	"night owl": {"Night Owl", ThemeColors{
+		Primary: "#82AAFF", Accent: "#ADDB67", Warning: "#ECC48D", Error: "#EF5350",
+		Background: "#011627", Surface: "#0E293F", SurfaceDark: "#010E1A",
+		Text: "#D6DEEB", TextMuted: "#5F7E97", Border: "#1D3B53",
+		SidebarBackground: "#0E293F", RailBackground: "#010E1A",
+	}},
+	"poimandres": {"Poimandres", ThemeColors{
+		Primary: "#89DDFF", Accent: "#5DE4C7", Warning: "#FFFAC2", Error: "#D0679D",
+		Background: "#1B1E28", Surface: "#252B37", SurfaceDark: "#171922",
+		Text: "#E4F0FB", TextMuted: "#767C9D", Border: "#303340",
+		SidebarBackground: "#0F1118", RailBackground: "#08090D",
+	}},
+	"ayu dark": {"Ayu Dark", ThemeColors{
+		Primary: "#39BAE6", Accent: "#C2D94C", Warning: "#FFB454", Error: "#FF3333",
+		Background: "#0B0E14", Surface: "#131721", SurfaceDark: "#06080D",
+		Text: "#BFBDB6", TextMuted: "#565B66", Border: "#1B1F28",
+		SidebarBackground: "#1B202B", RailBackground: "#0B0E14",
+	}},
+	"kanagawa dragon": {"Kanagawa Dragon", ThemeColors{
+		Primary: "#8BA4B0", Accent: "#8A9A7B", Warning: "#C4B28A", Error: "#C4746E",
+		Background: "#181616", Surface: "#282423", SurfaceDark: "#0D0C0C",
+		Text: "#C5C9C5", TextMuted: "#737C73", Border: "#2D2C29",
+		SidebarBackground: "#282423", RailBackground: "#100E0E",
+	}},
 }
 
 // customThemes stores themes loaded from the user's themes directory.
