@@ -1071,12 +1071,21 @@ func buildPlainLine(line string) plainLine {
 	if line == "" {
 		return plainLine{Text: "", Bytes: []int{0}}
 	}
-	g := uniseg.NewGraphemes(line)
+	// Use the grapheme-only iterator (FirstGraphemeClusterInString)
+	// instead of uniseg.NewGraphemes/.Next(): the latter runs uniseg's
+	// full StepString state machine, which also computes word/sentence/
+	// line-break boundaries we never use. That sentence-break work was
+	// ~67% of a full buildCache (the ~500ms thread-open / channel-switch
+	// rebuild). The grapheme cluster boundaries and widths produced are
+	// identical (verified by TestBuildPlainLine_MatchesUnisegGraphemes).
 	bytesMap := make([]int, 0, len(line))
 	byteOffset := 0
-	for g.Next() {
-		cluster := g.Str()
-		w := g.Width()
+	state := -1
+	rest := line
+	for len(rest) > 0 {
+		var cluster string
+		var w int
+		cluster, rest, w, state = uniseg.FirstGraphemeClusterInString(rest, state)
 		if w <= 0 {
 			// Zero-width cluster: bytes go into Text but no column is
 			// produced. The byte offset advances; the next W>0 cluster
