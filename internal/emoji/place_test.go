@@ -77,6 +77,18 @@ func (f *fakeFetcher) Fetch(ctx context.Context, req imgpkg.FetchRequest) (imgpk
 	return imgpkg.FetchResult{}, errors.New("fakeFetcher: no fetchFn set")
 }
 
+// fetchCallsSnapshot returns a copy of the recorded fetch requests under the
+// mutex. Fetch runs on the background goroutine spawned by spawnEmojiFetch,
+// so tests must read through this accessor (not ff.fetchCalls directly) to
+// avoid racing that goroutine's append at Fetch above.
+func (f *fakeFetcher) fetchCallsSnapshot() []imgpkg.FetchRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]imgpkg.FetchRequest, len(f.fetchCalls))
+	copy(out, f.fetchCalls)
+	return out
+}
+
 func TestPlace_InvalidInputs(t *testing.T) {
 	ff := newFakeFetcher()
 	ctx := PlaceContext{Fetcher: ff}
@@ -201,10 +213,11 @@ func TestPlace_ColdPath_SpawnsFetch(t *testing.T) {
 	}
 
 	// Exactly one fetch should have been issued.
-	if len(ff.fetchCalls) != 1 {
-		t.Errorf("fetcher.Fetch called %d times, want 1", len(ff.fetchCalls))
+	calls := ff.fetchCallsSnapshot()
+	if len(calls) != 1 {
+		t.Errorf("fetcher.Fetch called %d times, want 1", len(calls))
 	}
-	if got := ff.fetchCalls[0]; got.URL != url || got.Key != EmojiCacheKey(url) || got.CellTarget != goimage.Pt(2, 1) {
+	if got := calls[0]; got.URL != url || got.Key != EmojiCacheKey(url) || got.CellTarget != goimage.Pt(2, 1) {
 		t.Errorf("FetchRequest = {Key:%q URL:%q CellTarget:%v}, want consistent with url and 2x1",
 			got.Key, got.URL, got.CellTarget)
 	}
@@ -220,7 +233,22 @@ func TestPlace_ColdPath_DedupsConcurrentCalls(t *testing.T) {
 		return imgpkg.FetchResult{}, nil
 	}
 
-	pctx := PlaceContext{Fetcher: ff, SendMsg: func(any) {}}
+	// The deduped fetch goroutine signals completion via SendMsg exactly
+	// once. We wait on it before inspecting fetchCalls so the read
+	// happens-after the goroutine's append (otherwise the assertion races
+	// the background Fetch).
+	done := make(chan struct{}, 1)
+	pctx := PlaceContext{
+		Fetcher: ff,
+		SendMsg: func(m any) {
+			if _, ok := m.(EmojiImageReadyMsg); ok {
+				select {
+				case done <- struct{}{}:
+				default:
+				}
+			}
+		},
+	}
 
 	// Fire 20 concurrent Place calls for the same URL.
 	var wg sync.WaitGroup
@@ -237,10 +265,18 @@ func TestPlace_ColdPath_DedupsConcurrentCalls(t *testing.T) {
 	close(gate)
 	wg.Wait()
 
+	// Wait for the single in-flight fetch goroutine to finish (and append
+	// to fetchCalls) before asserting.
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("deduped fetch never completed within 1s")
+	}
+
 	// All Place calls should have observed the in-flight dedup and
 	// only one Fetch should have actually been issued.
-	if len(ff.fetchCalls) != 1 {
-		t.Errorf("concurrent Place calls produced %d Fetch invocations, want 1 (dedup failed)", len(ff.fetchCalls))
+	if got := len(ff.fetchCallsSnapshot()); got != 1 {
+		t.Errorf("concurrent Place calls produced %d Fetch invocations, want 1 (dedup failed)", got)
 	}
 }
 
