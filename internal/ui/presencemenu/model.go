@@ -130,6 +130,44 @@ func (m *Model) Close() {
 // IsVisible returns whether the overlay is currently showing.
 func (m Model) IsVisible() bool { return m.visible }
 
+// listTopOffset is the box-local row of the first menu row: top border
+// (1) + top padding (1) + title (1) + input (1) + blank separator (1).
+const listTopOffset = 5
+
+// boxWidth returns the modal's outer width for a given terminal width.
+func boxWidth(termWidth int) int {
+	w := termWidth / 2
+	if w < 36 {
+		w = 36
+	}
+	if w > 60 {
+		w = 60
+	}
+	return w
+}
+
+// BoxSize returns the rendered modal box's outer dimensions. The presence
+// menu renders every filtered row (no scroll window), so height grows with
+// the row count. termHeight is accepted for interface symmetry.
+func (m Model) BoxSize(termWidth, termHeight int) (int, int) {
+	nRows := len(m.filtered)
+	if nRows < 1 {
+		nRows = 1
+	}
+	return boxWidth(termWidth), nRows + 7
+}
+
+// ClickRow moves the selection to the menu row at box-local localY and
+// returns true when the click lands on a visible row.
+func (m *Model) ClickRow(termWidth, termHeight, localY int) bool {
+	row := localY - listTopOffset
+	if row < 0 || row >= len(m.filtered) {
+		return false
+	}
+	m.selected = row
+	return true
+}
+
 // HandleKey processes a key event and returns a non-nil Result on selection.
 func (m *Model) HandleKey(keyStr string) *Result {
 	switch keyStr {
@@ -204,13 +242,7 @@ func (m Model) ViewOverlay(termWidth, termHeight int, background string) string 
 }
 
 func (m Model) renderBox(termWidth int) string {
-	overlayWidth := termWidth / 2
-	if overlayWidth < 36 {
-		overlayWidth = 36
-	}
-	if overlayWidth > 60 {
-		overlayWidth = 60
-	}
+	overlayWidth := boxWidth(termWidth)
 	innerWidth := overlayWidth - 4
 	bg := styles.Background
 

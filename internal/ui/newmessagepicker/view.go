@@ -18,6 +18,15 @@ func (m Model) View(termWidth int) string {
 	return m.renderBox(termWidth)
 }
 
+// BoxSize returns the rendered modal box's outer dimensions. This modal's
+// footer can wrap at narrow widths, so we measure the actual render rather
+// than computing height analytically. renderBox has no side effects.
+// termHeight is accepted for interface symmetry.
+func (m Model) BoxSize(termWidth, termHeight int) (int, int) {
+	box := m.renderBox(termWidth)
+	return lipgloss.Width(box), lipgloss.Height(box)
+}
+
 // ViewOverlay renders the modal centered on a dimmed copy of the
 // current screen. background is the already-rendered base screen.
 func (m Model) ViewOverlay(termWidth, termHeight int, background string) string {
@@ -36,13 +45,7 @@ func (m Model) renderBox(termWidth int) string {
 		return ""
 	}
 
-	overlayWidth := termWidth / 2
-	if overlayWidth < 40 {
-		overlayWidth = 40
-	}
-	if overlayWidth > 80 {
-		overlayWidth = 80
-	}
+	overlayWidth := boxWidth(termWidth)
 	innerWidth := overlayWidth - 4
 	bg := styles.Background
 
@@ -113,7 +116,6 @@ func (m Model) renderInputRow(innerWidth int, bg color.Color) string {
 // scrollbar when the list overflows. Highlighted row gets a left bar
 // and the Primary foreground.
 func (m Model) renderResultRows(innerWidth int, bg color.Color) []string {
-	const maxVisible = 10
 	total := len(m.filtered)
 
 	if total == 0 {
@@ -132,23 +134,8 @@ func (m Model) renderResultRows(innerWidth int, bg color.Color) []string {
 		}
 	}
 
-	visible := maxVisible
-	if visible > total {
-		visible = total
-	}
-
-	startIdx := 0
-	if m.highlight >= visible {
-		startIdx = m.highlight - visible + 1
-	}
-	endIdx := startIdx + visible
-	if endIdx > total {
-		endIdx = total
-		startIdx = endIdx - visible
-		if startIdx < 0 {
-			startIdx = 0
-		}
-	}
+	startIdx, endIdx := m.visibleWindow()
+	visible := endIdx - startIdx
 
 	showScrollbar := total > visible
 	contentWidth := innerWidth - 1 // 1 col for the highlight indicator

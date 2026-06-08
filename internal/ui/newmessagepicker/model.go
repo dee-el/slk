@@ -93,6 +93,65 @@ func (m Model) IsVisible() bool {
 	return m.visible
 }
 
+// listTopOffset is the box-local row of the first result row: top border
+// (1) + top padding (1) + title (1) + To-input (1) + blank separator (1).
+const listTopOffset = 5
+
+// maxVisibleRows is the height of the results scroll window.
+const maxVisibleRows = 10
+
+// boxWidth returns the modal's outer width for a given terminal width.
+func boxWidth(termWidth int) int {
+	w := termWidth / 2
+	if w < 40 {
+		w = 40
+	}
+	if w > 80 {
+		w = 80
+	}
+	return w
+}
+
+// visibleWindow returns the [start, end) slice of m.filtered currently
+// shown, using the same scroll math as renderResultRows.
+func (m *Model) visibleWindow() (int, int) {
+	total := len(m.filtered)
+	visible := maxVisibleRows
+	if visible > total {
+		visible = total
+	}
+	startIdx := 0
+	if m.highlight >= visible {
+		startIdx = m.highlight - visible + 1
+	}
+	endIdx := startIdx + visible
+	if endIdx > total {
+		endIdx = total
+		startIdx = endIdx - visible
+		if startIdx < 0 {
+			startIdx = 0
+		}
+	}
+	return startIdx, endIdx
+}
+
+// ClickRow moves the highlight cursor to the result row at box-local
+// localY and returns true when the click lands on a visible row. Unlike
+// the single-select finders this only moves the cursor; the caller
+// synthesizes a toggle (Space) so multi-select semantics are preserved.
+func (m *Model) ClickRow(termWidth, termHeight, localY int) bool {
+	row := localY - listTopOffset
+	if row < 0 {
+		return false
+	}
+	start, end := m.visibleWindow()
+	if row >= end-start {
+		return false
+	}
+	m.highlight = start + row
+	return true
+}
+
 // setQuery is a test helper: replaces the query and refilters. The
 // real keystroke API in Task 4 will go through HandleKey.
 func (m *Model) setQuery(q string) {

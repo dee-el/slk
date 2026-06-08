@@ -94,6 +94,18 @@ func (m *Model) View(termWidth int) string {
 	return m.renderBox(termWidth)
 }
 
+// BoxSize returns the rendered prompt box's outer dimensions, used by the
+// mouse router to detect clicks outside the modal (which cancel it).
+// termHeight is accepted for interface symmetry. Returns (0, 0) when the
+// prompt is hidden.
+func (m *Model) BoxSize(termWidth, termHeight int) (int, int) {
+	box := m.renderBox(termWidth)
+	if box == "" {
+		return 0, 0
+	}
+	return lipgloss.Width(box), lipgloss.Height(box)
+}
+
 // ViewOverlay composites the prompt over the given background. Returns
 // the background unchanged when the prompt is hidden.
 func (m *Model) ViewOverlay(termWidth, termHeight int, background string) string {

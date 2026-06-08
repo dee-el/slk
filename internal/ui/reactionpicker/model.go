@@ -163,6 +163,75 @@ func (m *Model) MessageTS() string {
 	return m.messageTS
 }
 
+// listTopOffset is the box-local row of the first list row: top border
+// (1) + top padding (1) + title (1) + input (1) + blank separator (1).
+const listTopOffset = 5
+
+// maxVisibleRows is the height of the results scroll window.
+const maxVisibleRows = 10
+
+// boxWidth returns the modal's outer width for a given terminal width.
+func boxWidth(termWidth int) int {
+	w := termWidth * 30 / 100
+	if w < 35 {
+		w = 35
+	}
+	if w > 50 {
+		w = 50
+	}
+	return w
+}
+
+// visibleWindow returns the [start, end) slice of the displayed list
+// currently shown, using the same scroll math as the renderer.
+func (m *Model) visibleWindow() (int, int) {
+	total := len(m.displayedList())
+	maxVisible := maxVisibleRows
+	if maxVisible > total {
+		maxVisible = total
+	}
+	start := 0
+	if m.selected >= maxVisible {
+		start = m.selected - maxVisible + 1
+	}
+	end := start + maxVisible
+	if end > total {
+		end = total
+		start = end - maxVisible
+		if start < 0 {
+			start = 0
+		}
+	}
+	return start, end
+}
+
+// BoxSize returns the rendered modal box's outer dimensions. termHeight is
+// accepted for interface symmetry; this modal's height depends only on its
+// row count.
+func (m *Model) BoxSize(termWidth, termHeight int) (int, int) {
+	start, end := m.visibleWindow()
+	nRows := end - start
+	if nRows < 1 {
+		nRows = 1
+	}
+	return boxWidth(termWidth), nRows + 7
+}
+
+// ClickRow moves the selection to the list row at box-local localY and
+// returns true when the click lands on a visible row.
+func (m *Model) ClickRow(termWidth, termHeight, localY int) bool {
+	row := localY - listTopOffset
+	if row < 0 {
+		return false
+	}
+	start, end := m.visibleWindow()
+	if row >= end-start {
+		return false
+	}
+	m.selected = start + row
+	return true
+}
+
 // displayedList returns the list currently shown (frecent or filtered).
 func (m *Model) displayedList() []EmojiEntry {
 	if m.query == "" {
@@ -284,13 +353,7 @@ func (m *Model) renderBox(termWidth int) string {
 		return ""
 	}
 
-	overlayWidth := termWidth * 30 / 100
-	if overlayWidth < 35 {
-		overlayWidth = 35
-	}
-	if overlayWidth > 50 {
-		overlayWidth = 50
-	}
+	overlayWidth := boxWidth(termWidth)
 	innerWidth := overlayWidth - 4 // border + padding
 
 	// All inner spans share the modal bg so the dimmed app behind the
@@ -322,26 +385,11 @@ func (m *Model) renderBox(termWidth int) string {
 		Foreground(styles.TextPrimary).
 		Render(inputText)
 
-	// Results (max 10)
+	// Results (max 10). Scroll window shared with ClickRow hit-testing.
 	list := m.displayedList()
-	maxVisible := 10
 	total := len(list)
-	if maxVisible > total {
-		maxVisible = total
-	}
-
-	start := 0
-	if m.selected >= maxVisible {
-		start = m.selected - maxVisible + 1
-	}
-	end := start + maxVisible
-	if end > total {
-		end = total
-		start = end - maxVisible
-		if start < 0 {
-			start = 0
-		}
-	}
+	start, end := m.visibleWindow()
+	maxVisible := end - start
 
 	// Scrollbar gutter on the right when the list overflows. Same pattern
 	// as channelfinder/themeswitcher/workspacefinder.

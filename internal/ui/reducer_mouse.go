@@ -72,6 +72,16 @@ func reduceMouseWheel(a *App, m tea.MouseWheelMsg) tea.Cmd {
 	default:
 		return nil
 	}
+	// When a modal overlay is open it owns the screen, so the wheel
+	// must scroll the items inside the modal rather than the panel
+	// under the cursor on the main tab behind it. We replay each
+	// wheel notch as the modal's own up/down navigation through
+	// dispatchModeKey -- the exact path the arrow keys take -- so
+	// every modal scrolls correctly without a bespoke per-modal
+	// wheel API, and the wheel never leaks through to the main tab.
+	if a.mode.IsModalOverlay() {
+		return scrollActiveModal(a, up)
+	}
 	// Lines moved per wheel notch -- configured via
 	// [appearance].mouse_wheel_lines (default 3, matches typical
 	// terminal behavior). Single-row panes (sidebar) still feel
@@ -124,6 +134,30 @@ func reduceMouseWheel(a *App, m tea.MouseWheelMsg) tea.Cmd {
 	return nil
 }
 
+// scrollActiveModal translates one wheel notch into the active
+// modal's up/down navigation, replaying it mouseWheelLines times
+// through dispatchModeKey (the same dispatch the arrow keys use).
+// Returns the batched cmds the modal handlers produced (usually
+// nil for plain navigation). The caller guarantees a modal mode
+// is active.
+func scrollActiveModal(a *App, up bool) tea.Cmd {
+	code := tea.KeyDown
+	if up {
+		code = tea.KeyUp
+	}
+	steps := a.mouseWheelLines
+	if steps < 1 {
+		steps = 1
+	}
+	var cmds []tea.Cmd
+	for i := 0; i < steps; i++ {
+		if cmd := dispatchModeKey(a, tea.KeyPressMsg{Code: code}); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
 // reduceMouseClick handles tea.MouseClickMsg. Extracted from the
 // reduceMouse dispatch switch because the arm is ~120 lines (four
 // panel-router branches: workspace rail, sidebar, messages pane,
@@ -134,6 +168,12 @@ func reduceMouseClick(a *App, m tea.MouseClickMsg) tea.Cmd {
 	}
 	if m.Button != tea.MouseLeft {
 		return nil
+	}
+	// When a modal overlay owns the screen, route the click to the
+	// modal (select a row / dismiss on outside-click) instead of the
+	// main-tab panels behind it. See reducer_modal_click.go.
+	if a.mode.IsModalOverlay() {
+		return reduceModalClick(a, m)
 	}
 	// A click sets the selection absolutely (ClickAt below), so any
 	// pending held-key scroll moves would be immediately overwritten --

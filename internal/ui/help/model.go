@@ -191,6 +191,72 @@ func (m *Model) filter() {
 	}
 }
 
+// listTopOffset is the box-local row of the first keybinding row: top
+// border (1) + top padding (1) + title (1) + search/filter line (1) +
+// blank separator (1).
+const listTopOffset = 5
+
+// maxVisibleRows returns the height of the scroll window for a terminal
+// height, matching renderBox's computation.
+func maxVisibleRows(termHeight int) int {
+	mv := termHeight - 10
+	if mv < 5 {
+		mv = 5
+	}
+	if mv > 20 {
+		mv = 20
+	}
+	return mv
+}
+
+// visibleWindow returns the [start, end) slice of m.filtered shown for a
+// given terminal height, using the same scroll math as the renderer.
+func (m *Model) visibleWindow(termHeight int) (int, int) {
+	total := len(m.filtered)
+	visible := maxVisibleRows(termHeight)
+	if visible > total {
+		visible = total
+	}
+	startIdx := 0
+	if m.selected >= visible {
+		startIdx = m.selected - visible + 1
+	}
+	endIdx := startIdx + visible
+	if endIdx > total {
+		endIdx = total
+		startIdx = endIdx - visible
+		if startIdx < 0 {
+			startIdx = 0
+		}
+	}
+	return startIdx, endIdx
+}
+
+// BoxSize returns the rendered modal box's outer dimensions. The help box
+// height depends on the terminal height and its footer can wrap, so we
+// measure the actual render (which has no side effects).
+func (m Model) BoxSize(termWidth, termHeight int) (int, int) {
+	box := m.renderBox(termWidth, termHeight)
+	return lipgloss.Width(box), lipgloss.Height(box)
+}
+
+// ClickRow moves the highlight to the keybinding row at box-local localY
+// and returns true when the click lands on a visible row. The help modal
+// has no activation action, so the caller does not synthesize a key after
+// a successful ClickRow; the highlight simply follows the click.
+func (m *Model) ClickRow(termWidth, termHeight, localY int) bool {
+	row := localY - listTopOffset
+	if row < 0 {
+		return false
+	}
+	start, end := m.visibleWindow(termHeight)
+	if row >= end-start {
+		return false
+	}
+	m.selected = start + row
+	return true
+}
+
 // ViewOverlay renders the modal on top of background. Returns the background
 // unchanged when the modal is not visible.
 func (m Model) ViewOverlay(termWidth, termHeight int, background string) string {
@@ -220,13 +286,7 @@ func (m Model) renderBox(termWidth, termHeight int) string {
 	innerWidth := overlayWidth - 4 // account for border + padding
 
 	// Visible rows: leave headroom for title, search line, blank, footer (~6 lines).
-	maxVisible := termHeight - 10
-	if maxVisible < 5 {
-		maxVisible = 5
-	}
-	if maxVisible > 20 {
-		maxVisible = 20
-	}
+	maxVisible := maxVisibleRows(termHeight)
 
 	bg := styles.Background
 
@@ -269,24 +329,10 @@ func (m Model) renderBox(termWidth, termHeight int) string {
 			Render("Press / to search")
 	}
 
-	// Determine which window of the filtered list to render.
+	// Determine which window of the filtered list to render. Shared with
+	// ClickRow hit-testing via visibleWindow.
 	total := len(m.filtered)
-	visible := maxVisible
-	if visible > total {
-		visible = total
-	}
-	startIdx := 0
-	if m.selected >= visible {
-		startIdx = m.selected - visible + 1
-	}
-	endIdx := startIdx + visible
-	if endIdx > total {
-		endIdx = total
-		startIdx = endIdx - visible
-		if startIdx < 0 {
-			startIdx = 0
-		}
-	}
+	startIdx, endIdx := m.visibleWindow(termHeight)
 
 	// Width budget per row: leave room for the scrollbar gutter when present.
 	showScrollbar := total > maxVisible
