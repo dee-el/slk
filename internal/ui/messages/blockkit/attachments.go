@@ -126,6 +126,31 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 			perf.textTotal += time.Since(t0)
 		}
 	}
+	// Nested Block Kit blocks. Slack's newer link-unfurl shape
+	// (Linear/Jira/GitHub issue cards) carries all content here while
+	// Title/Text/Fields are empty. Render them via the standard block
+	// renderer at the stripe-indented content width, then splice the
+	// resulting lines into body so they pick up the colored stripe
+	// prefix below. Image flushes/sixels/hits from the sub-render are
+	// merged with row/col offsets after the stripe loop.
+	var nested RenderResult
+	var nestedRowStartInBody int
+	if len(a.Blocks) > 0 {
+		var t0 time.Time
+		if perf != nil {
+			t0 = time.Now()
+		}
+		nested = Render(a.Blocks, ctx, contentW)
+		nestedRowStartInBody = len(body)
+		body = append(body, nested.Lines...)
+		if nested.Interactive {
+			out.Interactive = true
+		}
+		if perf != nil {
+			perf.otherTotal += time.Since(t0)
+		}
+	}
+
 	// Inline image (Task 13). Uses the same fetcher path as image
 	// blocks; falls back to a single OSC-8 link line when no fetcher
 	// is configured or the protocol is off.
@@ -213,6 +238,28 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 		imageHitInBody.ColStart += stripeCol
 		imageHitInBody.ColEnd += stripeCol
 		out.Hits = append(out.Hits, *imageHitInBody)
+	}
+
+	// Merge nested-block image artifacts. Sub-render coordinates are
+	// relative to nested.Lines (0-based); translate to absolute
+	// out.Lines rows by adding startRow + the block region's offset
+	// within body, and shift columns by the stripe prefix.
+	if len(a.Blocks) > 0 {
+		rowOffset := startRow + nestedRowStartInBody
+		out.Flushes = append(out.Flushes, nested.Flushes...)
+		for k, v := range nested.SixelRows {
+			if out.SixelRows == nil {
+				out.SixelRows = map[int]SixelEntry{}
+			}
+			out.SixelRows[k+rowOffset] = v
+		}
+		for _, h := range nested.Hits {
+			h.RowStart += rowOffset
+			h.RowEnd += rowOffset
+			h.ColStart += stripeCol
+			h.ColEnd += stripeCol
+			out.Hits = append(out.Hits, h)
+		}
 	}
 }
 

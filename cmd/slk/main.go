@@ -42,6 +42,7 @@ import (
 	"github.com/gammons/slk/internal/ui/styles"
 	"github.com/gammons/slk/internal/ui/themeswitcher"
 	"github.com/gammons/slk/internal/ui/workspace"
+	versionpkg "github.com/gammons/slk/internal/version"
 	"github.com/gammons/slk/internal/wake"
 	emoji "github.com/kyokomi/emoji/v2"
 	"github.com/slack-go/slack"
@@ -540,6 +541,7 @@ func run() error {
 
 	// Create app
 	app := ui.NewApp()
+	app.SetHelpFooter(versionpkg.ModalFooter(version))
 	app.SetClipboardAvailable(clipboardOK)
 	if useWaylandClipboard {
 		app.SetClipboardReader(ui.WaylandClipboardReader())
@@ -822,6 +824,34 @@ func run() error {
 			if err := saveGlobalTheme(configPath, name); err != nil {
 				log.Printf("save global theme: %v", err)
 			}
+		}
+	})
+
+	// Wire sidebar width saver: always persist to the active workspace.
+	app.SetWidthSaver(func(width int) {
+		if activeTeamID == "" {
+			return
+		}
+		teamName := activeTeamID
+		if wctx, ok := workspaces[activeTeamID]; ok && wctx.TeamName != "" {
+			teamName = wctx.TeamName
+		}
+		tomlKey := activeTeamID
+		for k, w := range cfg.Workspaces {
+			if w.TeamID == activeTeamID {
+				tomlKey = k
+				break
+			}
+		}
+		if cfg.Workspaces == nil {
+			cfg.Workspaces = make(map[string]config.Workspace)
+		}
+		ws := cfg.Workspaces[tomlKey]
+		ws.TeamID = activeTeamID
+		ws.SidebarWidth = width
+		cfg.Workspaces[tomlKey] = ws
+		if err := saveWorkspaceWidth(configPath, tomlKey, activeTeamID, teamName, width); err != nil {
+			log.Printf("save workspace sidebar width: %v", err)
 		}
 	})
 
@@ -1380,6 +1410,7 @@ func run() error {
 			TeamID:           wctx.TeamID,
 			TeamName:         wctx.TeamName,
 			Theme:            cfg.ResolveTheme(teamID),
+			SidebarWidth:     cfg.ResolveWidth(teamID),
 			Channels:         wctx.Channels,
 			FinderItems:      wctx.FinderItems,
 			UserNames:        wctx.UserNames,
@@ -1532,6 +1563,7 @@ func run() error {
 				TeamID:           wctx.TeamID,
 				TeamName:         wctx.TeamName,
 				Theme:            cfg.ResolveTheme(wctx.TeamID),
+				SidebarWidth:     cfg.ResolveWidth(wctx.TeamID),
 				Channels:         wctx.Channels,
 				FinderItems:      wctx.FinderItems,
 				UserNames:        wctx.UserNames,

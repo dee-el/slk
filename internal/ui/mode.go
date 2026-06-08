@@ -38,7 +38,8 @@ func (m Mode) IsModalOverlay() bool {
 		ModePresenceCustomSnooze,
 		ModeConfirm,
 		ModeHelp,
-		ModeNewMessage:
+		ModeNewMessage,
+		ModeReactionsView:
 		return true
 	default:
 		return false

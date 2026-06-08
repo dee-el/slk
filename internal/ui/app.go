@@ -244,6 +244,9 @@ type App struct {
 	themeSaveFn    func(name string, scope themeswitcher.ThemeScope)
 	themeOverrides config.Theme
 
+	// Sidebar width persistence
+	widthSaveFn func(width int)
+
 	// presence owns per-workspace presence/DND cache, the DND-tick
 	// guard, and the custom-snooze numeric input buffer. See
 	// internal/ui/presence.go.
@@ -2133,6 +2136,12 @@ func (a *App) SetThemeSaver(fn func(name string, scope themeswitcher.ThemeScope)
 	a.themeSaveFn = fn
 }
 
+// SetWidthSaver sets the callback for persisting the sidebar width.
+// The callback receives the current width after a resize.
+func (a *App) SetWidthSaver(fn func(width int)) {
+	a.widthSaveFn = fn
+}
+
 // SetStatusSetter registers a callback the App invokes when the user picks
 // a status action from the presence menu. The callback runs the appropriate
 // Slack API call (typically asynchronously) for the active workspace.
@@ -2148,6 +2157,12 @@ func (a *App) SetThemeOverrides(overrides config.Theme) {
 // SetTypingEnabled controls whether typing indicators are shown and sent.
 func (a *App) SetTypingEnabled(enabled bool) {
 	a.typing.SetEnabled(enabled)
+}
+
+// SetHelpFooter sets the attribution line shown at the bottom of the
+// help modal (e.g. the version + author credit). Pass "" to clear it.
+func (a *App) SetHelpFooter(s string) {
+	a.help.SetFooter(s)
 }
 
 // SetMouseWheelLines configures the number of lines the viewport scrolls per

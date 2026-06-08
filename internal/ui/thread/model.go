@@ -16,6 +16,7 @@ import (
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/messages"
+	"github.com/gammons/slk/internal/ui/messages/blockkit"
 	"github.com/gammons/slk/internal/ui/scrollbar"
 	"github.com/gammons/slk/internal/ui/selection"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -1699,6 +1700,45 @@ func (m *Model) HitTestReaction(row, col int) (replyIdx int, emoji string, ok bo
 // (mirroring messages.Model). v1: per-block Hit and SixelRows from
 // imgrender are discarded — click-to-preview from a thread reply and
 // inline sixel emission are out of scope.
+// blockkitContext wires the thread pane's host dependencies into a
+// blockkit.Context. Mirrors messages.Model.blockkitContext so Block
+// Kit blocks and legacy attachments render identically in the thread
+// panel and the main message pane.
+func (m *Model) blockkitContext(msg messages.MessageItem, userNames, channelNames map[string]string) blockkit.Context {
+	var imgCtx imgrender.ImageContext
+	if m.imgRenderer != nil {
+		imgCtx = m.imgRenderer.Context()
+	}
+	send := imgCtx.SendMsg
+	return blockkit.Context{
+		Protocol:    imgCtx.Protocol,
+		Fetcher:     imgCtx.Fetcher,
+		KittyRender: imgCtx.KittyRender,
+		CellPixels:  imgCtx.CellPixels,
+		MaxRows:     imgCtx.MaxRows,
+		MaxCols:     imgCtx.MaxCols,
+		UserNames:   userNames,
+		MessageTS:   msg.TS,
+		Channel:     m.channelID,
+		RenderText: func(s string, un map[string]string) string {
+			return messages.RenderSlackMarkdownWith(s, messages.RenderSlackMarkdownOpts{
+				UserNames:    un,
+				ChannelNames: channelNames,
+				PlaceCtx:     m.emojiCtx.PlaceCtx,
+				EmojiCells:   m.emojiCtx.Cells,
+				Customs:      m.emojiCtx.Customs,
+				EmojiFlushes: nil,
+			})
+		},
+		WrapText: messages.WordWrap,
+		SendMsg: func(v any) {
+			if send != nil {
+				send(v)
+			}
+		},
+	}
+}
+
 func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNames map[string]string, channelNames map[string]string, isSelected bool) (string, []func(io.Writer) error, []reactionEntryHit) {
 	line := styles.Username.Render(msg.UserName) + lipgloss.NewStyle().Background(styles.Background).Render("  ") + styles.Timestamp.Render(msg.Timestamp)
 
@@ -1721,6 +1761,35 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 		EmojiFlushes: &flushes,
 	}
 	text := styles.MessageText.Render(messages.WordWrap(messages.RenderSlackMarkdownWith(messages.MessageTextSource(msg), bodyOpts), contentWidth))
+
+	// Block Kit blocks + legacy attachments render between the body
+	// text and file attachments, mirroring the main message pane's
+	// renderMessagePlain. Image flushes are aggregated into the shared
+	// `flushes` slice; per-image Hit/SixelRows are discarded (v1 thread
+	// rendering, consistent with the file-attachment path below).
+	bkCtx := m.blockkitContext(msg, userNames, channelNames)
+	var bkLines []string
+	bkInteractive := false
+	if len(msg.Blocks) > 0 {
+		res := blockkit.Render(msg.Blocks, bkCtx, contentWidth)
+		bkLines = append(bkLines, res.Lines...)
+		flushes = append(flushes, res.Flushes...)
+		bkInteractive = bkInteractive || res.Interactive
+	}
+	if len(msg.LegacyAttachments) > 0 {
+		res := blockkit.RenderLegacy(msg.LegacyAttachments, bkCtx, contentWidth)
+		bkLines = append(bkLines, res.Lines...)
+		flushes = append(flushes, res.Flushes...)
+		bkInteractive = bkInteractive || res.Interactive
+	}
+	if bkInteractive {
+		bkLines = append(bkLines, styles.Timestamp.Render("↗ open in Slack to interact"))
+	}
+	bkBlock := ""
+	bkLineCount := len(bkLines)
+	if bkLineCount > 0 {
+		bkBlock = "\n" + strings.Join(bkLines, "\n")
+	}
 
 	var reactionLine string
 	// pillSpecs captures one entry per real (non-"+") reaction pill in
@@ -1888,14 +1957,15 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 	// of the reply content (pre-border, pre-tint):
 	//   row 0: username + timestamp line
 	//   rows [1 .. 1+textRows): wrapped body text
-	//   rows [1+textRows .. 1+textRows+attachmentLineCount): attachments
+	//   rows [.. +bkLineCount): block kit + legacy attachment content
+	//   rows [.. +attachmentLineCount): file attachments
 	//   rows [reactionRowBase ..): reaction lines
 	// buildCache wraps the content with a thick left border in col 0
 	// (so contentColBase = 1); it adds no rows.
 	var reactionHits []reactionEntryHit
 	if len(pillSpecs) > 0 && reactionLineCount > 0 {
 		const contentColBase = 1 // thick left border occupies col 0 of linesNormal
-		reactionRowBase := 1 + lipgloss.Height(text) + attachmentLineCount
+		reactionRowBase := 1 + lipgloss.Height(text) + bkLineCount + attachmentLineCount
 		for _, ps := range pillSpecs {
 			row := reactionRowBase + ps.lineIdx
 			reactionHits = append(reactionHits, reactionEntryHit{
@@ -1908,5 +1978,5 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 		}
 	}
 
-	return line + "\n" + text + attachmentLines + reactionLine, flushes, reactionHits
+	return line + "\n" + text + bkBlock + attachmentLines + reactionLine, flushes, reactionHits
 }

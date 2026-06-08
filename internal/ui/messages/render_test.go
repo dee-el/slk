@@ -225,6 +225,23 @@ func TestNonHTTPBracketedSurvives(t *testing.T) {
 	}
 }
 
+// TestDateTokenRendersFallback covers Slack's <!date^TS^FORMAT|FALLBACK>
+// token (emitted by Linear/Jira/etc. unfurls). We render the precomputed
+// fallback text and never leak the raw token or its format string.
+func TestDateTokenRendersFallback(t *testing.T) {
+	in := "<https://linear.app/truelist-io/team/TRU/all|Truelist> | <!date^1779996974^{date_short_pretty}|May 28, 2026>"
+	out := ansi.Strip(RenderSlackMarkdown(in, nil, nil))
+	if !strings.Contains(out, "May 28, 2026") {
+		t.Errorf("missing fallback date: %q", out)
+	}
+	if strings.Contains(out, "<!date") {
+		t.Errorf("raw date token leaked: %q", out)
+	}
+	if strings.Contains(out, "date_short_pretty") {
+		t.Errorf("date format string leaked: %q", out)
+	}
+}
+
 // TestRenderAttachmentsImageMarker asserts that an Image attachment renders
 // with an [Image] marker, the URL (visible for copy-paste), and an OSC 8
 // hyperlink for clickability. Filenames are intentionally omitted to keep

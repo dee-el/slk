@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/gammons/slk/internal/ui/messages"
+	"github.com/gammons/slk/internal/ui/messages/blockkit"
 )
 
 // TestRenderThreadMessageAttachmentLinesFit asserts that a message with a
@@ -47,4 +48,53 @@ func TestRenderThreadMessageAttachmentLinesFit(t *testing.T) {
 		t.Fatalf("expected rendered output to include [File] marker; got %q", got)
 	}
 	_ = lipgloss.Width // keep import; older assertion measured per-line widths
+}
+
+// TestRenderThreadMessageLegacyAttachmentBlocks asserts that a reply
+// carrying a link-unfurl legacy attachment (Linear/Jira issue card,
+// whose content lives in nested Block Kit blocks) renders its content
+// in the thread panel, matching the main message pane.
+func TestRenderThreadMessageLegacyAttachmentBlocks(t *testing.T) {
+	const width = 60
+	m := New()
+	msg := messages.MessageItem{
+		TS:        "1700000002.000000",
+		UserName:  "alice",
+		Text:      "see ticket",
+		Timestamp: "10:31 AM",
+		LegacyAttachments: []blockkit.LegacyAttachment{{
+			Color: "#2d1c9c",
+			Blocks: []blockkit.Block{
+				blockkit.SectionBlock{Text: "TRU-111 Customer Facing Blacklist Monitoring"},
+				blockkit.ContextBlock{Elements: []blockkit.ContextElement{{Text: "*State*  In Progress"}}},
+			},
+		}},
+	}
+	got, _, _ := m.renderThreadMessage(msg, width, nil, nil, false)
+	if !strings.Contains(got, "TRU-111 Customer Facing Blacklist Monitoring") {
+		t.Errorf("thread render missing legacy-attachment block content; got %q", got)
+	}
+	if !strings.Contains(got, "In Progress") {
+		t.Errorf("thread render missing context block content; got %q", got)
+	}
+}
+
+// TestRenderThreadMessageTopLevelBlocks asserts that a reply carrying
+// top-level Block Kit blocks (bot messages) renders them in the thread
+// panel.
+func TestRenderThreadMessageTopLevelBlocks(t *testing.T) {
+	const width = 60
+	m := New()
+	msg := messages.MessageItem{
+		TS:        "1700000003.000000",
+		UserName:  "deploybot",
+		Timestamp: "10:32 AM",
+		Blocks: []blockkit.Block{
+			blockkit.SectionBlock{Text: "Deploy finished: v1.2.3"},
+		},
+	}
+	got, _, _ := m.renderThreadMessage(msg, width, nil, nil, false)
+	if !strings.Contains(got, "Deploy finished: v1.2.3") {
+		t.Errorf("thread render missing top-level block content; got %q", got)
+	}
 }

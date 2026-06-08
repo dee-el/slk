@@ -173,6 +173,12 @@ type LegacyAttachment struct {
 	Footer     string
 	FooterIcon string // tiny inline image rendered before Footer
 	TS         int64  // unix seconds; 0 means absent
+	// Blocks holds Block Kit blocks nested inside the attachment.
+	// Slack's newer link-unfurl shape (Linear/Jira/GitHub issue
+	// cards, etc.) carries all visible content here while
+	// Title/Text/Fields are empty. Rendered inside the colored
+	// stripe after the classic fields. nil when absent.
+	Blocks []Block
 }
 
 // LegacyField is one entry in a LegacyAttachment's Fields slice.

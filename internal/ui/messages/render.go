@@ -48,6 +48,13 @@ var (
 	// raw <#CID> token.
 	channelMentionRe = regexp.MustCompile(`<#([A-Z0-9]+)(?:\|([^>]+))?>`)
 
+	// Slack date tokens: <!date^TIMESTAMP^FORMAT|FALLBACK> (an optional
+	// ^LINK segment may precede the |). Common in bot/unfurl content
+	// (Linear, Jira, GitHub). We render the precomputed FALLBACK text
+	// (already localized by Slack) rather than re-deriving the date from
+	// the format string. Group 1 is the fallback.
+	dateTokenRe = regexp.MustCompile(`<!date\^[^|>]*\|([^>]*)>`)
+
 	// Slack escapes &, <, > in user-typed text per
 	// https://api.slack.com/reference/surfaces/formatting#escaping.
 	// We decode AFTER all markup regexes (which consume legitimate
@@ -726,6 +733,12 @@ func renderInlineFormattingWith(text string, opts RenderSlackMarkdownOpts) strin
 		url := linkBareRe.FindStringSubmatch(match)[1]
 		visible := strings.TrimPrefix(url, "mailto:")
 		return osc8Hyperlink(url, linkStyle().Render(visible))
+	})
+
+	// Date tokens: <!date^TS^FORMAT|FALLBACK> -> FALLBACK. Done before
+	// channel/user mentions; the token never contains <#/<@ forms.
+	text = dateTokenRe.ReplaceAllStringFunc(text, func(match string) string {
+		return dateTokenRe.FindStringSubmatch(match)[1]
 	})
 
 	// Channel mentions: <#C1234|channel-name> -> #channel-name, or

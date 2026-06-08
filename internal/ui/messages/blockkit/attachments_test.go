@@ -173,3 +173,37 @@ func TestRenderLegacyImageURLFallbackWhenNoFetcher(t *testing.T) {
 		t.Errorf("expected '[image]' marker in fallback, got %q", plain)
 	}
 }
+
+// TestRenderLegacyRendersNestedBlocks covers link-unfurl attachments
+// (Linear/Jira/etc.) whose entire content lives in nested Block Kit
+// blocks while Title/Text/Fields are empty. Those blocks must render
+// inside the attachment's colored stripe, otherwise the card shows
+// nothing.
+func TestRenderLegacyRendersNestedBlocks(t *testing.T) {
+	ctx := Context{
+		RenderText: func(s string, _ map[string]string) string { return s },
+		WrapText:   func(s string, _ int) string { return s },
+	}
+	r := RenderLegacy([]LegacyAttachment{{
+		Color: "#2d1c9c",
+		Blocks: []Block{
+			SectionBlock{Text: "TRU-111 Customer Facing Blacklist Monitoring"},
+			ContextBlock{Elements: []ContextElement{{Text: "*State*  In Progress"}}},
+		},
+	}}, ctx, 60)
+	if r.Height == 0 {
+		t.Fatalf("Height = 0, expected nested blocks to render")
+	}
+	plain := ansi.Strip(strings.Join(r.Lines, "\n"))
+	if !strings.Contains(plain, "TRU-111 Customer Facing Blacklist Monitoring") {
+		t.Errorf("missing section text: %q", plain)
+	}
+	if !strings.Contains(plain, "In Progress") {
+		t.Errorf("missing context text: %q", plain)
+	}
+	for i, line := range r.Lines {
+		if !strings.HasPrefix(ansi.Strip(line), "█") {
+			t.Errorf("line %d missing stripe prefix: %q", i, ansi.Strip(line))
+		}
+	}
+}

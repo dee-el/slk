@@ -184,6 +184,7 @@ type navItem struct {
 
 type Model struct {
 	items    []ChannelItem
+	width    int // configurable panel width; 0 means defaultWidth
 	yOffset  int // own scroll state -- replaces bubbles/viewport
 	filter   string
 	filtered []int // indices into items that match filter
@@ -1560,6 +1561,46 @@ func (m *Model) ClickAt(y int) (ChannelItem, bool) {
 	return m.items[m.filtered[n.fi]], true
 }
 
+const (
+	defaultWidth = 30
+	minWidth     = 20
+	maxWidth     = 60
+	widthStep    = 5
+)
+
 func (m Model) Width() int {
-	return 30
+	if m.width == 0 {
+		return defaultWidth
+	}
+	return m.width
+}
+
+func (m *Model) SetWidth(w int) {
+	if w < minWidth {
+		w = minWidth
+	}
+	if w > maxWidth {
+		w = maxWidth
+	}
+	m.width = w
+	m.cacheValid = false
+	m.dirty()
+}
+
+func (m *Model) GrowWidth() {
+	w := m.Width()
+	if w+widthStep <= maxWidth {
+		m.width = w + widthStep
+		m.cacheValid = false
+		m.dirty()
+	}
+}
+
+func (m *Model) ShrinkWidth() {
+	w := m.Width()
+	if w-widthStep >= minWidth {
+		m.width = w - widthStep
+		m.cacheValid = false
+		m.dirty()
+	}
 }

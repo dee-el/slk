@@ -293,3 +293,31 @@ func TestParseAttachmentImageAndThumb(t *testing.T) {
 		t.Errorf("ThumbURL = %q", a.ThumbURL)
 	}
 }
+
+// TestParseAttachmentNestedBlocks covers Slack's newer attachment
+// shape (used by Linear/Jira/etc. link unfurls) where the attachment
+// carries no title/text/fields and instead nests Block Kit blocks in
+// its `blocks` array. The parser must surface those so the renderer
+// can display them.
+func TestParseAttachmentNestedBlocks(t *testing.T) {
+	in := []slack.Attachment{{
+		Color: "#2d1c9c",
+		Blocks: slack.Blocks{BlockSet: []slack.Block{
+			slack.NewSectionBlock(
+				slack.NewTextBlockObject("mrkdwn", "TRU-111 Customer Facing Blacklist Monitoring", false, false),
+				nil, nil,
+			),
+		}},
+	}}
+	a := ParseAttachments(in)[0]
+	if len(a.Blocks) != 1 {
+		t.Fatalf("Blocks len = %d, want 1", len(a.Blocks))
+	}
+	sec, ok := a.Blocks[0].(SectionBlock)
+	if !ok {
+		t.Fatalf("Blocks[0] type = %T, want SectionBlock", a.Blocks[0])
+	}
+	if sec.Text != "TRU-111 Customer Facing Blacklist Monitoring" {
+		t.Errorf("section text = %q", sec.Text)
+	}
+}
