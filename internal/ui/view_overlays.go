@@ -82,6 +82,7 @@ func (a *App) overlayActive() bool {
 		a.workspaceFinder.IsVisible() ||
 		a.themeSwitcher.IsVisible() ||
 		a.presenceMenu.IsVisible() ||
+		a.help.IsVisible() ||
 		a.mode == ModePresenceCustomSnooze ||
 		a.bootstrap.IsLoading()
 }
