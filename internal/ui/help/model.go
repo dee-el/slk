@@ -461,12 +461,15 @@ func (m Model) renderBox(termWidth, termHeight int) string {
 
 	footer := controlsFooter
 	if m.footer != "" {
+		// Attribution sits at the very bottom of the modal, centered
+		// across the inner width and below the controls line.
 		attribution := lipgloss.NewStyle().
 			Background(bg).
 			Foreground(styles.TextMuted).
-			MaxWidth(innerWidth).
+			Width(innerWidth).
+			Align(lipgloss.Center).
 			Render(m.footer)
-		footer = attribution + "\n" + controlsFooter
+		footer = controlsFooter + "\n\n" + attribution
 	}
 
 	content := title + "\n" + inputLine + "\n\n" + strings.Join(rows, "\n") + "\n\n" + footer
