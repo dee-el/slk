@@ -45,6 +45,7 @@ type KeyMap struct {
 	NavForward          key.Binding
 	Help                key.Binding
 	SaveThread          key.Binding
+	ListReactions       key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
@@ -90,5 +91,6 @@ func DefaultKeyMap() KeyMap {
 		NavForward:          key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "navigate forward")),
 		Help:                key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "show keybindings")),
 		SaveThread:          key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "save thread")),
+		ListReactions:       key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "list reactions")),
 	}
 }

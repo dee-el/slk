@@ -60,6 +60,7 @@ var modeHandlers = map[Mode]modeHandler{
 	ModePresenceMenu:         handlePresenceMenuMode,
 	ModePresenceCustomSnooze: handlePresenceCustomSnoozeMode,
 	ModeHelp:                 handleHelpMode,
+	ModeReactionsView:        handleReactionsViewMode,
 }
 
 // dispatchModeKey looks up the handler for the App's current

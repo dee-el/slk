@@ -61,6 +61,9 @@ func (a *App) applyOverlays(screen string) string {
 	if a.help.IsVisible() {
 		screen = a.help.ViewOverlay(a.width, a.height, screen)
 	}
+	if a.reactionsView.IsVisible() {
+		screen = a.reactionsView.ViewOverlay(a.width, a.height, screen)
+	}
 	if a.mode == ModePresenceCustomSnooze {
 		screen = presencemenu.CustomSnoozeView(a.width, a.height, screen, a.presence.SnoozeBuf())
 	}
@@ -82,6 +85,7 @@ func (a *App) overlayActive() bool {
 		a.workspaceFinder.IsVisible() ||
 		a.themeSwitcher.IsVisible() ||
 		a.presenceMenu.IsVisible() ||
+		a.reactionsView.IsVisible() ||
 		a.mode == ModePresenceCustomSnooze ||
 		a.bootstrap.IsLoading()
 }

@@ -37,6 +37,7 @@ import (
 	"github.com/gammons/slk/internal/ui/newmessagepicker"
 	"github.com/gammons/slk/internal/ui/presencemenu"
 	"github.com/gammons/slk/internal/ui/reactionpicker"
+	"github.com/gammons/slk/internal/ui/reactionsview"
 	"github.com/gammons/slk/internal/ui/sidebar"
 	"github.com/gammons/slk/internal/ui/statusbar"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -197,6 +198,7 @@ type App struct {
 
 	// Reaction picker
 	reactionPicker *reactionpicker.Model
+	reactionsView  *reactionsview.Model
 	confirmPrompt  *confirmprompt.Model
 	// reactions is the App's ReactionService collaborator (add/remove
 	// reactions on Slack + load/record frecent emoji history). See
@@ -368,6 +370,7 @@ func NewApp() *App {
 		threadCompose:        compose.New("thread"),
 		threadsView:          threadsview.New(nil, ""),
 		reactionPicker:       reactionpicker.New(),
+		reactionsView:        reactionsview.New(),
 		confirmPrompt:        confirmprompt.New(),
 		mode:                 ModeNormal,
 		focusedPanel:         PanelSidebar,
@@ -695,6 +698,55 @@ func (a *App) openPickerFromThread() tea.Cmd {
 	a.reactionPicker.Open(a.threadPanel.ChannelID(), reply.TS, existing)
 	a.SetMode(ModeReactionPicker)
 	return nil
+}
+
+// openReactionsView opens the read-only reactions list for the selected
+// message (main pane) or selected reply (thread pane). It is a no-op when
+// nothing is selected or the target has no reactions.
+func (a *App) openReactionsView() tea.Cmd {
+	var reactions []messages.ReactionItem
+	switch a.focusedPanel {
+	case PanelMessages:
+		msg, ok := a.messagepane.SelectedMessage()
+		if !ok {
+			return nil
+		}
+		reactions = msg.Reactions
+		a.messagepane.ExitReactionNav()
+	case PanelThread:
+		reply := a.threadPanel.SelectedReply()
+		if reply == nil {
+			return nil
+		}
+		reactions = reply.Reactions
+		a.threadPanel.ExitReactionNav()
+	default:
+		return nil
+	}
+	if len(reactions) == 0 {
+		return nil
+	}
+	a.reactionsView.Open(a.buildReactionGroups(reactions))
+	a.SetMode(ModeReactionsView)
+	return nil
+}
+
+// buildReactionGroups resolves each reaction's user IDs to display names,
+// marking the current user with a "(you)" suffix.
+func (a *App) buildReactionGroups(reactions []messages.ReactionItem) []reactionsview.ReactionGroup {
+	groups := make([]reactionsview.ReactionGroup, 0, len(reactions))
+	for _, r := range reactions {
+		users := make([]string, 0, len(r.UserIDs))
+		for _, uid := range r.UserIDs {
+			name := a.userNameFor(uid)
+			if uid == a.currentUserID {
+				name += " (you)"
+			}
+			users = append(users, name)
+		}
+		groups = append(groups, reactionsview.ReactionGroup{Emoji: r.Emoji, Users: users})
+	}
+	return groups
 }
 
 func (a *App) toggleReactionOnSelectedMessage(emojiName string) tea.Cmd {

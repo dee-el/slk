@@ -187,6 +187,9 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 			a.threadPanel.EnterReactionNav()
 		}
 
+	case key.Matches(msg, a.keys.ListReactions):
+		return a.openReactionsView()
+
 	case key.Matches(msg, a.keys.SaveThread):
 		return a.saveThreadToFile()
 

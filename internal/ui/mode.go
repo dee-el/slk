@@ -17,6 +17,7 @@ const (
 	ModeConfirm
 	ModeHelp
 	ModeNewMessage
+	ModeReactionsView
 )
 
 func (m Mode) String() string {
@@ -47,6 +48,8 @@ func (m Mode) String() string {
 		return "HELP"
 	case ModeNewMessage:
 		return "NEW MSG"
+	case ModeReactionsView:
+		return "REACTIONS"
 	default:
 		return "UNKNOWN"
 	}
