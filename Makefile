@@ -4,7 +4,7 @@ BINARY=slk
 BUILD_DIR=bin
 
 build:
-	go build -o $(BUILD_DIR)/$(BINARY) ./cmd/slk
+	go build -ldflags="-s -w" -trimpath -o $(BUILD_DIR)/$(BINARY) ./cmd/slk
 
 test:
 	go test ./... -v -race

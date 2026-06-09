@@ -54,7 +54,7 @@ sudo mv slk /usr/local/bin/
 **Go:**
 
 ```bash
-go install github.com/gammons/slk/cmd/slk@latest
+go install -ldflags="-s -w" -trimpath github.com/gammons/slk/cmd/slk@latest
 ```
 
 For `.deb` / `.rpm` / `.apk` packages, Windows, build-from-source, and checksums, see the [Installation wiki page](https://github.com/gammons/slk/wiki/Installation).

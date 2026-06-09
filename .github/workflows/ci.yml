@@ -35,7 +35,7 @@ jobs:
           cache: true
 
       - name: Build
-        run: go build ./...
+        run: go build -ldflags="-s -w" -trimpath ./...
 
       - name: Test
         run: go test ./... -race
