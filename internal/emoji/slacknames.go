@@ -9,12 +9,12 @@ import "fmt"
 // map is the workspace's emoji.list (name -> URL or "alias:target"); pass
 // nil if unavailable.
 //
-// Our picker is populated from kyokomi/emoji's CodeMap, which carries
-// CLDR-style aliases (e.g. "thumbs_up", "OK_hand", "check_mark") that
-// Slack does not recognize and rejects as invalid_name. Slack identifies
-// a standard emoji by its Unicode codepoint and accepts exactly one
-// canonical short_name per glyph (e.g. "+1" for 👍). This mirrors what
-// Slack's own web client sends.
+// The picker is sourced from the iamcal table (slacknames_gen.go), so a
+// pick is always a valid Slack short_name — but it may be a secondary
+// alias (e.g. "thumbsup" rather than "+1" for 👍). Slack records exactly
+// one canonical short_name per glyph, which is what its own web client
+// sends; this maps any alias to that canonical form so the wire name and
+// the locally stored reaction name stay consistent.
 //
 // Resolution order:
 //  1. Custom-emoji shadow: a workspace custom emoji (or custom alias) wins
@@ -27,10 +27,6 @@ import "fmt"
 //  3. Direct alias hit: the name is already a known Slack short_name or
 //     alias — return its canonical form.
 //  4. Fallback: return the name unchanged (unknown name sent verbatim).
-//
-// Since the picker is now sourced from the iamcal table (only Slack-valid
-// names), step 3 covers every standard pick; the old kyokomi-codepoint
-// fallback is no longer needed.
 func CanonicalSlackName(name string, customs map[string]string) string {
 	if _, ok := customs[name]; ok {
 		return name

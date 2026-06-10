@@ -16,7 +16,7 @@
 //
 //	go generate ./internal/emoji/...
 //
-// Provenance: https://github.com/iamcal/emoji-data (emoji.json on master).
+// Provenance: https://github.com/iamcal/emoji-data (emoji.json, pinned tag).
 package main
 
 import (
@@ -33,7 +33,9 @@ import (
 	"strings"
 )
 
-const sourceURL = "https://raw.githubusercontent.com/iamcal/emoji-data/master/emoji.json"
+// Pinned to a tagged release so `go generate` is reproducible. Bump
+// deliberately when refreshing the emoji set.
+const sourceURL = "https://raw.githubusercontent.com/iamcal/emoji-data/v16.0.0/emoji.json"
 
 type entry struct {
 	Unified    string   `json:"unified"`

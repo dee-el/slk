@@ -11,9 +11,10 @@
 //	                      message's reaction list.
 //	ReactionRemovedMsg  - server confirmed a reaction was removed
 //	                      (same WS-echo dedup as Added).
-//	ReactionSentMsg     - our reaction API call completed. No-op
-//	                      today: the optimistic update is already
-//	                      on screen and a failed call has no surface.
+//	ReactionSentMsg     - our reaction API call completed. On failure
+//	                      the optimistic update is rolled back (inverse
+//	                      op) and logged, so a rejected reaction doesn't
+//	                      linger on screen.
 //
 // Free reducer (no dedicated controller) because reactions are a
 // per-message annotation with no cross-message invariant and no

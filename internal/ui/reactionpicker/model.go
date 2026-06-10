@@ -286,11 +286,12 @@ func (m *Model) HandleKey(keyStr string) *ReactionResult {
 			return nil
 		}
 		selected := list[m.selected]
-		// Canonicalize to the name Slack's reactions API accepts: the
-		// picker is built from kyokomi/emoji's CLDR-aliased CodeMap, but
-		// Slack rejects those aliases (e.g. "thumbs_up") as invalid_name.
-		// Existing reactions are also stored under canonical names, so
-		// canonicalizing here makes add/remove detection match too.
+		// Canonicalize to the primary short_name Slack records: the picker
+		// offers iamcal aliases (e.g. both "+1" and "thumbsup" for 👍), and
+		// existing reactions are stored under the canonical name, so
+		// canonicalizing here keeps the wire name and add/remove detection
+		// consistent. Workspace custom emoji shadow standard names and pass
+		// through unchanged.
 		name := slkemoji.CanonicalSlackName(selected.Name, m.emojiCtx.Customs)
 		return &ReactionResult{
 			Emoji:  name,
