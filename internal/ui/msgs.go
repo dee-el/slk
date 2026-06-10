@@ -71,6 +71,16 @@ type (
 		ChannelID string
 		Messages  []messages.MessageItem
 	}
+	// MessagesAroundLoadedMsg delivers a history window fetched around
+	// TargetTS (jump-to-message navigation: search matches, search
+	// results, permalinks whose target is outside the loaded buffer).
+	// The reducer replaces the pane buffer and selects TargetTS.
+	MessagesAroundLoadedMsg struct {
+		ChannelID string
+		TargetTS  string
+		Messages  []messages.MessageItem // ascending by TS, like MessagesLoadedMsg
+		Err       error
+	}
 	NewMessageMsg struct {
 		ChannelID string
 		Message   messages.MessageItem

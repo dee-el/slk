@@ -1056,6 +1056,18 @@ func run() error {
 					Messages:  msgItems,
 				}
 			},
+			FetchAround: func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
+				chIDStr := string(channelID)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				msgItems := fetchMessagesAround(wctx.Client, chIDStr, string(ts), db, wctx.UserNames, tsFormat, router)
+				if msgItems == nil {
+					return ui.MessagesAroundLoadedMsg{ChannelID: chIDStr, TargetTS: string(ts), Err: fmt.Errorf("history fetch failed")}
+				}
+				return ui.MessagesAroundLoadedMsg{ChannelID: chIDStr, TargetTS: string(ts), Messages: msgItems}
+			},
 			Join: func(channelID ids.ChannelID, channelName string) tea.Msg {
 				chIDStr := string(channelID)
 				wctx := router.Active()
@@ -2158,10 +2170,46 @@ func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, 
 		return nil
 	}
 
+	msgItems := convertAndCacheHistory(client, channelID, history, db, userNames, tsFormat, router)
+
+	debuglog.Cache("fetchOlderMessages: channel=%s latest_ts=%s result %s dur_ms=%d (older history backfill)",
+		channelID, latestTS, summarizeMessages(msgItems), time.Since(start).Milliseconds())
+	return msgItems
+}
+
+// fetchMessagesAround fetches a history window centered on targetTS
+// for jump-to-message navigation. Mirrors fetchOlderMessages: upserts
+// into the cache, converts to MessageItems, returns ascending by TS.
+// Returns nil on network failure.
+func fetchMessagesAround(client *slackclient.Client, channelID, targetTS string, db *cache.DB, userNames map[string]string, tsFormat string, router *workspaceRouter) []messages.MessageItem {
+	ctx := context.Background()
+	debuglog.Cache("fetchMessagesAround: channel=%s target_ts=%s entry", channelID, targetTS)
+	start := time.Now()
+	history, err := client.GetHistoryAround(ctx, channelID, targetTS, 25)
+	if err != nil {
+		debuglog.Cache("fetchMessagesAround: GetHistoryAround %s @ %s: %v dur_ms=%d (returning nil)",
+			channelID, targetTS, err, time.Since(start).Milliseconds())
+		return nil
+	}
+
+	msgItems := convertAndCacheHistory(client, channelID, history, db, userNames, tsFormat, router)
+
+	debuglog.Cache("fetchMessagesAround: channel=%s target_ts=%s result %s dur_ms=%d (jump-to-message window)",
+		channelID, targetTS, summarizeMessages(msgItems), time.Since(start).Milliseconds())
+	return msgItems
+}
+
+// convertAndCacheHistory is the shared tail of fetchOlderMessages and
+// fetchMessagesAround: upserts each fetched message (and its
+// reactions) into the cache, resolves user names, converts to
+// messages.MessageItem, and reverses the slice from Slack's
+// newest-first order to the ascending-by-TS convention used
+// throughout slk.
+func convertAndCacheHistory(client *slackclient.Client, channelID string, history []slack.Message, db *cache.DB, userNames map[string]string, tsFormat string, router *workspaceRouter) []messages.MessageItem {
 	var msgItems []messages.MessageItem
 	for _, m := range history {
 		rawBytes, _ := json.Marshal(m)
-		debuglog.Cache("fetchOlderMessages: upsert channel=%s ts=%s subtype=%q reply_count=%d files=%d",
+		debuglog.Cache("convertAndCacheHistory: upsert channel=%s ts=%s subtype=%q reply_count=%d files=%d",
 			channelID, m.Timestamp, m.SubType, m.ReplyCount, len(m.Files))
 		db.UpsertMessage(cache.Message{
 			TS:          m.Timestamp,
@@ -2226,8 +2274,6 @@ func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, 
 		msgItems[i], msgItems[j] = msgItems[j], msgItems[i]
 	}
 
-	debuglog.Cache("fetchOlderMessages: channel=%s latest_ts=%s result %s dur_ms=%d (older history backfill)",
-		channelID, latestTS, summarizeMessages(msgItems), time.Since(start).Milliseconds())
 	return msgItems
 }
 

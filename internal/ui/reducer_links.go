@@ -71,7 +71,8 @@ func (a *App) routeLink(rawURL string) tea.Cmd {
 // completePendingLinkNav finishes (or drops) the pending permalink
 // navigation for channelID. authoritative=true means "no more message
 // data is coming for this channel" — if the target ts still isn't in
-// the buffer, give up with a toast instead of waiting.
+// the buffer, dispatch ChannelService.FetchAround to load a history
+// window centered on the target instead of waiting.
 //
 // Called from: routeLink (already-active channel, authoritative),
 // reduceChannels' ChannelSelectedMsg arm (cache render, best-effort),
@@ -97,8 +98,10 @@ func (a *App) completePendingLinkNav(channelID string, authoritative bool) tea.C
 	}
 	if authoritative {
 		a.pendingLinkNav = nil
+		channels := a.channels
+		chID, ts := p.channelID, p.messageTS
 		return func() tea.Msg {
-			return ToastMsg{Text: "Message is older than loaded history"}
+			return channels.FetchAround(ids.ChannelID(chID), ids.MessageTS(ts))
 		}
 	}
 	return nil

@@ -121,6 +121,17 @@ var reduceChannels reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		a.messagepane.PrependMessages(m.Messages)
 		return nil, true
 
+	case MessagesAroundLoadedMsg:
+		if m.ChannelID != a.activeChannelID {
+			return nil, true // stale: user navigated away
+		}
+		if m.Err != nil || len(m.Messages) == 0 {
+			return func() tea.Msg { return ToastMsg{Text: "Failed to load history around message"} }, true
+		}
+		a.messagepane.SetMessages(m.Messages)
+		a.messagepane.SelectByTS(m.TargetTS)
+		return nil, true
+
 	case ChannelMarkedRemoteMsg:
 		a.applyChannelMark(m.ChannelID, m.TS, m.UnreadCount)
 		return nil, true

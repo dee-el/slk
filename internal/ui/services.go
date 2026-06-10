@@ -354,6 +354,11 @@ type ChannelService interface {
 	// Returns a tea.Msg (typically OlderMessagesLoadedMsg).
 	FetchOlder(channelID ids.ChannelID, oldestTS ids.MessageTS) tea.Msg
 
+	// FetchAround loads a history window centered on ts for
+	// jump-to-message navigation. Returns a tea.Msg (typically
+	// MessagesAroundLoadedMsg).
+	FetchAround(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg
+
 	// ReadCache returns the local-cache snapshot of channelID's
 	// recent messages, or nil if no cache exists. Used by
 	// ChannelSelectedMsg's tiered render policy.
@@ -406,6 +411,7 @@ type ChannelService interface {
 type ChannelServiceFuncs struct {
 	Fetch            ChannelFetchFunc
 	FetchOlder       OlderMessagesFetchFunc
+	FetchAround      func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg
 	ReadCache        ChannelCacheReadFunc
 	SyncedAt         func(channelID ids.ChannelID) int64
 	MarkRead         func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg
@@ -442,6 +448,13 @@ func (c channelAdapter) FetchOlder(channelID ids.ChannelID, oldestTS ids.Message
 		return nil
 	}
 	return c.fns.FetchOlder(channelID, oldestTS)
+}
+
+func (c channelAdapter) FetchAround(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
+	if c.fns.FetchAround == nil {
+		return nil
+	}
+	return c.fns.FetchAround(channelID, ts)
 }
 
 func (c channelAdapter) ReadCache(channelID ids.ChannelID) []messages.MessageItem {
