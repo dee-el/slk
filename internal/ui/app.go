@@ -234,6 +234,11 @@ type App struct {
 	// channel is no longer in the list.
 	lastChannelByTeam map[string]string
 
+	// workspaceDomains maps teamID -> slack.com subdomain, recorded
+	// from WorkspaceReadyMsg / WorkspaceSwitchedMsg. Read by the link
+	// router to match permalink hosts against the active workspace.
+	workspaceDomains map[string]string
+
 	// navHistory owns the per-workspace ctrl+h / ctrl+k browser-style
 	// jump list. See internal/ui/navhistory.go. Lazy-initialized on
 	// first push for each team. Cleared only when slk exits — the
@@ -397,6 +402,7 @@ func NewApp() *App {
 		messageSvc:           noopMessageService,
 		channels:             noopChannelService,
 		lastChannelByTeam:    map[string]string{},
+		workspaceDomains:     map[string]string{},
 		navHistory:           newNavHistoryStore(),
 		clipboardRead:        defaultClipboardReader,
 	}
@@ -2116,6 +2122,13 @@ func (a *App) activeTeamName() string {
 		return a.activeTeamID
 	}
 	return "this workspace"
+}
+
+// activeWorkspaceDomain returns the slack.com subdomain of the active
+// workspace, or "" when unknown (link router then falls back to the
+// browser for all slack.com permalinks).
+func (a *App) activeWorkspaceDomain() string {
+	return a.workspaceDomains[a.activeTeamID]
 }
 
 // workspaceNameForActive returns the display name of the active workspace

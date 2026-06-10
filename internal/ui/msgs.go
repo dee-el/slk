@@ -181,8 +181,12 @@ type (
 		IsExternal bool
 	}
 	WorkspaceSwitchedMsg struct {
-		TeamID       string
-		TeamName     string
+		TeamID   string
+		TeamName string
+		// Domain is the workspace's slack.com subdomain (e.g.
+		// "truelist-workspace"), from auth.test. Used to decide
+		// whether an archive permalink belongs to this workspace.
+		Domain       string
 		Theme        string // resolved theme name (per-workspace or global default)
 		SidebarWidth int    // resolved sidebar width (per-workspace or global default)
 		Channels     []sidebar.ChannelItem
@@ -241,8 +245,12 @@ type (
 		MemberIDs []string
 	}
 	WorkspaceReadyMsg struct {
-		TeamID       string
-		TeamName     string
+		TeamID   string
+		TeamName string
+		// Domain is the workspace's slack.com subdomain (e.g.
+		// "truelist-workspace"), from auth.test. Used to decide
+		// whether an archive permalink belongs to this workspace.
+		Domain       string
 		Theme        string // resolved theme name (per-workspace or global default)
 		SidebarWidth int    // resolved sidebar width (per-workspace or global default)
 		Channels     []sidebar.ChannelItem
