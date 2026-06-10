@@ -86,7 +86,7 @@ func (m *Model) renderBox(termWidth int) string {
 	footer := lipgloss.NewStyle().
 		Background(bg).
 		Foreground(styles.TextMuted).
-		Render("j/k move   enter open   esc close")
+		Render("j/k move   enter open   esc/q close")
 
 	content := title + "\n\n" + strings.Join(rows, "\n") + "\n\n" + footer
 	content = messages.ReapplyBgAfterResets(content, messages.BgANSI()+messages.FgANSI())

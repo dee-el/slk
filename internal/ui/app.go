@@ -25,6 +25,7 @@ import (
 	"github.com/gammons/slk/internal/export"
 	"github.com/gammons/slk/internal/ids"
 	imgpkg "github.com/gammons/slk/internal/image"
+	"github.com/gammons/slk/internal/slackurl"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/channelpicker"
 	"github.com/gammons/slk/internal/ui/compose"
@@ -32,6 +33,7 @@ import (
 	"github.com/gammons/slk/internal/ui/emojipicker"
 	"github.com/gammons/slk/internal/ui/help"
 	"github.com/gammons/slk/internal/ui/imgrender"
+	"github.com/gammons/slk/internal/ui/linkpicker"
 	"github.com/gammons/slk/internal/ui/mentionpicker"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/newmessagepicker"
@@ -195,6 +197,9 @@ type App struct {
 	// window into a single cache invalidation when the emojiInvalidateMsg
 	// tick fires. See reducer_io.go's EmojiImageReadyMsg arm.
 	emojiInvalidatePending bool
+
+	// linkPicker is the open-link choice modal (issue #62).
+	linkPicker *linkpicker.Model
 
 	// Reaction picker
 	reactionPicker *reactionpicker.Model
@@ -387,6 +392,7 @@ func NewApp() *App {
 		threadPanel:          thread.New(),
 		threadCompose:        compose.New("thread"),
 		threadsView:          threadsview.New(nil, ""),
+		linkPicker:           linkpicker.New(),
 		reactionPicker:       reactionpicker.New(),
 		reactionsView:        reactionsview.New(),
 		confirmPrompt:        confirmprompt.New(),
@@ -902,6 +908,63 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 			func() tea.Msg { return statusbar.PermalinkCopiedMsg{} },
 		}
 	}
+}
+
+// openLinksOfSelected implements the `o` keybinding: collect the
+// links in the selected message (messages pane or thread panel).
+// 0 links -> toast; 1 link -> dispatch OpenLinkMsg directly; 2+ ->
+// open the link picker modal. All opens converge on OpenLinkMsg,
+// the single routing point in reducer_links.go.
+func (a *App) openLinksOfSelected() tea.Cmd {
+	var text string
+	switch a.focusedPanel {
+	case PanelMessages:
+		msg, ok := a.messagepane.SelectedMessage()
+		if !ok {
+			return nil
+		}
+		text = msg.Text
+	case PanelThread:
+		reply := a.threadPanel.SelectedReply()
+		if reply == nil {
+			return nil
+		}
+		text = reply.Text
+	default:
+		return nil
+	}
+	links := messages.ExtractLinks(text)
+	switch len(links) {
+	case 0:
+		return func() tea.Msg { return ToastMsg{Text: "No links in message"} }
+	case 1:
+		url := links[0].URL
+		return func() tea.Msg { return OpenLinkMsg{URL: url} }
+	default:
+		items := make([]linkpicker.Item, len(links))
+		for i, l := range links {
+			items[i] = linkpicker.Item{URL: l.URL, Label: l.Label, InApp: a.linkOpensInApp(l.URL)}
+		}
+		a.linkPicker.Open(items)
+		a.SetMode(ModeLinkPicker)
+		return nil
+	}
+}
+
+// linkOpensInApp reports whether routeLink would navigate this URL
+// inside slk (used for the picker's "[slk]" badge). Mirrors the
+// guards at the top of routeLink.
+func (a *App) linkOpensInApp(rawURL string) bool {
+	pl, ok := slackurl.Parse(rawURL)
+	if !ok {
+		return false
+	}
+	domain := a.activeWorkspaceDomain()
+	if domain == "" || pl.Subdomain != domain {
+		return false
+	}
+	_, _, found := a.channels.Lookup(pl.ChannelID)
+	return found
 }
 
 func (a *App) saveThreadToFile() tea.Cmd {
