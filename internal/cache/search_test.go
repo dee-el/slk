@@ -124,3 +124,23 @@ func TestFTSBackfillOnPreExistingDB(t *testing.T) {
 		t.Fatalf("backfill: fts matches = %d, want 1", got)
 	}
 }
+
+func TestBuildFTSQuery(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"foo", `"foo"*`},
+		{"foo bar", `"foo"* "bar"*`},
+		{"  foo   bar  ", `"foo"* "bar"*`},
+		{"", ""},
+		{"   ", ""},
+		// FTS5 operators must be treated as literal text.
+		{"foo OR bar", `"foo"* "OR"* "bar"*`},
+		{`say "hi"`, `"say"* """hi"""*`},
+		{"(foo)", `"(foo)"*`},
+		{"NEAR", `"NEAR"*`},
+	}
+	for _, c := range cases {
+		if got := buildFTSQuery(c.in); got != c.want {
+			t.Errorf("buildFTSQuery(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

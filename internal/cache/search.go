@@ -6,7 +6,24 @@
 // touch text, so query time filters them via a join back to messages.
 package cache
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
+
+// buildFTSQuery converts raw user input into an FTS5 MATCH expression
+// of quoted prefix terms: `foo bar` -> `"foo"* "bar"*` ("messages
+// containing words starting with foo AND bar"). Quoting every term
+// means user input is never interpreted as FTS5 syntax; embedded
+// double quotes are escaped by doubling per SQL string rules.
+func buildFTSQuery(input string) string {
+	fields := strings.Fields(input)
+	parts := make([]string, 0, len(fields))
+	for _, f := range fields {
+		parts = append(parts, `"`+strings.ReplaceAll(f, `"`, `""`)+`"*`)
+	}
+	return strings.Join(parts, " ")
+}
 
 // migrateSearch creates the FTS5 table, sync triggers, and backfills
 // existing rows. Idempotent: a no-op when messages_fts already exists.
