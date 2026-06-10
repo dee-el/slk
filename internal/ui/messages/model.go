@@ -18,7 +18,6 @@ import (
 	"github.com/gammons/slk/internal/ui/scrollbar"
 	"github.com/gammons/slk/internal/ui/selection"
 	"github.com/gammons/slk/internal/ui/styles"
-	kyoemoji "github.com/kyokomi/emoji/v2"
 )
 
 type MessageItem struct {
@@ -227,7 +226,7 @@ type Model struct {
 	channelTopic string
 	channelType  string // "channel", "private", "dm", "group_dm" -- drives header glyph
 	loading      bool
-	spinnerFrame int // braille-spinner frame index for "Loading messages..." animation
+	spinnerFrame int               // braille-spinner frame index for "Loading messages..." animation
 	avatarFn     AvatarFunc        // optional: returns half-block avatar for a userID
 	userNames    map[string]string // user ID -> display name for mention resolution
 	channelNames map[string]string // channel ID -> name for bare <#CID> resolution
@@ -235,11 +234,11 @@ type Model struct {
 	// Render cache -- invalidated when messages or width change.
 	// Each entry holds pre-bordered variants so selection movement does not
 	// re-invoke lipgloss per keypress.
-	cache       []viewEntry
-	cacheWidth  int
-	cacheMsgLen int
-	cacheSpacer       string // pre-rendered blank spacer line (1 row, full width, themed background)
-	cacheMoreBelow    string // pre-rendered "-- more below --" line
+	cache          []viewEntry
+	cacheWidth     int
+	cacheMsgLen    int
+	cacheSpacer    string // pre-rendered blank spacer line (1 row, full width, themed background)
+	cacheMoreBelow string // pre-rendered "-- more below --" line
 
 	// Chrome cache: header line(s). Depends on width, channelName, and
 	// channelTopic only -- never on selection or scroll position.
@@ -1456,13 +1455,13 @@ type entryPerfStats struct {
 	count int // number of messages processed
 
 	// renderMessagePlain sub-steps
-	bodyTotal        time.Duration // RenderSlackMarkdown + WordWrap + styles.MessageText.Render
-	reactionsTotal   time.Duration // pill rendering, emoji width, wrap math
-	reactionsCount   int
-	blockKitTotal    time.Duration // blockkit.Render for msg.Blocks
-	blockKitCount    int
-	legacyTotal      time.Duration // blockkit.RenderLegacy for msg.LegacyAttachments
-	legacyCount      int
+	bodyTotal      time.Duration // RenderSlackMarkdown + WordWrap + styles.MessageText.Render
+	reactionsTotal time.Duration // pill rendering, emoji width, wrap math
+	reactionsCount int
+	blockKitTotal  time.Duration // blockkit.Render for msg.Blocks
+	blockKitCount  int
+	legacyTotal    time.Duration // blockkit.RenderLegacy for msg.LegacyAttachments
+	legacyCount    int
 	// Sub-breakdown within legacyTotal. Sums across all
 	// blockkit.RenderLegacy calls in the loop, attributing the cost
 	// across text rendering (renderTextLines for pretext / text /
@@ -1486,8 +1485,8 @@ type entryPerfStats struct {
 	legacyImgRenderImageCount int
 	legacyImgPlaceholderTotal time.Duration
 	legacyImgPlaceholderCount int
-	attachmentsTotal time.Duration // imgRenderer.RenderBlock loop over msg.Attachments
-	attachmentsCount int
+	attachmentsTotal          time.Duration // imgRenderer.RenderBlock loop over msg.Attachments
+	attachmentsCount          int
 
 	// renderMessageEntry sub-steps (post renderMessagePlain)
 	borderWrapTotal time.Duration // borderFill/borderInvis/borderSelect renders + RepaintBgToSelectionTint
@@ -1924,7 +1923,7 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 				// Place returned false). Strip skin tone here only —
 				// the glyph renderer still needs the workaround.
 				legacyName := emojiutil.StripSkinTone(r.Emoji)
-				resolved := kyoemoji.Sprint(":" + legacyName + ":")
+				resolved := emojiutil.Sprint(":" + legacyName + ":")
 				if emojiutil.ShouldRenderUnicode(resolved) {
 					emojiStr = resolved
 				} else {
@@ -2029,7 +2028,7 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 		broadcastLabel = styles.Timestamp.Render("\u21b3 replied to a thread") + "\n"
 		preAttachmentRows++ // the broadcast label occupies its own row
 	}
-	preAttachmentRows++                       // username + ts row
+	preAttachmentRows++                        // username + ts row
 	preAttachmentRows += lipgloss.Height(text) // wrapped body text
 
 	// contentColBase is the display column at which message content
@@ -2237,8 +2236,6 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 	// would show blank cells where placeholder runes were rendered.
 	return msgContent, append(allFlushes, flushes...), allSixel, hits, reactionHits
 }
-
-
 
 // placeAvatarBeside renders the avatar to the left of the message content.
 // The avatar is 4 cols wide, 2 rows tall. Message content flows to the right.

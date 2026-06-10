@@ -53,14 +53,14 @@ func TestCodepointsForShortcode_Builtin(t *testing.T) {
 	}{
 		{"thumbsup", []rune{0x1F44D}},
 		{"heart", []rune{0x2764, 0xFE0F}},
-		{"man_astronaut", []rune{0x1F468, 0x200D, 0x1F680}},
+		{"male-astronaut", []rune{0x1F468, 0x200D, 0x1F680}},
 		{"warning", []rune{0x26A0, 0xFE0F}},
 		{"fire", []rune{0x1F525}},
 	}
 	for _, c := range cases {
 		got, ok := CodepointsForShortcode(c.name)
 		if !ok {
-			t.Errorf("CodepointsForShortcode(%q): ok=false, want a kyokomi hit", c.name)
+			t.Errorf("CodepointsForShortcode(%q): ok=false, want a standard-emoji hit", c.name)
 			continue
 		}
 		if !runesEqual(got, c.want) {

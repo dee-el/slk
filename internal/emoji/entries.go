@@ -3,8 +3,6 @@ package emoji
 import (
 	"sort"
 	"strings"
-
-	kyoemoji "github.com/kyokomi/emoji/v2"
 )
 
 // placeholderGlyph is the single-cell stand-in for image-backed custom
@@ -28,18 +26,19 @@ type EmojiEntry struct {
 	Display string
 }
 
-// BuildEntries assembles the searchable emoji list from the kyokomi
-// built-in codemap plus the workspace's custom emoji map (as returned by
-// Slack's emoji.list, name -> URL-or-"alias:target"). The result is
-// deduped (custom shadows built-in) and sorted alphabetically by name.
+// BuildEntries assembles the searchable emoji list from the bundled
+// standard-emoji codemap (iamcal-derived) plus the workspace's custom
+// emoji map (as returned by Slack's emoji.list, name -> URL-or-
+// "alias:target"). The result is deduped (custom shadows built-in) and
+// sorted alphabetically by name.
 //
 // Pass nil customs for built-ins only.
 func BuildEntries(customs map[string]string) []EmojiEntry {
-	codemap := kyoemoji.CodeMap()
+	codemap := CodeMap()
 	byName := make(map[string]EmojiEntry, len(codemap)+len(customs))
 
-	// Built-ins. CodeMap keys are like ":rocket:" and values include a
-	// trailing space (kyokomi convention); strip both.
+	// Built-ins. CodeMap keys are like ":rocket:"; values are bare
+	// glyphs. TrimSpace is defensive (no trailing space today).
 	for code, glyph := range codemap {
 		name := strings.Trim(code, ":")
 		if name == "" {

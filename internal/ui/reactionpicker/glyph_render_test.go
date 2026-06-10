@@ -93,12 +93,12 @@ func TestPickerFallsBackForZWJSequence(t *testing.T) {
 	m := New()
 	m.SetFrecentEmoji([]EmojiEntry{})
 	m.Open("Cxxx", "1.0", nil)
-	for _, ch := range "rainbow_f" {
+	for _, ch := range "rainbow-f" {
 		m.HandleKey(string(ch))
 	}
 	view := m.View(120)
-	if !strings.Contains(view, ":rainbow_flag:") {
-		t.Errorf("rendered picker does NOT contain literal :rainbow_flag: for ZWJ-sequence emoji")
+	if !strings.Contains(view, ":rainbow-flag:") {
+		t.Errorf("rendered picker does NOT contain literal :rainbow-flag: for ZWJ-sequence emoji")
 	}
 	// And it must NOT contain the actual ZWJ pride flag glyph.
 	if strings.Contains(view, "\U0001F3F3\uFE0F\u200D\U0001F308") {

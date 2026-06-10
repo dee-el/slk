@@ -9,10 +9,10 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/debuglog"
+	emojiutil "github.com/gammons/slk/internal/emoji"
 	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/styles"
-	kyoemoji "github.com/kyokomi/emoji/v2"
 	"github.com/muesli/reflow/truncate"
 )
 
@@ -1421,7 +1421,7 @@ func (m *Model) renderSectionHeaderLabel(name, cursor string, dotStyle lipgloss.
 		// unknown shortcodes it returns the input unchanged (which
 		// keeps the colons, giving a graceful textual fallback).
 		token := ":" + emojiCode + ":"
-		rendered := kyoemoji.Sprint(token)
+		rendered := emojiutil.Sprint(token)
 		if rendered != token {
 			emojiPrefix = rendered + " "
 		} else {

@@ -4,16 +4,17 @@
 //
 // Owns the three Update arms for reaction WS echoes / API results:
 //
-//   ReactionAddedMsg    - server confirmed a reaction was added.
-//                         WS echoes of our own optimistic updates
-//                         are filtered by currentUserID; remote
-//                         users' reactions are merged into the
-//                         message's reaction list.
-//   ReactionRemovedMsg  - server confirmed a reaction was removed
-//                         (same WS-echo dedup as Added).
-//   ReactionSentMsg     - our reaction API call completed. No-op
-//                         today: the optimistic update is already
-//                         on screen and a failed call has no surface.
+//	ReactionAddedMsg    - server confirmed a reaction was added.
+//	                      WS echoes of our own optimistic updates
+//	                      are filtered by currentUserID; remote
+//	                      users' reactions are merged into the
+//	                      message's reaction list.
+//	ReactionRemovedMsg  - server confirmed a reaction was removed
+//	                      (same WS-echo dedup as Added).
+//	ReactionSentMsg     - our reaction API call completed. On failure
+//	                      the optimistic update is rolled back (inverse
+//	                      op) and logged, so a rejected reaction doesn't
+//	                      linger on screen.
 //
 // Free reducer (no dedicated controller) because reactions are a
 // per-message annotation with no cross-message invariant and no
@@ -23,6 +24,8 @@
 package ui
 
 import (
+	"log"
+
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -44,9 +47,14 @@ var reduceReactions reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		return nil, true
 
 	case ReactionSentMsg:
-		_ = m
-		// API call completed. Optimistic update is already on
-		// screen; a failed call has no user surface today.
+		// API call completed. On failure, roll back the optimistic
+		// update (apply the inverse of the attempted op) so the UI
+		// reflects reality instead of showing a reaction the server
+		// never accepted, and log it for diagnosis.
+		if m.Err != nil {
+			log.Printf("Warning: reaction API call failed (emoji=%q remove=%v): %v", m.Emoji, m.Remove, m.Err)
+			a.updateReactionOnMessage(m.ChannelID, m.MessageTS, m.Emoji, m.UserID, !m.Remove)
+		}
 		return nil, true
 	}
 	return nil, false

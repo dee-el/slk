@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	emoji "github.com/kyokomi/emoji/v2"
 	"github.com/muesli/reflow/truncate"
 
 	slkemoji "github.com/gammons/slk/internal/emoji"
@@ -91,7 +90,7 @@ func (m *Model) HandleKey(keyStr string) {
 // the built-in CodeMap and fall back to :name: which is the desired behavior.
 func emojiGlyph(name string) string {
 	code := ":" + name + ":"
-	if u, ok := emoji.CodeMap()[code]; ok {
+	if u, ok := slkemoji.CodeMap()[code]; ok {
 		u = strings.TrimRight(u, " ")
 		if slkemoji.ShouldRenderUnicode(u) {
 			return u

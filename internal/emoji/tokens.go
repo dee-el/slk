@@ -219,11 +219,11 @@ func stripVS16(s string) string {
 	return b.String()
 }
 
-// emojilibCodeMap is a thin indirection so the kyokomi import can be
-// shared with url.go without re-importing the package here.
+// emojilibCodeMap returns the standard-emoji shortcode→glyph table
+// (iamcal-derived). Kept as a thin indirection for the cluster-set
+// initializer above.
 func emojilibCodeMap() map[string]string {
-	ensureKyokomiCodeMap()
-	return kyokomiCodeMap
+	return slackCodeMap
 }
 
 // nextGraphemeCluster returns the first grapheme cluster of s, its

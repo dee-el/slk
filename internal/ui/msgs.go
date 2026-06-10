@@ -145,7 +145,15 @@ type (
 		Emoji     string
 	}
 	ReactionSentMsg struct {
-		Err error
+		// Identifies the optimistic update to roll back if the API
+		// call failed. Remove is the operation that was attempted, so
+		// the rollback applies its inverse.
+		ChannelID string
+		MessageTS string
+		Emoji     string
+		UserID    string
+		Remove    bool
+		Err       error
 	}
 	ChannelMarkedReadMsg struct {
 		ChannelID string
@@ -190,8 +198,8 @@ type (
 		Theme        string // resolved theme name (per-workspace or global default)
 		SidebarWidth int    // resolved sidebar width (per-workspace or global default)
 		Channels     []sidebar.ChannelItem
-		FinderItems []channelfinder.Item
-		UserNames   map[string]string
+		FinderItems  []channelfinder.Item
+		UserNames    map[string]string
 		// ExternalUsers maps userID -> true for users this workspace
 		// considers Slack Connect / shared-channel guests. Hydrated from
 		// cache.User.IsExternal so the mention picker can flag externals
@@ -254,8 +262,8 @@ type (
 		Theme        string // resolved theme name (per-workspace or global default)
 		SidebarWidth int    // resolved sidebar width (per-workspace or global default)
 		Channels     []sidebar.ChannelItem
-		FinderItems []channelfinder.Item
-		UserNames   map[string]string
+		FinderItems  []channelfinder.Item
+		UserNames    map[string]string
 		// ExternalUsers maps userID -> true for users this workspace
 		// considers Slack Connect / shared-channel guests. Hydrated from
 		// cache.User.IsExternal so the mention picker can flag externals
@@ -304,7 +312,7 @@ type (
 		UserID      string
 		WorkspaceID string
 	}
-	TypingExpiredMsg struct{}
+	TypingExpiredMsg  struct{}
 	PresenceChangeMsg struct {
 		UserID   string
 		Presence string

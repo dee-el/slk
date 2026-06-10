@@ -20,7 +20,6 @@ import (
 	"github.com/gammons/slk/internal/ui/scrollbar"
 	"github.com/gammons/slk/internal/ui/selection"
 	"github.com/gammons/slk/internal/ui/styles"
-	kyoemoji "github.com/kyokomi/emoji/v2"
 )
 
 var thickLeftBorder = lipgloss.Border{Left: "▌"}
@@ -1844,7 +1843,7 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 				// Place returned false). Strip skin tone here only —
 				// the glyph renderer still needs the workaround.
 				legacyName := emojiutil.StripSkinTone(r.Emoji)
-				resolved := kyoemoji.Sprint(":" + legacyName + ":")
+				resolved := emojiutil.Sprint(":" + legacyName + ":")
 				if emojiutil.ShouldRenderUnicode(resolved) {
 					emojiStr = resolved
 				} else {

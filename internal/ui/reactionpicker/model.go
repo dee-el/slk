@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	emoji "github.com/kyokomi/emoji/v2"
 	"github.com/muesli/reflow/truncate"
 
 	slkemoji "github.com/gammons/slk/internal/emoji"
@@ -87,7 +86,7 @@ func New() *Model {
 }
 
 func (m *Model) buildEmojiList() {
-	codeMap := emoji.CodeMap()
+	codeMap := slkemoji.CodeMap()
 	seen := make(map[string]bool)
 	m.allEmoji = make([]EmojiEntry, 0, len(codeMap))
 
@@ -287,9 +286,16 @@ func (m *Model) HandleKey(keyStr string) *ReactionResult {
 			return nil
 		}
 		selected := list[m.selected]
+		// Canonicalize to the primary short_name Slack records: the picker
+		// offers iamcal aliases (e.g. both "+1" and "thumbsup" for 👍), and
+		// existing reactions are stored under the canonical name, so
+		// canonicalizing here keeps the wire name and add/remove detection
+		// consistent. Workspace custom emoji shadow standard names and pass
+		// through unchanged.
+		name := slkemoji.CanonicalSlackName(selected.Name, m.emojiCtx.Customs)
 		return &ReactionResult{
-			Emoji:  selected.Name,
-			Remove: m.isExistingReaction(selected.Name),
+			Emoji:  name,
+			Remove: m.isExistingReaction(name),
 		}
 
 	case "up":

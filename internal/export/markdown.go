@@ -11,7 +11,6 @@ import (
 
 	emojiutil "github.com/gammons/slk/internal/emoji"
 	"github.com/gammons/slk/internal/ui/messages"
-	emoji "github.com/kyokomi/emoji/v2"
 )
 
 // ThreadToMarkdown converts a parent message and its replies into a
@@ -55,7 +54,7 @@ func formatMessage(msg messages.MessageItem, userNames, channelNames map[string]
 	if len(msg.Reactions) > 0 {
 		parts := make([]string, 0, len(msg.Reactions))
 		for _, r := range msg.Reactions {
-			e := emoji.Sprint(":" + emojiutil.StripSkinTone(r.Emoji) + ":")
+			e := emojiutil.Sprint(":" + emojiutil.StripSkinTone(r.Emoji) + ":")
 			parts = append(parts, fmt.Sprintf("%s %d", strings.TrimSpace(e), r.Count))
 		}
 		b.WriteString(strings.Join(parts, "  "))

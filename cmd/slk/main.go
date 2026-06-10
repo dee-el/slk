@@ -44,7 +44,6 @@ import (
 	"github.com/gammons/slk/internal/ui/workspace"
 	versionpkg "github.com/gammons/slk/internal/version"
 	"github.com/gammons/slk/internal/wake"
-	emoji "github.com/kyokomi/emoji/v2"
 	"github.com/slack-go/slack"
 	"golang.design/x/clipboard"
 	"golang.org/x/term"
@@ -95,10 +94,10 @@ func (a sectionsProviderAdapter) OrderedSlackSections() []sidebar.SectionMeta {
 
 // WorkspaceContext holds all state for a single connected workspace.
 type WorkspaceContext struct {
-	Client      *slackclient.Client
-	ConnMgr     *slackclient.ConnectionManager
-	RTMHandler  *rtmEventHandler
-	UserNames   map[string]string
+	Client     *slackclient.Client
+	ConnMgr    *slackclient.ConnectionManager
+	RTMHandler *rtmEventHandler
+	UserNames  map[string]string
 	// AvatarURLs maps userID -> avatar image URL. Populated from the
 	// local users cache at connect time (synchronous, before any
 	// goroutines spin up) and refreshed from the background
@@ -122,7 +121,7 @@ type WorkspaceContext struct {
 	// background users.list fetch and any on-demand resolveUser calls.
 	// Used during channel construction to bucket app DMs into a separate
 	// "Apps" sidebar section.
-	BotUserIDs        map[string]bool
+	BotUserIDs map[string]bool
 	// SectionStore holds the user's Slack-native sidebar sections for
 	// this workspace. Nil when use_slack_sections is disabled, the
 	// REST bootstrap failed, or this workspace hasn't connected yet.
@@ -151,7 +150,7 @@ type WorkspaceContext struct {
 	// after a failed one. The UI uses it to decide whether to draw
 	// the "Threads list unavailable" banner.
 	SubscriptionsAvailable bool
-	Channels    []sidebar.ChannelItem
+	Channels               []sidebar.ChannelItem
 	// FinderItems is the merged list shown in the Ctrl+T finder. Initially
 	// contains only joined channels; the BrowseableChannelsLoadedMsg pipeline
 	// extends it with non-joined public channels in the background.
@@ -1351,7 +1350,7 @@ func run() error {
 				if err != nil {
 					return nil
 				}
-				codeMap := emoji.CodeMap()
+				codeMap := emojiwidth.CodeMap()
 				var entries []reactionpicker.EmojiEntry
 				for _, name := range names {
 					unicode := codeMap[":"+name+":"]
@@ -1600,19 +1599,19 @@ func run() error {
 			// Resolve unknown DM user names in background
 			if len(wctx.UnresolvedDMs) > 0 {
 				go func() {
-				for _, dm := range wctx.UnresolvedDMs {
-					resolved, isBot := resolveUser(wctx.Client, dm.UserID, wctx.UserNames, db, avatarCache)
-					if isBot {
-						wctx.BotUserIDs[dm.UserID] = true
+					for _, dm := range wctx.UnresolvedDMs {
+						resolved, isBot := resolveUser(wctx.Client, dm.UserID, wctx.UserNames, db, avatarCache)
+						if isBot {
+							wctx.BotUserIDs[dm.UserID] = true
+						}
+						if resolved != dm.UserID {
+							p.Send(ui.DMNameResolvedMsg{
+								ChannelID:   dm.ChannelID,
+								DisplayName: resolved,
+								IsBot:       isBot,
+							})
+						}
 					}
-					if resolved != dm.UserID {
-						p.Send(ui.DMNameResolvedMsg{
-							ChannelID:   dm.ChannelID,
-							DisplayName: resolved,
-							IsBot:       isBot,
-						})
-					}
-				}
 				}()
 			}
 		}(ot.Token)
@@ -2304,12 +2303,12 @@ func markChannelReadAsync(
 // Allocated only when debuglog.Enabled(); enrichCachedRow checks for
 // nil and skips the time.Now() / time.Since() calls otherwise.
 type enrichPerfStats struct {
-	getUserCalls    int
-	getUserTotal    time.Duration
-	getReactCalls   int
-	getReactTotal   time.Duration
-	unmarshalCalls  int
-	unmarshalTotal  time.Duration
+	getUserCalls   int
+	getUserTotal   time.Duration
+	getReactCalls  int
+	getReactTotal  time.Duration
+	unmarshalCalls int
+	unmarshalTotal time.Duration
 }
 
 func loadCachedMessages(

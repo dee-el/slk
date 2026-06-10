@@ -791,15 +791,16 @@ func (a *App) toggleReactionOnSelectedMessage(emojiName string) tea.Cmd {
 	a.updateReactionOnMessage(a.activeChannelID, msg.TS, emojiName, a.currentUserID, remove)
 	channelID := ids.ChannelID(a.activeChannelID)
 	ts := ids.MessageTS(msg.TS)
+	sent := ReactionSentMsg{ChannelID: a.activeChannelID, MessageTS: msg.TS, Emoji: emojiName, UserID: a.currentUserID, Remove: remove}
 	if remove {
 		return func() tea.Msg {
-			err := a.reactions.Remove(channelID, ts, emojiName)
-			return ReactionSentMsg{Err: err}
+			sent.Err = a.reactions.Remove(channelID, ts, emojiName)
+			return sent
 		}
 	}
 	return func() tea.Msg {
-		err := a.reactions.Add(channelID, ts, emojiName)
-		return ReactionSentMsg{Err: err}
+		sent.Err = a.reactions.Add(channelID, ts, emojiName)
+		return sent
 	}
 }
 
@@ -819,15 +820,16 @@ func (a *App) toggleReactionOnSelectedThread(emojiName string) tea.Cmd {
 	a.updateReactionOnMessage(threadChannelID, reply.TS, emojiName, a.currentUserID, remove)
 	channelID := ids.ChannelID(threadChannelID)
 	ts := ids.MessageTS(reply.TS)
+	sent := ReactionSentMsg{ChannelID: threadChannelID, MessageTS: reply.TS, Emoji: emojiName, UserID: a.currentUserID, Remove: remove}
 	if remove {
 		return func() tea.Msg {
-			err := a.reactions.Remove(channelID, ts, emojiName)
-			return ReactionSentMsg{Err: err}
+			sent.Err = a.reactions.Remove(channelID, ts, emojiName)
+			return sent
 		}
 	}
 	return func() tea.Msg {
-		err := a.reactions.Add(channelID, ts, emojiName)
-		return ReactionSentMsg{Err: err}
+		sent.Err = a.reactions.Add(channelID, ts, emojiName)
+		return sent
 	}
 }
 
@@ -848,15 +850,16 @@ func (a *App) toggleReactionOnMessageItem(channelIDStr string, msg messages.Mess
 	a.updateReactionOnMessage(channelIDStr, msg.TS, emojiName, a.currentUserID, remove)
 	channelID := ids.ChannelID(channelIDStr)
 	ts := ids.MessageTS(msg.TS)
+	sent := ReactionSentMsg{ChannelID: channelIDStr, MessageTS: msg.TS, Emoji: emojiName, UserID: a.currentUserID, Remove: remove}
 	if remove {
 		return func() tea.Msg {
-			err := a.reactions.Remove(channelID, ts, emojiName)
-			return ReactionSentMsg{Err: err}
+			sent.Err = a.reactions.Remove(channelID, ts, emojiName)
+			return sent
 		}
 	}
 	return func() tea.Msg {
-		err := a.reactions.Add(channelID, ts, emojiName)
-		return ReactionSentMsg{Err: err}
+		sent.Err = a.reactions.Add(channelID, ts, emojiName)
+		return sent
 	}
 }
 

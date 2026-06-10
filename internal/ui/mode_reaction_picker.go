@@ -71,14 +71,21 @@ func handleReactionPickerMode(a *App, msg tea.KeyMsg) tea.Cmd {
 	// Fire API call.
 	channelID := ids.ChannelID(channelIDStr)
 	messageTS := ids.MessageTS(messageTSStr)
+	sent := ReactionSentMsg{
+		ChannelID: channelIDStr,
+		MessageTS: messageTSStr,
+		Emoji:     emojiName,
+		UserID:    a.currentUserID,
+		Remove:    result.Remove,
+	}
 	if result.Remove {
 		return func() tea.Msg {
-			err := a.reactions.Remove(channelID, messageTS, emojiName)
-			return ReactionSentMsg{Err: err}
+			sent.Err = a.reactions.Remove(channelID, messageTS, emojiName)
+			return sent
 		}
 	}
 	return func() tea.Msg {
-		err := a.reactions.Add(channelID, messageTS, emojiName)
-		return ReactionSentMsg{Err: err}
+		sent.Err = a.reactions.Add(channelID, messageTS, emojiName)
+		return sent
 	}
 }

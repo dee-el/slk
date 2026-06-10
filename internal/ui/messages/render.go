@@ -12,7 +12,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	emojiutil "github.com/gammons/slk/internal/emoji"
 	"github.com/gammons/slk/internal/ui/styles"
-	emoji "github.com/kyokomi/emoji/v2"
 	"github.com/rivo/uniseg"
 )
 
@@ -958,7 +957,7 @@ var commonMarkShortcodeRe = regexp.MustCompile(`:[A-Za-z0-9_+\-]+:`)
 
 func resolveShortcodesCommonMark(s string) string {
 	return commonMarkShortcodeRe.ReplaceAllStringFunc(s, func(match string) string {
-		resolved := emoji.Sprint(match)
+		resolved := emojiutil.Sprint(match)
 		if resolved == match {
 			return match
 		}
