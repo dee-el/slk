@@ -284,6 +284,12 @@ type (
 		// via sync.Once + atomic router (Task 14). App's handler treats
 		// InitialActive=false as "workspace is up; threads-list kick only".
 		InitialActive bool
+		// LastChannelID is the workspace's most-recently-visited channel
+		// (from the persisted channel_visits table). On the InitialActive
+		// workspace the App opens this channel on startup instead of the
+		// sidebar's first entry, so a restart lands the user back where
+		// they were. Empty (e.g. first ever run) falls back to Channels[0].
+		LastChannelID string
 	}
 	// CustomEmojisLoadedMsg is sent when a workspace's custom emoji list
 	// finishes loading in the background, after WorkspaceReadyMsg has

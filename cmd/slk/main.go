@@ -1573,6 +1573,7 @@ func run() error {
 				CustomEmoji:      wctx.CustomEmoji, // empty at this point; filled by the goroutine below
 				SectionsProvider: sectionsProviderAdapter{store: wctx.SectionStore},
 				InitialActive:    isInitial,
+				LastChannelID:    mostRecentlyVisitedChannel(wctx.LastVisitedByChannel),
 			})
 
 			// Fetch workspace custom emojis in the background. When done,
@@ -2833,6 +2834,21 @@ func bootstrapPresenceAndDND(ctx context.Context, wctx *WorkspaceContext, progra
 			DNDEndTS:   wctx.DNDEndTS,
 		})
 	}
+}
+
+// mostRecentlyVisitedChannel returns the channel ID with the latest
+// last-visited timestamp, or "" when there are no recorded visits (e.g.
+// the first run). Drives last-channel restoration on startup.
+func mostRecentlyVisitedChannel(visits map[string]int64) string {
+	var bestID string
+	var bestTS int64
+	for id, ts := range visits {
+		if ts > bestTS {
+			bestTS = ts
+			bestID = id
+		}
+	}
+	return bestID
 }
 
 // rtmEventHandler bridges WebSocket events into bubbletea messages via p.Send()
