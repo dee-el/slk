@@ -66,6 +66,49 @@ func TestRegion_UnfocusedPaneCacheInvalidatesOnContent(t *testing.T) {
 	}
 }
 
+// TestRegion_UnfocusedPaneDoesNotRewrapModelLines is the root-cause
+// regression for the unfocused-pane garbling: lipgloss v2's
+// Style.Width is border-inclusive, so the old
+// UnfocusedBorder.Width(W-2).Render(view) gave the model's exactly
+// (W-2)-cell lines a (W-4)-cell budget. Any line with real content in
+// its last 2 cells wrapped, injecting a remainder row after it —
+// and the scrollbar (rendered whenever messages overflow the pane)
+// puts a glyph in the LAST cell of every line, so in practice every
+// line of a scrolled-back pane garbled; exactSize's MaxHeight then
+// clamped the doubled row count, eating the bottom border. Lines
+// whose final 2 cells were blank padding were "only" silently
+// truncated by 2 cells (trailing whitespace overflow is dropped, not
+// wrapped) — which is why a sparse pane looked fine and dimension
+// tests stayed green.
+//
+// The contract: every line the model emits at the pane's inner dims
+// must appear INTACT on a single output row between the side border
+// verticals, and the bottom border edge must survive.
+func TestRegion_UnfocusedPaneDoesNotRewrapModelLines(t *testing.T) {
+	a, w1, _ := twoWindowApp(t)
+	// Enough messages to overflow the pane: the scrollbar then puts
+	// real content in every line's last cell (the wrap trigger).
+	_, _ = a.Update(MessagesLoadedMsg{ChannelID: "C1", Messages: testMessageItems(60)})
+	out := ansi.Strip(renderRegion(a))
+
+	// Reference: the model's own render at the SAME inner dims the
+	// renderer uses — derive w1's rect exactly as renderWindowsRegion
+	// does (focused window is w2/C2 "ops": empty, no interference).
+	frame := a.layout.Compute(a.width, a.height, a.workspaceRail.Width(), a.sidebar.Width(), a.sidebarVisible, a.threadVisible)
+	bounds := wintree.Rect{X: 0, Y: 0, W: frame.MsgWidth + frame.MsgBorder, H: frame.ContentHeight}
+	r := a.wins.ComputeRects(bounds)[w1]
+	bare := ansi.Strip(a.winModels[w1].ViewBare(r.H-2, r.W-2))
+	for i, line := range strings.Split(bare, "\n") {
+		if !strings.Contains(out, "│"+line+"│") {
+			t.Fatalf("model line %d not intact in unfocused pane (re-wrapped or truncated):\nwant bracketed |%s|", i, line)
+		}
+	}
+	bottom := "╰" + strings.Repeat("─", r.W-2) + "╯"
+	if !strings.Contains(out, bottom) {
+		t.Fatal("unfocused pane bottom border missing (row overflow clamped it away)")
+	}
+}
+
 func TestRegion_SplitOutputDimensionsStable(t *testing.T) {
 	a := newWideTestApp(t)
 	_, _ = a.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
@@ -77,6 +120,16 @@ func TestRegion_SplitOutputDimensionsStable(t *testing.T) {
 	}
 	if lipgloss.Width(before) != lipgloss.Width(after) {
 		t.Fatalf("width changed after split: %d -> %d", lipgloss.Width(before), lipgloss.Width(after))
+	}
+	// EVERY row must be exactly the region width (lipgloss.Width only
+	// reports the max). A row-count-preserving clamp that eats a
+	// pane's bottom border, or a pane row short of its rect width,
+	// slips past the aggregate checks above but not this.
+	wantW := lipgloss.Width(before)
+	for i, line := range strings.Split(after, "\n") {
+		if w := ansi.StringWidth(line); w != wantW {
+			t.Fatalf("split row %d width = %d, want %d", i, w, wantW)
+		}
 	}
 }
 

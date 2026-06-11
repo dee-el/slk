@@ -105,13 +105,20 @@ func (a *App) renderUnfocusedWindow(n wintree.LayoutNode, themeVer int64) string
 	if c.hit(m.Version(), n.Rect.W, n.Rect.H, key) {
 		return c.output
 	}
+	// borderedPane (NOT a lipgloss border render): lipgloss v2's
+	// Style.Width is border-inclusive, so the old
+	// UnfocusedBorder.Width(W-2).Render(view) gave the model's
+	// exactly (W-2)-cell lines a (W-4)-cell budget — every line with
+	// content in its last 2 cells (e.g. ALL of them when the
+	// scrollbar shows) re-wrapped, garbling the pane. borderedPane
+	// assembles the border by concatenation around the model's
+	// width-padded lines and emits exactly Rect.W x Rect.H cells, so
+	// no exactSize pass is needed either.
+	innerW := n.Rect.W - 2
 	contentH := n.Rect.H - 2
-	view := m.ViewBare(contentH, n.Rect.W-2)
+	view := m.ViewBare(contentH, innerW)
 	view = messages.ReapplyBgAfterResets(view, messages.BgANSI())
-	out := exactSize(
-		styles.UnfocusedBorder.Width(n.Rect.W-2).Render(view),
-		n.Rect.W, n.Rect.H,
-	)
+	out := borderedPane(view, innerW, n.Rect.W, n.Rect.H, false, styles.Background)
 	c.store(out, m.Version(), n.Rect.W, n.Rect.H, key)
 	return out
 }

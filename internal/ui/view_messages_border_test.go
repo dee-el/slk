@@ -38,6 +38,58 @@ func topBorderStyleForTest(msgWidth int, focused bool) lipgloss.Style {
 		BorderTop(true).BorderLeft(true).BorderRight(true).BorderBottom(false)
 }
 
+// TestBorderedPane_MatchesLipgloss is the correctness gate for the
+// fully-enclosed zero-measurement border assembly used by unfocused
+// window panes. For exact-innerWidth content it asserts borderedPane
+// is visually identical to the corrected lipgloss form
+// bs.Width(innerWidth+2).Render(content) (Style.Width is
+// BORDER-INCLUSIVE in lipgloss v2 — innerWidth+2 is the only width
+// that does not re-wrap innerWidth-cell lines) plus padPaneToSize for
+// the gutter: same row count, every row exactly fullWidth cells,
+// identical plain text. Full-to-the-last-cell lines are included
+// deliberately: they are the re-wrap trigger the old
+// Width(innerWidth) bug garbled.
+func TestBorderedPane_MatchesLipgloss(t *testing.T) {
+	pad := func(s string, w int) string {
+		return s + strings.Repeat(" ", w-ansi.StringWidth(s))
+	}
+	const innerW = 38
+	lines := []string{
+		pad(" # general", innerW),
+		strings.Repeat("x", innerW),            // content in every cell
+		pad("▌alice  1:00 PM", innerW-1) + "█", // scrollbar glyph in last cell
+		pad("", innerW),
+	}
+	content := strings.Join(lines, "\n")
+	rows := len(lines) + 2 // top + bottom edges
+
+	for _, focused := range []bool{true, false} {
+		for _, gutterCols := range []int{0, 3} {
+			fullWidth := innerW + 2 + gutterCols
+			bs := styles.UnfocusedBorder
+			if focused {
+				bs = styles.FocusedBorder
+			}
+			want := padPaneToSize(bs.Width(innerW+2).Render(content), innerW+2, fullWidth, rows, styles.Background)
+			got := borderedPane(content, innerW, fullWidth, rows, focused, styles.Background)
+
+			wl := strings.Split(want, "\n")
+			gl := strings.Split(got, "\n")
+			if len(wl) != rows || len(gl) != rows {
+				t.Fatalf("[focused=%v gutter=%d] rows: want=%d got=%d (rows=%d)", focused, gutterCols, len(wl), len(gl), rows)
+			}
+			for i := range wl {
+				if gw := ansi.StringWidth(gl[i]); gw != fullWidth {
+					t.Fatalf("[focused=%v gutter=%d] row %d width=%d want=%d\n got=%q", focused, gutterCols, i, gw, fullWidth, gl[i])
+				}
+				if ansi.Strip(wl[i]) != ansi.Strip(gl[i]) {
+					t.Fatalf("[focused=%v gutter=%d] row %d plaintext differs:\n want=%q\n got =%q", focused, gutterCols, i, ansi.Strip(wl[i]), ansi.Strip(gl[i]))
+				}
+			}
+		}
+	}
+}
+
 // TestBorderedTopPane_MatchesLipgloss is the correctness gate for the
 // zero-measurement border assembly. For many (focus, scroll-position,
 // content) states it asserts borderedTopPane produces output that is
