@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1109,7 +1110,7 @@ func run() error {
 					Err:       err,
 				}
 			},
-			SearchWorkspace: searchWorkspaceFunc(router, tsFormat),
+			SearchWorkspace: searchWorkspaceFunc(router, db, tsFormat),
 		}))
 
 		app.SetMessageService(ui.NewMessageService(ui.MessageServiceFuncs{
@@ -2824,7 +2825,7 @@ func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, 
 // workspace. Always returns a WorkspaceSearchResultsMsg — a nil msg
 // would leave the ctrl+f modal spinner stuck (the reducer only exits
 // the loading state on a results msg).
-func searchWorkspaceFunc(router *workspaceRouter, tsFormat string) func(query string) tea.Msg {
+func searchWorkspaceFunc(router *workspaceRouter, db *cache.DB, tsFormat string) func(query string) tea.Msg {
 	return func(query string) tea.Msg {
 		wctx := router.Active()
 		if wctx == nil {
@@ -2836,29 +2837,70 @@ func searchWorkspaceFunc(router *workspaceRouter, tsFormat string) func(query st
 		if err != nil {
 			return ui.WorkspaceSearchResultsMsg{Query: query, Err: err}
 		}
-		items := make([]searchresults.Item, 0, len(res.Matches))
-		for _, match := range res.Matches {
-			// ThreadTS comes from the hit's permalink. Known v1
-			// limitation: a thread-reply hit with an unparseable
-			// permalink degrades to plain-message nav, which may
-			// toast "Message not found in loaded history" (replies
-			// aren't in channel history).
-			threadTS := ""
-			if pl, ok := slackurl.Parse(match.Permalink); ok {
-				threadTS = string(pl.ThreadTS)
-			}
-			items = append(items, searchresults.Item{
-				ChannelID:   match.Channel.ID,
-				ChannelName: match.Channel.Name,
-				UserName:    match.Username,
-				TS:          match.Timestamp,
-				ThreadTS:    threadTS,
-				Text:        match.Text,
-				Timestamp:   formatTimestamp(match.Timestamp, tsFormat),
-			})
+		resolveUser := func(id string) (string, bool) {
+			return resolveUserCached(id, wctx.UserNames, db)
 		}
+		resolveChannel := func(id string) (string, bool) {
+			if db == nil {
+				return "", false
+			}
+			if ch, err := db.GetChannel(id); err == nil && ch.Name != "" {
+				return ch.Name, true
+			}
+			return "", false
+		}
+		items := searchResultItems(res.Matches, tsFormat, resolveUser, resolveChannel)
 		return ui.WorkspaceSearchResultsMsg{Query: query, Items: items, Total: res.Total}
 	}
+}
+
+// userIDShapeRe matches a string shaped like a Slack user ID. DM hits
+// from search.messages carry the counterpart's raw user ID as the
+// channel "name"; this is the detection heuristic for that case.
+var userIDShapeRe = regexp.MustCompile(`^[UW][A-Z0-9]{5,}$`)
+
+// searchResultItems converts search.messages matches into the modal's
+// row items: snippets have mrkdwn entities flattened to plain text, DM
+// channel names (raw user IDs on the wire) are resolved to the
+// counterpart's display name, and thread TSes are recovered from
+// permalinks. Pure: all lookups go through the supplied resolvers.
+func searchResultItems(matches []slack.SearchMessage, tsFormat string, resolveUser, resolveChannel func(id string) (string, bool)) []searchresults.Item {
+	items := make([]searchresults.Item, 0, len(matches))
+	for _, match := range matches {
+		// ThreadTS comes from the hit's permalink. Known v1
+		// limitation: a thread-reply hit with an unparseable
+		// permalink degrades to plain-message nav, which may
+		// toast "Message not found in loaded history" (replies
+		// aren't in channel history).
+		threadTS := ""
+		if pl, ok := slackurl.Parse(match.Permalink); ok {
+			threadTS = string(pl.ThreadTS)
+		}
+
+		// DM detection: an IM channel ID (D...) is authoritative; a
+		// user-ID-shaped channel name counts only when it actually
+		// resolves as a user (slack-go's CtxChannel has no IsIM flag).
+		channelName := match.Channel.Name
+		isDM := strings.HasPrefix(match.Channel.ID, "D")
+		if userIDShapeRe.MatchString(channelName) {
+			if name, ok := resolveUser(channelName); ok && name != "" {
+				channelName = name
+				isDM = true
+			}
+		}
+
+		items = append(items, searchresults.Item{
+			ChannelID:   match.Channel.ID,
+			ChannelName: channelName,
+			UserName:    match.Username,
+			TS:          match.Timestamp,
+			ThreadTS:    threadTS,
+			Text:        messages.FlattenMrkdwn(match.Text, resolveUser, resolveChannel),
+			Timestamp:   formatTimestamp(match.Timestamp, tsFormat),
+			IsDM:        isDM,
+		})
+	}
+	return items
 }
 
 func formatTimestamp(ts, format string) string {

@@ -27,6 +27,7 @@ type Item struct {
 	ThreadTS    string // non-empty: hit is a thread reply
 	Text        string
 	Timestamp   string // pre-formatted for display
+	IsDM        bool   // render the channel as "@name" instead of "#name"
 }
 
 // Action tells the mode handler what a keypress did.
@@ -172,22 +173,30 @@ func (m *Model) HandleKey(keyStr string) Action {
 // Shared by renderBox (implicitly) and ClickRow's hit-testing.
 const listTopOffset = 5
 
-// maxVisibleRows is the height of the scroll window for the results list.
-const maxVisibleRows = 10
+// maxVisibleRows is the height of the scroll window for the results
+// list, in result rows. Each row renders as rowLines screen lines.
+const maxVisibleRows = 8
+
+// rowLines is how many screen lines each result row occupies: a header
+// line (#channel  author  time  snippet...) plus a snippet continuation.
+const rowLines = 2
 
 // ClickRow maps a box-local row (localY, 0 = box top border) to a result
-// row. When the click lands on a visible list row it moves the selection
-// there and returns true; otherwise it returns false. termWidth/termHeight
-// are accepted for interface symmetry and currently unused.
+// row. Result rows are rowLines tall; a click on any line of a row
+// selects it. When the click lands on a visible list row it moves the
+// selection there and returns true; otherwise it returns false.
+// termWidth/termHeight are accepted for interface symmetry and
+// currently unused.
 func (m *Model) ClickRow(termWidth, termHeight, localY int) bool {
 	if m.st != stateResults {
 		// Body rows in the input/loading/error states aren't results.
 		return false
 	}
-	row := localY - listTopOffset
-	if row < 0 {
+	line := localY - listTopOffset
+	if line < 0 {
 		return false
 	}
+	row := line / rowLines
 	start, end := m.visibleWindow()
 	if row >= end-start {
 		return false
@@ -379,12 +388,30 @@ func (m Model) bodyLines(innerWidth int) []string {
 	}
 }
 
-// resultRows renders the visible window of result rows ("#channel
-// author  timestamp  snippet", selected row highlighted) plus the
+// splitAtWidth splits plain (ANSI-free) text at the widest cell
+// boundary that fits within w columns: head is at most w cells wide,
+// tail is the untouched remainder. Wide runes are never split.
+func splitAtWidth(s string, w int) (head, tail string) {
+	if w <= 0 {
+		return "", s
+	}
+	if lipgloss.Width(s) <= w {
+		return s, ""
+	}
+	// For ANSI-free input truncate.String returns a byte prefix of s,
+	// so slicing off len(head) bytes yields the exact remainder.
+	head = truncate.String(s, uint(w))
+	return head, s[len(head):]
+}
+
+// resultRows renders the visible window of result rows plus the
 // "showing K of N" footer when the server reported more matches than
-// were fetched. When the fetched list overflows the visible window a
-// proportional scrollbar gutter is drawn on the right (same pattern as
-// channelfinder/workspacefinder/themeswitcher).
+// were fetched. Each result is rowLines (2) screen lines: a header line
+// ("#channel  author  timestamp  snippet...") and a snippet
+// continuation line, truncated with "…" when more remains. When the
+// fetched list overflows the visible window a proportional scrollbar
+// gutter is drawn on the right (same pattern as channelfinder/
+// workspacefinder/themeswitcher), spanning both lines of each row.
 func (m Model) resultRows(innerWidth int) []string {
 	bg := styles.Background
 
@@ -436,38 +463,62 @@ func (m Model) resultRows(innerWidth int) []string {
 			textStyle = textStyle.Foreground(styles.Primary).Bold(true)
 		}
 
+		sigil := "#"
+		if item.IsDM {
+			sigil = "@"
+		}
 		snippet := flattenText(item.Text)
-		line := chanStyle.Render("#"+item.ChannelName) + "  " +
+
+		// Line 1: header + as much snippet as fits. The plain header
+		// width (snippet is plain too — flattenText emits no ANSI)
+		// decides the split point.
+		headerPlain := sigil + item.ChannelName + "  " + item.UserName + "  " + item.Timestamp + "  "
+		part1, rest := splitAtWidth(snippet, contentWidth-lipgloss.Width(headerPlain))
+		line1 := chanStyle.Render(sigil+item.ChannelName) + "  " +
 			nameStyle.Render(item.UserName) + "  " +
 			chanStyle.Render(item.Timestamp) + "  " +
-			textStyle.Render(snippet)
-
-		// Truncate to fit (truncate.StringWithTail is ANSI-aware).
-		if lipgloss.Width(line) > contentWidth {
-			line = truncate.StringWithTail(line, uint(contentWidth), "…")
-		}
-		// Right-pad with spaces to fill the row.
-		if pad := contentWidth - lipgloss.Width(line); pad > 0 {
-			line += strings.Repeat(" ", pad)
+			textStyle.Render(part1)
+		// Defensive: an overlong header (part1 already "") still must
+		// not wrap the box. truncate.StringWithTail is ANSI-aware.
+		if lipgloss.Width(line1) > contentWidth {
+			line1 = truncate.StringWithTail(line1, uint(contentWidth), "…")
 		}
 
-		var row string
-		if isSelected {
-			indicator := lipgloss.NewStyle().Background(bg).Foreground(styles.Accent).Render("▌")
-			row = indicator + line
-		} else {
-			row = " " + line
-		}
-
-		if showScrollbar {
-			rel := i - startIdx
-			if rel >= thumbStart && rel < thumbEnd {
-				row += thumbStyle.Render("█")
-			} else {
-				row += trackStyle.Render("│")
+		// Line 2: snippet continuation, truncated with "…" if more
+		// remains; blank when the snippet fit on line 1.
+		line2 := ""
+		if rest = strings.TrimLeft(rest, " "); rest != "" {
+			if lipgloss.Width(rest) > contentWidth {
+				rest = truncate.StringWithTail(rest, uint(contentWidth), "…")
 			}
+			line2 = textStyle.Render(rest)
 		}
-		rows = append(rows, row)
+
+		for _, line := range []string{line1, line2} {
+			// Right-pad with spaces to fill the row.
+			if pad := contentWidth - lipgloss.Width(line); pad > 0 {
+				line += strings.Repeat(" ", pad)
+			}
+			var row string
+			if isSelected {
+				// Selected indicator spans both lines of the row.
+				indicator := lipgloss.NewStyle().Background(bg).Foreground(styles.Accent).Render("▌")
+				row = indicator + line
+			} else {
+				row = " " + line
+			}
+			if showScrollbar {
+				// Thumb math is row-based; both lines of a row share
+				// its gutter rune, so the gutter stays proportional.
+				rel := i - startIdx
+				if rel >= thumbStart && rel < thumbEnd {
+					row += thumbStyle.Render("█")
+				} else {
+					row += trackStyle.Render("│")
+				}
+			}
+			rows = append(rows, row)
+		}
 	}
 
 	if m.total > len(m.items) {

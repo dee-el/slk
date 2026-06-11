@@ -14,7 +14,7 @@ import (
 // is active: a nil msg would leave the ctrl+f modal spinner stuck
 // (the reducer only clears loading on a WorkspaceSearchResultsMsg).
 func TestSearchWorkspaceNoActiveWorkspaceReturnsErr(t *testing.T) {
-	fn := searchWorkspaceFunc(newWorkspaceRouter(), "15:04")
+	fn := searchWorkspaceFunc(newWorkspaceRouter(), nil, "15:04")
 	msg := fn("deploy")
 	res, ok := msg.(ui.WorkspaceSearchResultsMsg)
 	if !ok {

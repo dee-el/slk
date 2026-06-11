@@ -233,7 +233,8 @@ func TestScrollbarAppearsOnOverflow(t *testing.T) {
 	m.SetResults(manyItems(50), 50)
 
 	lines := strings.Split(ansi.Strip(m.View(80)), "\n")
-	rows := lines[listTopOffset : listTopOffset+maxVisibleRows]
+	// The gutter spans both lines of every visible row.
+	rows := lines[listTopOffset : listTopOffset+2*maxVisibleRows]
 	var thumbs, tracks int
 	for i, row := range rows {
 		switch gutterRune(row) {
@@ -242,7 +243,7 @@ func TestScrollbarAppearsOnOverflow(t *testing.T) {
 		case '│':
 			tracks++
 		default:
-			t.Fatalf("row %d gutter = %q, want thumb or track", i, gutterRune(row))
+			t.Fatalf("line %d gutter = %q, want thumb or track", i, gutterRune(row))
 		}
 	}
 	if thumbs == 0 || tracks == 0 {
@@ -251,6 +252,13 @@ func TestScrollbarAppearsOnOverflow(t *testing.T) {
 	// Selection at the top: the thumb hugs the top of the gutter.
 	if gutterRune(rows[0]) != '█' {
 		t.Error("thumb should start at the top when the window is at the start")
+	}
+	// Both lines of a row always share the same gutter rune.
+	for i := 0; i < len(rows); i += 2 {
+		if gutterRune(rows[i]) != gutterRune(rows[i+1]) {
+			t.Errorf("row %d gutter split across lines: %q vs %q",
+				i/2, gutterRune(rows[i]), gutterRune(rows[i+1]))
+		}
 	}
 }
 
@@ -261,9 +269,9 @@ func TestNoScrollbarWhenListFits(t *testing.T) {
 	m.SetResults(manyItems(3), 3)
 
 	lines := strings.Split(ansi.Strip(m.View(80)), "\n")
-	for i, row := range lines[listTopOffset : listTopOffset+3] {
+	for i, row := range lines[listTopOffset : listTopOffset+2*3] {
 		if g := gutterRune(row); g != ' ' {
-			t.Fatalf("row %d gutter = %q, want blank (no scrollbar)", i, g)
+			t.Fatalf("line %d gutter = %q, want blank (no scrollbar)", i, g)
 		}
 	}
 }
@@ -280,6 +288,27 @@ func TestSnippetSanitization(t *testing.T) {
 	plain := ansi.Strip(m.View(80))
 	if !strings.Contains(plain, "a bc de") {
 		t.Fatalf("snippet not sanitized; view:\n%s", plain)
+	}
+}
+
+func TestDMRowsRenderAtSigil(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetResults([]Item{
+		{ChannelID: "D1", ChannelName: "ayush", UserName: "ayush", TS: "1.0", Text: "hi", IsDM: true},
+		{ChannelID: "C1", ChannelName: "general", UserName: "grant", TS: "2.0", Text: "yo"},
+	}, 2)
+
+	plain := ansi.Strip(m.View(80))
+	if !strings.Contains(plain, "@ayush") {
+		t.Errorf("DM row must render @name; view:\n%s", plain)
+	}
+	if strings.Contains(plain, "#ayush") {
+		t.Errorf("DM row must not render #name; view:\n%s", plain)
+	}
+	if !strings.Contains(plain, "#general") {
+		t.Errorf("channel row must keep #name; view:\n%s", plain)
 	}
 }
 
@@ -349,15 +378,15 @@ func TestScrollWindowEdges(t *testing.T) {
 	submitQuery(&m, "deploy")
 	m.SetResults(manyItems(15), 15)
 
-	// Walk to the bottom: window pins to the last 10 items.
+	// Walk to the bottom: window pins to the last 8 items.
 	for i := 0; i < 20; i++ {
 		m.HandleKey("down")
 	}
 	if m.selected != 14 {
 		t.Fatalf("selected = %d, want 14", m.selected)
 	}
-	if start, end := m.visibleWindow(); start != 5 || end != 15 {
-		t.Fatalf("bottom window = [%d,%d), want [5,15)", start, end)
+	if start, end := m.visibleWindow(); start != 7 || end != 15 {
+		t.Fatalf("bottom window = [%d,%d), want [7,15)", start, end)
 	}
 
 	// Walk back to the top.
@@ -367,8 +396,88 @@ func TestScrollWindowEdges(t *testing.T) {
 	if m.selected != 0 {
 		t.Fatalf("selected = %d, want 0", m.selected)
 	}
-	if start, end := m.visibleWindow(); start != 0 || end != 10 {
-		t.Fatalf("top window = [%d,%d), want [0,10)", start, end)
+	if start, end := m.visibleWindow(); start != 0 || end != 8 {
+		t.Fatalf("top window = [%d,%d), want [0,8)", start, end)
+	}
+}
+
+// resultLines returns the stripped rendered list lines for the current
+// visible window (2 lines per result row).
+func resultLines(m Model, n int) []string {
+	lines := strings.Split(ansi.Strip(m.View(80)), "\n")
+	return lines[listTopOffset : listTopOffset+n]
+}
+
+func TestTwoLineRows(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	long := strings.Repeat("lorem ipsum ", 30) + "ENDMARK"
+	m.SetResults([]Item{
+		{ChannelID: "C1", ChannelName: "general", UserName: "grant", TS: "1.0", Text: long},
+		{ChannelID: "C2", ChannelName: "ops", UserName: "sam", TS: "2.0", Text: "short"},
+	}, 2)
+
+	lines := resultLines(m, 4)
+
+	// Row 0: long snippet starts on line 1 and continues on line 2,
+	// truncated with an ellipsis since more remains.
+	if !strings.Contains(lines[0], "#general") || !strings.Contains(lines[0], "lorem ipsum") {
+		t.Errorf("line 1 of row 0 = %q, want header + snippet start", lines[0])
+	}
+	if !strings.Contains(lines[1], "lorem") {
+		t.Errorf("line 2 of row 0 = %q, want snippet continuation", lines[1])
+	}
+	if !strings.Contains(lines[1], "…") {
+		t.Errorf("line 2 of row 0 = %q, want … overflow marker", lines[1])
+	}
+	if strings.Contains(lines[1], "ENDMARK") {
+		t.Errorf("line 2 of row 0 should be truncated before the snippet tail")
+	}
+
+	// Row 1: short snippet fits entirely on line 1; line 2 is blank.
+	if !strings.Contains(lines[2], "#ops") || !strings.Contains(lines[2], "short") {
+		t.Errorf("line 1 of row 1 = %q, want header + full snippet", lines[2])
+	}
+	// Trim the box borders ("│ ... │") as well as padding.
+	if got := strings.Trim(lines[3], " │"); got != "" {
+		t.Errorf("line 2 of row 1 = %q, want blank continuation", got)
+	}
+}
+
+func TestTwoLineContinuationNoMidRunSplitOfWideRunes(t *testing.T) {
+	// A snippet of wide runes must split at a cell boundary without
+	// duplicating or dropping content between line 1 and line 2.
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	wide := strings.Repeat("日本語テキスト", 20)
+	m.SetResults([]Item{
+		{ChannelID: "C1", ChannelName: "general", UserName: "grant", TS: "1.0", Text: wide},
+	}, 1)
+
+	lines := resultLines(m, 2)
+	for i, l := range lines {
+		if w := lipgloss.Width(l); w > 80 {
+			t.Errorf("line %d width = %d, exceeds box", i, w)
+		}
+	}
+}
+
+func TestSelectedIndicatorOnBothLines(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetResults(manyItems(3), 3)
+	m.HandleKey("down") // select row 1
+
+	lines := resultLines(m, 6)
+	for i, want := range []bool{false, false, true, true, false, false} {
+		has := strings.HasPrefix(strings.TrimLeft(lines[i], " "), "▌") ||
+			strings.Contains(lines[i], "▌")
+		if has != want {
+			t.Errorf("line %d indicator = %v, want %v (%q)", i, has, want, lines[i])
+		}
 	}
 }
 
