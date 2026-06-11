@@ -1,7 +1,10 @@
 package ui
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/wintree"
@@ -79,6 +82,108 @@ func TestOnlyWindow_EvictsOthers(t *testing.T) {
 	}
 	if a.winModels[a.focusedWin] != a.messagepane {
 		t.Fatal("pointer invariant broken after :only")
+	}
+}
+
+// TestFocusSwap_RenderShowsFocusedWindowAtEqualVersions guards the
+// msgTop render cache against cross-window collisions. Per-window
+// models have INDEPENDENT version counters, so after a pointer-swap
+// focus change the new focused model can present the exact same
+// (version, width, height, layoutKey) tuple the cache stored for the
+// OTHER window's frame — serving window B's pixels while window A is
+// focused. The cache key must therefore mix in the window identity.
+// The test forces the collision: equal dims (same frame), equal
+// layout bits (same focus/view/theme), and version counters driven
+// to exact equality via InvalidateCache bumps.
+func TestFocusSwap_RenderShowsFocusedWindowAtEqualVersions(t *testing.T) {
+	a := newWideTestApp(t)
+	_, _ = a.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+	first := a.focusedWin
+	a.messagepane.SetMessages([]messages.MessageItem{
+		{TS: "1.0", UserName: "alice", UserID: "U1", Text: "alpha-marker", Timestamp: "1:00 PM"},
+	})
+	_ = a.splitWindow(wintree.SplitSideBySide)
+	second := a.focusedWin
+	_, _ = a.Update(ChannelSelectedMsg{ID: "C2", Name: "ops", Type: "channel"})
+	a.messagepane.SetMessages([]messages.MessageItem{
+		{TS: "2.0", UserName: "bob", UserID: "U2", Text: "beta-marker", Timestamp: "1:00 PM"},
+	})
+
+	// Render the messages panel with a FIXED frame so both renders see
+	// identical dims — the same inputs the panel cache keys on.
+	frame := a.layout.Compute(a.width, a.height, a.workspaceRail.Width(), a.sidebar.Width(), a.sidebarVisible, a.threadVisible)
+	render := func() string { return ansi.Strip(a.renderMessagesRegion(frame, 0, false)) }
+
+	if out := render(); !strings.Contains(out, "beta-marker") {
+		t.Fatalf("sanity: focused second window should render beta-marker:\n%s", out)
+	}
+
+	// Swap focus to the first window and align its version counter to
+	// the exact version the cache stored for the second window's
+	// frame. Pre-set the focused flag so render-time SetFocused can't
+	// bump past the target.
+	_ = a.focusWindow(first)
+	a.winModels[first].SetFocused(true)
+	target := a.renderCache.msgTop.panelVersion
+	for a.winModels[first].Version() < target {
+		a.winModels[first].InvalidateCache()
+	}
+	if a.winModels[first].Version() != target {
+		// Overshot: raise the second window's counter to match, re-warm
+		// the cache at the new version, and swap back.
+		for a.winModels[second].Version() < a.winModels[first].Version() {
+			a.winModels[second].InvalidateCache()
+		}
+		_ = a.focusWindow(second)
+		_ = render()
+		_ = a.focusWindow(first)
+		target = a.renderCache.msgTop.panelVersion
+	}
+	if a.winModels[first].Version() != target {
+		t.Fatalf("test setup: could not align versions (first=%d, cached=%d)",
+			a.winModels[first].Version(), target)
+	}
+
+	out := render()
+	if strings.Contains(out, "beta-marker") {
+		t.Fatalf("focused first window served the second window's cached frame:\n%s", out)
+	}
+	if !strings.Contains(out, "alpha-marker") {
+		t.Fatalf("focused first window must render its own content:\n%s", out)
+	}
+}
+
+// TestSplitWindow_ReactionUpdateDoesNotLeakAcrossClones guards the
+// seed clone's deep copy: UpdateReaction mutates Reactions elements
+// in place (and the remove path shifts the slice in place), so a
+// clone sharing the source's Reactions backing array corrupts the
+// source's view when either window receives a reaction event.
+func TestSplitWindow_ReactionUpdateDoesNotLeakAcrossClones(t *testing.T) {
+	a := newWideTestApp(t)
+	_, _ = a.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+	a.messagepane.SetMessages([]messages.MessageItem{{
+		TS: "1.0", UserName: "alice", UserID: "U1", Text: "hello", Timestamp: "1:00 PM",
+		Reactions: []messages.ReactionItem{
+			{Emoji: "thumbsup", Count: 1, UserIDs: []string{"U1"}},
+			{Emoji: "tada", Count: 1, UserIDs: []string{"U1"}},
+		},
+	}})
+	src := a.messagepane
+	_ = a.splitWindow(wintree.SplitSideBySide)
+	clone := a.messagepane
+
+	// Removing thumbsup entirely shifts the clone's Reactions slice in
+	// place; with a shared backing array the source would see
+	// [tada, tada]. Incrementing tada writes the element in place.
+	clone.UpdateReaction("1.0", "thumbsup", "U1", true)
+	clone.UpdateReaction("1.0", "tada", "U2", false)
+
+	got := src.Messages()[0].Reactions
+	if len(got) != 2 || got[0].Emoji != "thumbsup" || got[1].Emoji != "tada" {
+		t.Fatalf("source reactions corrupted by clone mutation: %+v", got)
+	}
+	if got[1].Count != 1 {
+		t.Fatalf("source tada count mutated by clone reaction: %+v", got[1])
 	}
 }
 

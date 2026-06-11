@@ -68,11 +68,25 @@ func (a *App) splitWindow(dir wintree.Dir) tea.Cmd {
 	m.SetChannel(srcCh.Name, "")
 	m.SetChannelType(srcCh.Type)
 	if src != nil {
-		// Messages() exposes the source's internal slice; copy so the
-		// two models never alias one backing array (in-place edits
-		// like SwapLocalSent would otherwise leak across windows).
-		m.SetMessages(append([]messages.MessageItem(nil), src.Messages()...))
+		// Messages() exposes the source's internal slice. Copy the
+		// top-level items (covers in-place item writes: SwapLocalSent,
+		// UpsertSelfSent, PatchUserName, UpdateMessageInPlace,
+		// IncrementReplyCount, RemoveMessageByTS) AND each item's
+		// Reactions slice — UpdateReaction writes elements in place
+		// and shifts on remove, so a shared backing array would let
+		// one window's reaction event corrupt the other's view.
+		// ReactionItem.UserIDs needs no copy: Append/RemoveUserID are
+		// copy-on-write. Attachments/Blocks/LegacyAttachments are
+		// never mutated in place by the model.
+		items := append([]messages.MessageItem(nil), src.Messages()...)
+		for i := range items {
+			if len(items[i].Reactions) > 0 {
+				items[i].Reactions = append([]messages.ReactionItem(nil), items[i].Reactions...)
+			}
+		}
+		m.SetMessages(items)
 		m.SetLastReadTS(src.LastReadTS())
+		m.SetLoading(src.IsLoading())
 	}
 	a.winModels[id] = m
 	a.focusedWin = id
@@ -138,11 +152,12 @@ func (a *App) focusWindow(id wintree.LeafID) tea.Cmd {
 // setFocusedWindowChannel records the applied channel selection on
 // the focused window. Called from the ChannelSelectedMsg apply path.
 //
-// KNOWN PHASE 2 LIMITATION: the selection applies to whichever window
-// is focused at APPLY time, not dispatch time. Rapid focus changes
-// (e.g. held ctrl+w w) can record a channel on the wrong window until
-// the next selection corrects it. Phase 3's per-window models replace
-// this path; do not inherit it silently.
+// The selection applies to whichever window is focused at APPLY time,
+// not dispatch time: a queued ChannelSelectedMsg that lands after an
+// interleaved ctrl+w focus change records on the newly-focused window.
+// Narrow and self-correcting — the next selection on either window
+// overwrites it — and the per-window models keep their own content
+// regardless; only the tree's channel label can be briefly stale.
 func (a *App) setFocusedWindowChannel(id, name, chType string) {
 	a.wins.SetChannel(a.focusedWin, wintree.Channel{ID: id, Name: name, Type: chType})
 }

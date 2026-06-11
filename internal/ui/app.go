@@ -461,6 +461,10 @@ func NewApp() *App {
 		navHistory:           newNavHistoryStore(),
 		clipboardRead:        defaultClipboardReader,
 	}
+	// Root model deliberately bypasses newWindowModel: the config
+	// retention fields (avatarFn, userNames, emojiCtx, ...) are still
+	// empty at construction — main.go's Set* forwarders run later and
+	// reach the root model through the messagepane pointer directly.
 	rootModel := messages.New(nil, "")
 	app.winModels = map[wintree.LeafID]*messages.Model{rootWin: &rootModel}
 	app.messagepane = app.winModels[rootWin]
