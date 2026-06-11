@@ -139,8 +139,9 @@ func (a *App) anyWinModelLoading() bool {
 	return false
 }
 
-// syncWinModels evicts models for windows no longer in the tree
-// (after close/only). Additions happen explicitly in splitWindow.
+// syncWinModels evicts models (and their render-cache slots) for
+// windows no longer in the tree (after close/only). Additions happen
+// explicitly in splitWindow.
 func (a *App) syncWinModels() {
 	live := make(map[wintree.LeafID]bool, a.wins.Len())
 	for _, id := range a.wins.Leaves() {
@@ -149,6 +150,7 @@ func (a *App) syncWinModels() {
 	for id := range a.winModels {
 		if !live[id] {
 			delete(a.winModels, id)
+			a.renderCache.dropWinPane(id)
 		}
 	}
 }
@@ -162,4 +164,5 @@ func (a *App) resetWindowTree() {
 	rootModel := a.newWindowModel("")
 	a.winModels = map[wintree.LeafID]*messages.Model{rootWin: rootModel}
 	a.messagepane = rootModel
+	a.renderCache.dropAllWinPanes()
 }

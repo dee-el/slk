@@ -181,7 +181,14 @@ func (b *workspaceBootstrap) Handle(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		}
 		a.spinnerFrame = (a.spinnerFrame + 1) % len(styles.SpinnerChars)
 		for _, mp := range a.allWinModels() {
-			mp.SetSpinnerFrame(a.spinnerFrame)
+			// Only loading models show the spinner; pushing the frame
+			// into a non-loading model would bump its version 10x/sec
+			// and force pointless rebuilds of its (live, cached)
+			// unfocused pane. A model that starts loading later picks
+			// up the current frame on the next tick.
+			if mp.IsLoading() {
+				mp.SetSpinnerFrame(a.spinnerFrame)
+			}
 		}
 		return spinnerTickCmd(), true
 

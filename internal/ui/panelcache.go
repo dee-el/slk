@@ -18,6 +18,8 @@
 // '&a.panelCacheRail' to '&a.renderCache.rail' and friends.
 package ui
 
+import "github.com/gammons/slk/internal/ui/wintree"
+
 // panelCache stores the fully-wrapped (border + exactSize) output of
 // a single panel keyed on a tuple of inputs that affect its rendering.
 // A cache hit returns the previous frame's string verbatim; a miss
@@ -82,6 +84,37 @@ type panelRenderCache struct {
 	msgTop   panelCache
 	thread   panelCache
 	status   panelCache
+
+	// winPanes caches the bordered output of unfocused live window
+	// panes, one slot per window (Phase 3). Focused windows render
+	// through msgTop/msgPanel as before. Evicted when windows close
+	// (syncWinModels) and on workspace reset (resetWindowTree).
+	winPanes map[wintree.LeafID]*panelCache
 }
 
 func newPanelRenderCache() *panelRenderCache { return &panelRenderCache{} }
+
+// getWinPane returns the cache slot for window id, lazily creating
+// both the map and the slot.
+func (rc *panelRenderCache) getWinPane(id wintree.LeafID) *panelCache {
+	if rc.winPanes == nil {
+		rc.winPanes = make(map[wintree.LeafID]*panelCache)
+	}
+	c := rc.winPanes[id]
+	if c == nil {
+		c = &panelCache{}
+		rc.winPanes[id] = c
+	}
+	return c
+}
+
+// dropWinPane evicts the cache slot for a closed window.
+func (rc *panelRenderCache) dropWinPane(id wintree.LeafID) {
+	delete(rc.winPanes, id)
+}
+
+// dropAllWinPanes evicts every per-window pane cache (workspace
+// reset: all window IDs are replaced wholesale).
+func (rc *panelRenderCache) dropAllWinPanes() {
+	rc.winPanes = nil
+}

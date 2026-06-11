@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/wintree"
 )
 
@@ -28,22 +29,40 @@ func TestRegion_SingleWindowUnchanged(t *testing.T) {
 	}
 }
 
-func TestRegion_SplitRendersPlaceholderWithChannelName(t *testing.T) {
-	a := newWideTestApp(t)
-	_, _ = a.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
-	_ = a.splitWindow(wintree.SplitSideBySide)
-	// Switch the focused (new) window to a different channel so the
-	// placeholder ("# general") and the live pane ("ops") are
-	// distinguishable in the output.
-	_, _ = a.Update(ChannelSelectedMsg{ID: "C2", Name: "ops", Type: "channel"})
+func TestRegion_SplitRendersLiveContentInBothWindows(t *testing.T) {
+	a, _, _ := twoWindowApp(t)
+	_, _ = a.Update(MessagesLoadedMsg{ChannelID: "C1", Messages: testMessageItems(2)})
 	out := ansi.Strip(renderRegion(a))
-	if !strings.Contains(out, "# general") {
-		t.Fatalf("placeholder should show channel name '# general':\n%s", out)
+	// Unfocused window (C1/general) must show real message text, not a
+	// placeholder; focused window shows ops.
+	if !strings.Contains(out, "msg-1") {
+		t.Fatalf("unfocused window should render its channel's messages:\n%s", out)
 	}
-	// The live pane follows the focused window's channel: the compose
-	// box's channel-aware placeholder names ops, not general.
-	if !strings.Contains(out, "Message #ops") {
-		t.Fatalf("live pane should render the focused window's channel (ops):\n%s", out)
+	if strings.Contains(out, "(no channel)") {
+		t.Fatal("no placeholders may remain in Phase 3")
+	}
+}
+
+func TestRegion_UnfocusedWindowUpdatesOnNewMessage(t *testing.T) {
+	a, _, _ := twoWindowApp(t)
+	_, _ = a.Update(NewMessageMsg{ChannelID: "C1", Message: messages.MessageItem{
+		TS: "9.0", UserID: "U9", UserName: "zoe", Text: "live-update-proof", Timestamp: "1:00 PM",
+	}})
+	out := ansi.Strip(renderRegion(a))
+	if !strings.Contains(out, "live-update-proof") {
+		t.Fatalf("unfocused window must re-render new content:\n%s", out)
+	}
+}
+
+func TestRegion_UnfocusedPaneCacheInvalidatesOnContent(t *testing.T) {
+	a, _, _ := twoWindowApp(t)
+	_ = renderRegion(a) // warm caches
+	_, _ = a.Update(NewMessageMsg{ChannelID: "C1", Message: messages.MessageItem{
+		TS: "9.1", UserID: "U9", UserName: "zoe", Text: "second-proof", Timestamp: "1:01 PM",
+	}})
+	out := ansi.Strip(renderRegion(a))
+	if !strings.Contains(out, "second-proof") {
+		t.Fatal("stale cached frame served after content change")
 	}
 }
 

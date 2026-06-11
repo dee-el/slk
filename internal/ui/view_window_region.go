@@ -1,13 +1,13 @@
 // internal/ui/view_window_region.go
 //
 // Multi-window messages-region renderer (window-management design
-// §6, Phase 2). With a single window the existing renderMessagesRegion
+// §6, Phase 3). With a single window the existing renderMessagesRegion
 // path runs untouched — identical output, identical caching. With
 // splits, the wintree layout is walked recursively: the FOCUSED
 // window renders the real (cached) messages panel sized to its rect;
-// every other window renders a cheap static placeholder (dimmed
-// border + channel name). Phase 3 replaces placeholders with live
-// per-window models.
+// every other window renders a live, read-only pane from its own
+// per-window model (a.winModels), cached per window in
+// renderCache.winPanes.
 //
 // NAMING: this file would naturally be view_windows.go, but a
 // `_windows` filename suffix is a GOOS build constraint — Go would
@@ -18,6 +18,7 @@ package ui
 import (
 	"charm.land/lipgloss/v2"
 
+	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/styles"
 	"github.com/gammons/slk/internal/ui/wintree"
 )
@@ -67,7 +68,7 @@ func (a *App) renderWindowNode(n wintree.LayoutNode, frame panelLayoutFrame, the
 			}
 			return out
 		}
-		return a.renderPlaceholderWindow(n)
+		return a.renderUnfocusedWindow(n, themeVer)
 	}
 	parts := make([]string, 0, len(n.Children))
 	for _, c := range n.Children {
@@ -88,28 +89,37 @@ func (a *App) renderWindowNode(n wintree.LayoutNode, frame panelLayoutFrame, the
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-// renderPlaceholderWindow renders an unfocused window: dimmed border,
-// channel name centered. Static and cheap — no cache needed.
-func (a *App) renderPlaceholderWindow(n wintree.LayoutNode) string {
-	ch, _ := a.wins.Channel(n.ID)
-	name := ch.Name
-	if name == "" {
-		name = "(no channel)"
-	} else {
-		name = "# " + name
+// renderUnfocusedWindow renders a live, read-only pane for an
+// unfocused window: dimmed border, channel content via ViewBare
+// (whose chrome includes the channel-name header). No compose/typing
+// rows (focused window only). Cached per window on
+// (version, rect, themeVer).
+func (a *App) renderUnfocusedWindow(n wintree.LayoutNode, themeVer int64) string {
+	m := a.winModels[n.ID]
+	if m == nil || n.Rect.W < 4 || n.Rect.H < 4 {
+		return a.renderBlankWindow(n)
 	}
-	innerW, innerH := n.Rect.W-2, n.Rect.H-2
-	if innerW < 1 || innerH < 1 {
-		// Too small for border + label: a blank block of exactly
-		// Rect.W x Rect.H keeps the tiling intact (caller guarantees
-		// both >= 1; negative inner dims would otherwise flow into
-		// lipgloss.Place / Style.Width).
-		return exactSize("", n.Rect.W, n.Rect.H)
+	m.SetFocused(false) // before Version read; bumps only on flip
+	c := a.renderCache.getWinPane(n.ID)
+	key := themeVer << 1
+	if c.hit(m.Version(), n.Rect.W, n.Rect.H, key) {
+		return c.output
 	}
-	label := lipgloss.NewStyle().Foreground(styles.TextMuted).Render(name)
-	inner := lipgloss.Place(innerW, innerH, lipgloss.Center, lipgloss.Center, label)
-	return exactSize(
-		styles.UnfocusedBorder.Width(innerW).Render(inner),
+	contentH := n.Rect.H - 2
+	view := m.ViewBare(contentH, n.Rect.W-2)
+	view = messages.ReapplyBgAfterResets(view, messages.BgANSI())
+	out := exactSize(
+		styles.UnfocusedBorder.Width(n.Rect.W-2).Render(view),
 		n.Rect.W, n.Rect.H,
 	)
+	c.store(out, m.Version(), n.Rect.W, n.Rect.H, key)
+	return out
+}
+
+// renderBlankWindow is the degenerate-rect fallback: a blank block of
+// exactly Rect.W x Rect.H keeps the tiling intact (caller guarantees
+// both >= 1; smaller rects can't fit border + content and would flow
+// negative inner dims into the pane renderers).
+func (a *App) renderBlankWindow(n wintree.LayoutNode) string {
+	return exactSize("", n.Rect.W, n.Rect.H)
 }
