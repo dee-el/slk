@@ -231,6 +231,10 @@ type Model struct {
 	userNames    map[string]string // user ID -> display name for mention resolution
 	channelNames map[string]string // channel ID -> name for bare <#CID> resolution
 
+	// searchTerms are folded word-prefix terms of the active in-channel
+	// search; non-empty enables highlight rendering. nil = no search.
+	searchTerms []string
+
 	// Render cache -- invalidated when messages or width change.
 	// Each entry holds pre-bordered variants so selection movement does not
 	// re-invoke lipgloss per keypress.
@@ -621,6 +625,15 @@ func channelGlyph(chType string) string {
 	default:
 		return "#"
 	}
+}
+
+// SetSearchTerms sets (or clears, with nil) the folded terms whose
+// word-prefix occurrences get highlighted in message text. Invalidates
+// the render cache.
+func (m *Model) SetSearchTerms(terms []string) {
+	m.searchTerms = terms
+	m.InvalidateCache()
+	m.dirty()
 }
 
 func (m *Model) SetMessages(msgs []MessageItem) {
@@ -1845,7 +1858,18 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 		Customs:      m.emojiCtx.Customs,
 		EmojiFlushes: &flushes,
 	}
-	text := styles.MessageText.Render(WordWrap(RenderSlackMarkdownWith(MessageTextSource(msg), bodyOpts), contentWidth))
+	rendered := RenderSlackMarkdownWith(MessageTextSource(msg), bodyOpts)
+	if len(m.searchTerms) > 0 {
+		// Derive the style's raw open/close SGR sequences by rendering
+		// a sentinel and splitting on it — works for any lipgloss color
+		// profile without hand-building escape codes. One split per
+		// renderMessagePlain call (i.e. per cache miss), not per line.
+		parts := strings.SplitN(styles.SearchHighlightStyle().Render("\x00"), "\x00", 2)
+		if len(parts) == 2 && parts[0] != "" {
+			rendered = HighlightSearchTerms(rendered, m.searchTerms, parts[0], parts[1])
+		}
+	}
+	text := styles.MessageText.Render(WordWrap(rendered, contentWidth))
 	if stats != nil {
 		stats.bodyTotal += time.Since(bodyT0)
 	}

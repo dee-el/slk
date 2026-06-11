@@ -35,6 +35,12 @@ var (
 	SelectionBackground color.Color
 	SelectionForeground color.Color
 
+	// Search-match highlight. Apply() either copies the theme's values
+	// or derives a default (Warning as bg, Background as fg) so
+	// SearchHighlightStyle() is always visible on any theme.
+	SearchHighlightBg color.Color
+	SearchHighlightFg color.Color
+
 	// Panel styles
 	FocusedBorder = lipgloss.NewStyle().
 			BorderStyle(lipgloss.ThickBorder()).
@@ -338,6 +344,19 @@ func Apply(themeName string, overrides config.Theme) {
 		SelectionForeground = Background
 	}
 
+	if colors.SearchHighlightBg != "" {
+		SearchHighlightBg = lipgloss.Color(colors.SearchHighlightBg)
+	} else {
+		// Default: Warning is visible against message text in all
+		// built-in themes.
+		SearchHighlightBg = Warning
+	}
+	if colors.SearchHighlightFg != "" {
+		SearchHighlightFg = lipgloss.Color(colors.SearchHighlightFg)
+	} else {
+		SearchHighlightFg = Background
+	}
+
 	// Compose-insert background: explicit theme override wins, otherwise
 	// derive from Accent + Background at defaultTintAlpha.
 	if colors.ComposeInsertBG != "" {
@@ -449,4 +468,12 @@ func SelectionStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Background(SelectionBackground).
 		Foreground(SelectionForeground)
+}
+
+// SearchHighlightStyle returns the style used to mark in-channel
+// search matches inside message text.
+func SearchHighlightStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Background(SearchHighlightBg).
+		Foreground(SearchHighlightFg)
 }
