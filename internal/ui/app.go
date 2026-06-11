@@ -110,6 +110,11 @@ type App struct {
 	height         int
 	keys           KeyMap
 
+	// cmdline accumulates the text typed at the vi-style ':' prompt
+	// while in ModeCommand. Owned by mode_command.go; always "" in
+	// every other mode.
+	cmdline string
+
 	// layout owns the per-frame layout geometry (horizontal bands for
 	// mouse hit-testing + per-pane content heights for pageSize). See
 	// internal/ui/panellayout.go.
