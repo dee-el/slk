@@ -153,7 +153,7 @@ func (m *Model) SetHelpHint(s string) {
 // SetCommandLine shows a vi-style command prompt (e.g. ":vsp") in the
 // left segment of the bar, replacing the channel/workspace segments
 // while non-empty. Pass "" to restore the normal segments. The caller
-// owns the ':' prefix and any cursor glyph.
+// owns the ':' prefix; View appends a block-cursor glyph.
 func (m *Model) SetCommandLine(s string) {
 	if m.commandLine != s {
 		m.commandLine = s

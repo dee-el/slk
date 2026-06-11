@@ -12,6 +12,9 @@ func TestSetCommandLine_RendersPromptInView(t *testing.T) {
 	if !strings.Contains(out, ":vsp") {
 		t.Fatalf("expected view to contain %q, got:\n%s", ":vsp", out)
 	}
+	if !strings.Contains(out, "▌") {
+		t.Fatalf("expected view to contain block-cursor glyph %q, got:\n%s", "▌", out)
+	}
 }
 
 func TestSetCommandLine_HidesChannelSegmentWhileActive(t *testing.T) {
