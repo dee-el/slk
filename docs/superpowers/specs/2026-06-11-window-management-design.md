@@ -65,10 +65,14 @@ A new pure-data package, no UI dependencies. Internal nodes are splits
 - `Cycle(id)` — next window in tree order, wrapping.
 - `Only(id)` — collapse tree to one leaf.
 - `Resize(id, axis, delta)` / `Equalize()` — adjust weights.
-- `ComputeRects(bounds)` — resolve per-window rects from weights, honoring
-  minimum window size (40 cols wide, matching the existing messages-pane
-  minimum; 8 rows tall). On terminal shrink, windows
-  clamp to minimums with the same degradation rules as today's panes.
+- `ComputeRects(bounds)` — resolve per-window rects from weights with
+  exact tiling. Minimum window size (42 cols wide incl. border, matching
+  the existing 40-col messages-pane content minimum; 8 rows tall) is
+  enforced at *Split* time by validating the actual resulting rects
+  (simulate-and-check, rolled back on refusal). On terminal shrink
+  AFTER splitting, rects may drop below minimums; the renderer clamps
+  defensively (degraded but crash-free) rather than ComputeRects
+  re-arranging the tree. (Phase 2 decision — do not "fix" backward.)
 
 Layout is never persisted; the tree starts as a single window each launch.
 
@@ -138,6 +142,9 @@ v1 registry: `sp`, `vsp`, `q`, `only`/`on`, `ws`. No arguments in v1
   (window ID + model version + rect + theme version + focused flag).
 - Focused window: existing focus border. Unfocused windows: dimmed border
   with channel name in the title, matching current unfocused-pane styling.
+  (Phase 2 interim: placeholder windows show the channel name centered in
+  the body instead — deliberate; Phase 3's live per-window panes adopt
+  the title treatment.)
 - `panelLayout` (`internal/ui/panellayout.go`) consults the tree's rects
   inside the messages region: `PanelAt` resolves to a specific window for
   click-to-focus and scroll routing; dragging an internal tree border
