@@ -373,6 +373,9 @@ func (d *dragState) Handle(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		n := len([]rune(text))
 
 		copyCmd := func() tea.Msg {
+			if !a.clipboardAvailable {
+				return statusbar.CopyFailedMsg{}
+			}
 			_ = clipboard.Write(clipboard.FmtText, []byte(text))
 			return statusbar.CopiedMsg{N: n}
 		}
