@@ -173,18 +173,16 @@ func (m *Model) HandleKey(keyStr string) Action {
 // Shared by renderBox (implicitly) and ClickRow's hit-testing.
 const listTopOffset = 5
 
-// maxVisibleRows is the height of the scroll window for the results
-// list, in result rows. Each row renders as rowLines screen lines.
-const maxVisibleRows = 8
-
 // rowLines is how many screen lines each result row occupies: a header
-// line (#channel  author  time  snippet...) plus a snippet continuation.
-const rowLines = 2
+// line (#channel  author  time  snippet...), a snippet continuation,
+// and a blank separator line.
+const rowLines = 3
 
 // ClickRow maps a box-local row (localY, 0 = box top border) to a result
 // row. Result rows are rowLines tall; a click on any line of a row
-// selects it. When the click lands on a visible list row it moves the
-// selection there and returns true; otherwise it returns false.
+// (blank separator included) selects it. When the click lands on a
+// visible list row it moves the selection there and returns true;
+// otherwise it returns false.
 // termHeight feeds the same window clamp the renderer uses; termWidth
 // is accepted for interface symmetry and currently unused.
 func (m *Model) ClickRow(termWidth, termHeight, localY int) bool {
@@ -225,25 +223,24 @@ func flattenText(s string) string {
 	return b.String()
 }
 
-// boxWidth returns the modal's outer width for a given terminal width.
-// Single source of truth for renderBox and BoxSize.
+// boxWidth returns the modal's outer width for a given terminal width:
+// 70% of the terminal, floored at 40 columns. Single source of truth
+// for renderBox and BoxSize.
 func boxWidth(termWidth int) int {
-	w := termWidth * 2 / 3
+	w := termWidth * 7 / 10
 	if w < 40 {
 		w = 40
-	}
-	if w > 100 {
-		w = 100
 	}
 	return w
 }
 
 // visibleRowCap returns the scroll-window height in result rows for a
-// terminal of termHeight lines: maxVisibleRows, reduced so the outer
-// box (rows*rowLines + chrome + optional footer) fits within
-// termHeight-2, but never below 1 row. Single source of truth for
-// visibleWindow, so the renderer, BoxSize, and ClickRow all clamp
-// identically.
+// terminal of termHeight lines: as many rows as fit the box's height
+// budget — 70% of the terminal, clamped to termHeight-2 — once the
+// chrome (and optional footer) is spent, but never below 1 row.
+// Single source of truth for visibleWindow, so the renderer, BoxSize,
+// and ClickRow all clamp identically (the rows*rowLines + chrome ≤
+// budget invariant).
 func (m Model) visibleRowCap(termHeight int) int {
 	// Chrome: top border + top padding + title + input + blank +
 	// bottom padding + bottom border = 7 (see BoxSize), plus the
@@ -252,10 +249,11 @@ func (m Model) visibleRowCap(termHeight int) int {
 	if m.total > len(m.items) {
 		chrome++
 	}
-	n := (termHeight - 2 - chrome) / rowLines
-	if n > maxVisibleRows {
-		n = maxVisibleRows
+	budget := termHeight * 7 / 10
+	if budget > termHeight-2 {
+		budget = termHeight - 2
 	}
+	n := (budget - chrome) / rowLines
 	if n < 1 {
 		n = 1
 	}
@@ -434,12 +432,13 @@ func splitAtWidth(s string, w int) (head, tail string) {
 
 // resultRows renders the visible window of result rows plus the
 // "showing K of N" footer when the server reported more matches than
-// were fetched. Each result is rowLines (2) screen lines: a header line
-// ("#channel  author  timestamp  snippet...") and a snippet
-// continuation line, truncated with "…" when more remains. When the
-// fetched list overflows the visible window a proportional scrollbar
-// gutter is drawn on the right (same pattern as channelfinder/
-// workspacefinder/themeswitcher), spanning both lines of each row.
+// were fetched. Each result is rowLines (3) screen lines: a header line
+// ("#channel  author  timestamp  snippet..."), a snippet continuation
+// line truncated with "…" when more remains, and a blank separator.
+// When the fetched list overflows the visible window a proportional
+// scrollbar gutter is drawn on the right (same pattern as
+// channelfinder/workspacefinder/themeswitcher), spanning all lines of
+// each row — separator included, for gutter continuity.
 func (m Model) resultRows(innerWidth, termHeight int) []string {
 	bg := styles.Background
 
@@ -526,21 +525,25 @@ func (m Model) resultRows(innerWidth, termHeight int) []string {
 			line2 = textStyle.Render(rest)
 		}
 
-		for _, line := range []string{line1, line2} {
+		// Line 3: a blank separator between rows (trailing one above
+		// the footer/border included). It never carries the selected
+		// indicator but does carry the scrollbar gutter rune.
+		for li, line := range []string{line1, line2, ""} {
+			separator := li == 2
 			// Right-pad with spaces to fill the row.
 			if pad := contentWidth - lipgloss.Width(line); pad > 0 {
 				line += strings.Repeat(" ", pad)
 			}
 			var row string
-			if isSelected {
-				// Selected indicator spans both lines of the row.
+			if isSelected && !separator {
+				// Selected indicator spans the content lines of the row.
 				indicator := lipgloss.NewStyle().Background(bg).Foreground(styles.Accent).Render("▌")
 				row = indicator + line
 			} else {
 				row = " " + line
 			}
 			if showScrollbar {
-				// Thumb math is row-based; both lines of a row share
+				// Thumb math is row-based; all lines of a row share
 				// its gutter rune, so the gutter stays proportional.
 				rel := i - startIdx
 				if rel >= thumbStart && rel < thumbEnd {

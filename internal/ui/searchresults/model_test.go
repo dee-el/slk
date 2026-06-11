@@ -232,11 +232,16 @@ func TestScrollbarAppearsOnOverflow(t *testing.T) {
 	submitQuery(&m, "deploy")
 	m.SetResults(manyItems(50), 50)
 
-	// 30 rows: tall enough for the full maxVisibleRows window (a 24-row
-	// terminal clamps to 7 rows; see visibleRowCap).
+	// 30 rows: the window fills up to 70% of the terminal height (see
+	// visibleRowCap); 50 items overflow it, so the scrollbar shows.
+	cap := m.visibleRowCap(30)
+	if cap < 2 {
+		t.Fatalf("visibleRowCap(30) = %d, want >= 2 for this test", cap)
+	}
 	lines := strings.Split(ansi.Strip(m.View(80, 30)), "\n")
-	// The gutter spans both lines of every visible row.
-	rows := lines[listTopOffset : listTopOffset+2*maxVisibleRows]
+	// The gutter spans all rowLines lines of every visible row,
+	// separator included.
+	rows := lines[listTopOffset : listTopOffset+rowLines*cap]
 	var thumbs, tracks int
 	for i, row := range rows {
 		switch gutterRune(row) {
@@ -255,11 +260,13 @@ func TestScrollbarAppearsOnOverflow(t *testing.T) {
 	if gutterRune(rows[0]) != '█' {
 		t.Error("thumb should start at the top when the window is at the start")
 	}
-	// Both lines of a row always share the same gutter rune.
-	for i := 0; i < len(rows); i += 2 {
-		if gutterRune(rows[i]) != gutterRune(rows[i+1]) {
-			t.Errorf("row %d gutter split across lines: %q vs %q",
-				i/2, gutterRune(rows[i]), gutterRune(rows[i+1]))
+	// All lines of a row always share the same gutter rune.
+	for i := 0; i < len(rows); i += rowLines {
+		for j := 1; j < rowLines; j++ {
+			if gutterRune(rows[i]) != gutterRune(rows[i+j]) {
+				t.Errorf("row %d gutter split across lines 0 and %d: %q vs %q",
+					i/rowLines, j, gutterRune(rows[i]), gutterRune(rows[i+j]))
+			}
 		}
 	}
 }
@@ -271,7 +278,7 @@ func TestNoScrollbarWhenListFits(t *testing.T) {
 	m.SetResults(manyItems(3), 3)
 
 	lines := strings.Split(ansi.Strip(m.View(80, 24)), "\n")
-	for i, row := range lines[listTopOffset : listTopOffset+2*3] {
+	for i, row := range lines[listTopOffset : listTopOffset+rowLines*3] {
 		if g := gutterRune(row); g != ' ' {
 			t.Fatalf("line %d gutter = %q, want blank (no scrollbar)", i, g)
 		}
@@ -403,16 +410,16 @@ func TestScrollWindowEdges(t *testing.T) {
 	submitQuery(&m, "deploy")
 	m.SetResults(manyItems(15), 15)
 
-	// 30 rows: tall enough for the full maxVisibleRows window.
-	// Walk to the bottom: window pins to the last 8 items.
+	// 30 rows: visibleRowCap(30) = 4 (70% budget 21, chrome 7, 3-line
+	// rows). Walk to the bottom: window pins to the last 4 items.
 	for i := 0; i < 20; i++ {
 		m.HandleKey("down")
 	}
 	if m.selected != 14 {
 		t.Fatalf("selected = %d, want 14", m.selected)
 	}
-	if start, end := m.visibleWindow(30); start != 7 || end != 15 {
-		t.Fatalf("bottom window = [%d,%d), want [7,15)", start, end)
+	if start, end := m.visibleWindow(30); start != 11 || end != 15 {
+		t.Fatalf("bottom window = [%d,%d), want [11,15)", start, end)
 	}
 
 	// Walk back to the top.
@@ -422,19 +429,25 @@ func TestScrollWindowEdges(t *testing.T) {
 	if m.selected != 0 {
 		t.Fatalf("selected = %d, want 0", m.selected)
 	}
-	if start, end := m.visibleWindow(30); start != 0 || end != 8 {
-		t.Fatalf("top window = [%d,%d), want [0,8)", start, end)
+	if start, end := m.visibleWindow(30); start != 0 || end != 4 {
+		t.Fatalf("top window = [%d,%d), want [0,4)", start, end)
 	}
 }
 
 // resultLines returns the stripped rendered list lines for the current
-// visible window (2 lines per result row).
+// visible window (rowLines lines per result row).
 func resultLines(m Model, n int) []string {
 	lines := strings.Split(ansi.Strip(m.View(80, 24)), "\n")
 	return lines[listTopOffset : listTopOffset+n]
 }
 
-func TestTwoLineRows(t *testing.T) {
+// blankLine reports whether a rendered box line has no content between
+// the borders ("│ ... │") once padding is trimmed.
+func blankLine(line string) bool {
+	return strings.Trim(line, " │") == ""
+}
+
+func TestThreeLineRowsWithSeparator(t *testing.T) {
 	m := New()
 	m.Open()
 	submitQuery(&m, "deploy")
@@ -444,7 +457,7 @@ func TestTwoLineRows(t *testing.T) {
 		{ChannelID: "C2", ChannelName: "ops", UserName: "sam", TS: "2.0", Text: "short"},
 	}, 2)
 
-	lines := resultLines(m, 4)
+	lines := resultLines(m, 6)
 
 	// Row 0: long snippet starts on line 1 and continues on line 2,
 	// truncated with an ellipsis since more remains.
@@ -460,18 +473,25 @@ func TestTwoLineRows(t *testing.T) {
 	if strings.Contains(lines[1], "ENDMARK") {
 		t.Errorf("line 2 of row 0 should be truncated before the snippet tail")
 	}
+	// Line 3 of row 0 is the blank separator.
+	if !blankLine(lines[2]) {
+		t.Errorf("line 3 of row 0 = %q, want blank separator", lines[2])
+	}
 
 	// Row 1: short snippet fits entirely on line 1; line 2 is blank.
-	if !strings.Contains(lines[2], "#ops") || !strings.Contains(lines[2], "short") {
-		t.Errorf("line 1 of row 1 = %q, want header + full snippet", lines[2])
+	if !strings.Contains(lines[3], "#ops") || !strings.Contains(lines[3], "short") {
+		t.Errorf("line 1 of row 1 = %q, want header + full snippet", lines[3])
 	}
-	// Trim the box borders ("│ ... │") as well as padding.
-	if got := strings.Trim(lines[3], " │"); got != "" {
-		t.Errorf("line 2 of row 1 = %q, want blank continuation", got)
+	if !blankLine(lines[4]) {
+		t.Errorf("line 2 of row 1 = %q, want blank continuation", lines[4])
+	}
+	// Trailing separator after the last row is fine (and expected).
+	if !blankLine(lines[5]) {
+		t.Errorf("line 3 of row 1 = %q, want blank separator", lines[5])
 	}
 }
 
-func TestTwoLineContinuationNoMidRunSplitOfWideRunes(t *testing.T) {
+func TestContinuationNoMidRunSplitOfWideRunes(t *testing.T) {
 	// A snippet of wide runes must split at a cell boundary without
 	// duplicating or dropping content between line 1 and line 2.
 	m := New()
@@ -482,7 +502,7 @@ func TestTwoLineContinuationNoMidRunSplitOfWideRunes(t *testing.T) {
 		{ChannelID: "C1", ChannelName: "general", UserName: "grant", TS: "1.0", Text: wide},
 	}, 1)
 
-	lines := resultLines(m, 2)
+	lines := resultLines(m, rowLines)
 	// Every full screen line (borders included) is exactly the box wide;
 	// a mid-rune split or unclipped overflow would change that.
 	for i, l := range lines {
@@ -522,20 +542,57 @@ func TestTwoLineContinuationNoMidRunSplitOfWideRunes(t *testing.T) {
 	}
 }
 
-func TestSelectedIndicatorOnBothLines(t *testing.T) {
+func TestSelectedIndicatorOnContentLinesOnly(t *testing.T) {
 	m := New()
 	m.Open()
 	submitQuery(&m, "deploy")
 	m.SetResults(manyItems(3), 3)
 	m.HandleKey("down") // select row 1
 
-	lines := resultLines(m, 6)
-	for i, want := range []bool{false, false, true, true, false, false} {
+	// The ▌ indicator marks both content lines of the selected row but
+	// never its blank separator line.
+	lines := resultLines(m, 9)
+	for i, want := range []bool{
+		false, false, false, // row 0
+		true, true, false, // row 1 (selected): content yes, separator no
+		false, false, false, // row 2
+	} {
 		has := strings.HasPrefix(strings.TrimLeft(lines[i], " "), "▌") ||
 			strings.Contains(lines[i], "▌")
 		if has != want {
 			t.Errorf("line %d indicator = %v, want %v (%q)", i, has, want, lines[i])
 		}
+	}
+}
+
+// TestSeventyPercentSizing locks the modal to 70% of the terminal in
+// both dimensions: a 200x60 terminal gets a 140-wide box whose rows
+// grow to fill the 42-line (70% of 60) height budget.
+func TestSeventyPercentSizing(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetResults(manyItems(50), 80) // footer: "showing 50 of 80"
+
+	if w := boxWidth(200); w != 140 {
+		t.Errorf("boxWidth(200) = %d, want 140 (70%%, no 100-col ceiling)", w)
+	}
+	if w := boxWidth(50); w != 40 {
+		t.Errorf("boxWidth(50) = %d, want the 40-col floor", w)
+	}
+
+	w, h := m.BoxSize(200, 60)
+	if w != 140 {
+		t.Errorf("BoxSize width = %d, want 140", w)
+	}
+	// Height budget is 42 (70% of 60); chrome is 8 (incl. footer), so
+	// 11 rows of rowLines(3) lines fit: 11*3 + 8 = 41.
+	if h != 41 {
+		t.Errorf("BoxSize height = %d, want 41 (fills the 70%% budget)", h)
+	}
+	box := m.renderBox(200, 60)
+	if gw, gh := lipgloss.Width(box), lipgloss.Height(box); gw != w || gh != h {
+		t.Errorf("rendered %dx%d, BoxSize %dx%d", gw, gh, w, h)
 	}
 }
 
