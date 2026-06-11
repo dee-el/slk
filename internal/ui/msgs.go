@@ -69,7 +69,14 @@ type (
 	}
 	OlderMessagesLoadedMsg struct {
 		ChannelID string
-		Messages  []messages.MessageItem
+		// AnchorTS is the OldestTS the fetch was keyed to (the
+		// buffer's oldest message at dispatch time). The reducer
+		// drops the result if the buffer's oldest no longer matches
+		// — that means the buffer was replaced mid-flight (e.g. by a
+		// jump-to-message FetchAround) and prepending would splice an
+		// unrelated older block onto the new window.
+		AnchorTS string
+		Messages []messages.MessageItem
 	}
 	// MessagesAroundLoadedMsg delivers a history window fetched around
 	// TargetTS (jump-to-message navigation: search matches, search

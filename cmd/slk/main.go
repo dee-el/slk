@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"io"
@@ -1053,6 +1054,7 @@ func run() error {
 				msgItems := fetchOlderMessages(wctx.Client, chIDStr, string(oldestTS), db, wctx.UserNames, tsFormat, avatarCache, router)
 				return ui.OlderMessagesLoadedMsg{
 					ChannelID: chIDStr,
+					AnchorTS:  string(oldestTS),
 					Messages:  msgItems,
 				}
 			},
@@ -1064,7 +1066,7 @@ func run() error {
 				}
 				msgItems := fetchMessagesAround(wctx.Client, chIDStr, string(ts), db, wctx.UserNames, tsFormat, router)
 				if msgItems == nil {
-					return ui.MessagesAroundLoadedMsg{ChannelID: chIDStr, TargetTS: string(ts), Err: fmt.Errorf("history fetch failed")}
+					return ui.MessagesAroundLoadedMsg{ChannelID: chIDStr, TargetTS: string(ts), Err: errors.New("history fetch failed")}
 				}
 				return ui.MessagesAroundLoadedMsg{ChannelID: chIDStr, TargetTS: string(ts), Messages: msgItems}
 			},
@@ -2180,7 +2182,10 @@ func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, 
 // fetchMessagesAround fetches a history window centered on targetTS
 // for jump-to-message navigation. Mirrors fetchOlderMessages: upserts
 // into the cache, converts to MessageItems, returns ascending by TS.
-// Returns nil on network failure.
+// Returns nil on network failure AND when the fetch succeeds but the
+// window is empty — callers cannot distinguish the two from the
+// return value alone (the FetchAround closure treats both as
+// failure).
 func fetchMessagesAround(client *slackclient.Client, channelID, targetTS string, db *cache.DB, userNames map[string]string, tsFormat string, router *workspaceRouter) []messages.MessageItem {
 	ctx := context.Background()
 	debuglog.Cache("fetchMessagesAround: channel=%s target_ts=%s entry", channelID, targetTS)
