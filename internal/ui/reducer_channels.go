@@ -14,7 +14,9 @@
 //                                   replace pane contents (nil =
 //                                   network failure, keep cache).
 //   OlderMessagesLoadedMsg        - history backfill landed:
-//                                   prepend.
+//                                   prepend (anchor-validated: dropped
+//                                   if the buffer was replaced
+//                                   mid-flight).
 //   ChannelMarkedRemoteMsg        - WS echo of a remote mark:
 //                                   apply locally.
 //   ChannelMarkedReadMsg          - optimistic mark-read echo:
@@ -111,14 +113,60 @@ var reduceChannels reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		return a.completePendingLinkNav(m.ChannelID, true), true
 
 	case OlderMessagesLoadedMsg:
-		debuglog.Cache("OlderMessagesLoadedMsg: channel=%s active=%s count=%d",
-			m.ChannelID, a.activeChannelID, len(m.Messages))
+		debuglog.Cache("OlderMessagesLoadedMsg: channel=%s active=%s anchor=%s count=%d",
+			m.ChannelID, a.activeChannelID, m.AnchorTS, len(m.Messages))
 		if m.ChannelID != a.activeChannelID {
+			// Stale channel: still reset the in-flight flag, or
+			// scroll-backfill stays permanently disabled after
+			// navigating away mid-fetch. Do NOT touch the pane's
+			// loading state — the pane now belongs to the new
+			// channel, whose own lifecycle (ChannelSelectedMsg
+			// tiers / MessagesLoadedMsg) owns the spinner; clearing
+			// it here could kill a tier-3 cold-start spinner.
+			a.fetchingOlder = false
+			return nil, true
+		}
+		if m.AnchorTS != a.messagepane.OldestTS() {
+			// The buffer was replaced mid-flight (e.g. by a
+			// jump-to-message FetchAround); this block is anchored
+			// to the OLD buffer's oldest message and prepending it
+			// would produce an out-of-order/duplicated buffer.
+			debuglog.Cache("OlderMessagesLoadedMsg: channel=%s anchor=%s != oldest=%s (buffer replaced, dropping)",
+				m.ChannelID, m.AnchorTS, a.messagepane.OldestTS())
+			a.fetchingOlder = false
+			a.messagepane.SetLoading(false)
 			return nil, true
 		}
 		a.fetchingOlder = false
 		a.messagepane.SetLoading(false)
 		a.messagepane.PrependMessages(m.Messages)
+		return nil, true
+
+	case MessagesAroundLoadedMsg:
+		debuglog.Cache("MessagesAroundLoadedMsg: channel=%s active=%s count=%d err=%v",
+			m.ChannelID, a.activeChannelID, len(m.Messages), m.Err)
+		if m.ChannelID != a.activeChannelID {
+			return nil, true // stale: user navigated away
+		}
+		if m.Err != nil || len(m.Messages) == 0 {
+			return func() tea.Msg { return ToastMsg{Text: "Failed to load history around message"} }, true
+		}
+		// Confirm the target is actually in the fetched window BEFORE
+		// replacing the buffer: a failed jump must keep the user's
+		// current position (spec error table), not strand them in an
+		// unrelated window.
+		found := false
+		for _, msg := range m.Messages {
+			if msg.TS == m.TargetTS {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return func() tea.Msg { return ToastMsg{Text: "Message not found in loaded history"} }, true
+		}
+		a.messagepane.SetMessages(m.Messages)
+		a.messagepane.SelectByTS(m.TargetTS)
 		return nil, true
 
 	case ChannelMarkedRemoteMsg:
@@ -222,6 +270,9 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 	// Close thread panel when switching channels.
 	a.CloseThread()
 	a.clearSelections()
+	// Search state is per-channel: drop highlights, match list, and
+	// the status-line segment on every switch.
+	a.clearActiveSearch()
 	// Move focus to the messages pane so the user can immediately
 	// j/k through messages, react, open threads, etc. without first
 	// having to Tab/h-l out of the sidebar after picking a channel.

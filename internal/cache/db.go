@@ -5,11 +5,16 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gammons/slk/internal/debuglog"
 	_ "modernc.org/sqlite"
 )
 
 type DB struct {
 	conn *sql.DB
+	// ftsDisabled is set when the FTS5 migration fails (e.g. the
+	// sqlite driver was built without FTS5); search degrades to LIKE
+	// queries instead of failing startup.
+	ftsDisabled bool
 }
 
 // dsnPragmas are appended to every DSN passed to New(). They are
@@ -222,6 +227,14 @@ func (db *DB) migrate() error {
 	if err := db.addColumnIfMissing("users", "is_external",
 		"ALTER TABLE users ADD COLUMN is_external INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
+	}
+
+	// Full-text search index. FTS5 may be unavailable in unusual
+	// driver builds; search degrades to LIKE rather than failing
+	// startup.
+	if err := db.migrateSearch(); err != nil {
+		debuglog.Cache("migrateSearch failed, degrading to LIKE search: %v", err)
+		db.ftsDisabled = true
 	}
 
 	return nil

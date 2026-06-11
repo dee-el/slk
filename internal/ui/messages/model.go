@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -230,6 +231,10 @@ type Model struct {
 	avatarFn     AvatarFunc        // optional: returns half-block avatar for a userID
 	userNames    map[string]string // user ID -> display name for mention resolution
 	channelNames map[string]string // channel ID -> name for bare <#CID> resolution
+
+	// searchTerms are folded word-prefix terms of the active in-channel
+	// search; non-empty enables highlight rendering. nil = no search.
+	searchTerms []string
 
 	// Render cache -- invalidated when messages or width change.
 	// Each entry holds pre-bordered variants so selection movement does not
@@ -626,6 +631,20 @@ func channelGlyph(chType string) string {
 	default:
 		return "#"
 	}
+}
+
+// SetSearchTerms sets (or clears, with nil) the folded terms whose
+// word-prefix occurrences get highlighted in message text. Invalidates
+// the render cache.
+func (m *Model) SetSearchTerms(terms []string) {
+	// Redundant calls (same terms) must not thrash the render cache;
+	// clone so a caller mutating its slice can't alias our state.
+	if slices.Equal(terms, m.searchTerms) {
+		return
+	}
+	m.searchTerms = slices.Clone(terms)
+	m.InvalidateCache()
+	m.dirty()
 }
 
 func (m *Model) SetMessages(msgs []MessageItem) {
@@ -1878,7 +1897,17 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 		Customs:      m.emojiCtx.Customs,
 		EmojiFlushes: &flushes,
 	}
-	text := styles.MessageText.Render(WordWrap(RenderSlackMarkdownWith(MessageTextSource(msg), bodyOpts), contentWidth))
+	rendered := RenderSlackMarkdownWith(MessageTextSource(msg), bodyOpts)
+	if len(m.searchTerms) > 0 {
+		// SearchHighlightSGR's close sequence restores the theme bg/fg
+		// after the highlight's reset so plain body text doesn't bleed
+		// terminal-default colors. One derivation per renderMessagePlain
+		// call (i.e. per cache miss), not per line.
+		if hlStart, hlEnd, ok := SearchHighlightSGR(); ok {
+			rendered = HighlightSearchTerms(rendered, m.searchTerms, hlStart, hlEnd)
+		}
+	}
+	text := styles.MessageText.Render(WordWrap(rendered, contentWidth))
 	if stats != nil {
 		stats.bodyTotal += time.Since(bodyT0)
 	}

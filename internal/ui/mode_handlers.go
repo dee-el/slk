@@ -51,6 +51,7 @@ var modeHandlers = map[Mode]modeHandler{
 	ModeNormal:               handleNormalMode,
 	ModeInsert:               handleInsertMode,
 	ModeCommand:              handleCommandMode,
+	ModeSearch:               handleSearchMode,
 	ModeChannelFinder:        handleChannelFinderMode,
 	ModeNewMessage:           handleNewMessageMode,
 	ModeReactionPicker:       handleReactionPickerMode,
@@ -62,6 +63,27 @@ var modeHandlers = map[Mode]modeHandler{
 	ModeHelp:                 handleHelpMode,
 	ModeReactionsView:        handleReactionsViewMode,
 	ModeLinkPicker:           handleLinkPickerMode,
+	ModeWorkspaceSearch:      handleWorkspaceSearchMode,
+}
+
+// normalizeFinderKey maps a tea.KeyMsg to the plain-string form the
+// finder-style prompt widgets consume ("enter", "esc", "up", "down",
+// "backspace", or the key's String() for everything else). Shared by
+// the channel-finder, in-channel search, and workspace-search modes.
+func normalizeFinderKey(msg tea.KeyMsg) string {
+	switch msg.Key().Code {
+	case tea.KeyEnter:
+		return "enter"
+	case tea.KeyEscape:
+		return "esc"
+	case tea.KeyUp:
+		return "up"
+	case tea.KeyDown:
+		return "down"
+	case tea.KeyBackspace:
+		return "backspace"
+	}
+	return msg.String()
 }
 
 // dispatchModeKey looks up the handler for the App's current

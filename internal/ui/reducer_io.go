@@ -50,6 +50,7 @@ package ui
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -263,6 +264,14 @@ func reducePaste(a *App, m tea.PasteMsg) tea.Cmd {
 	// for us to read directly). Also test the bracketed text as a
 	// file path. If neither matches, fall through to forwarding
 	// the paste verbatim into the active compose's textarea.
+	if a.mode == ModeSearch {
+		// Paste into the `/` prompt: the prompt is single-line, so
+		// flatten any newlines to spaces and append.
+		txt := strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(m.Content)
+		a.searchInput += txt
+		a.statusbar.SetSearch("/" + a.searchInput)
+		return nil
+	}
 	if a.mode != ModeInsert {
 		return nil
 	}

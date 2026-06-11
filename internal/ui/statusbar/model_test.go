@@ -289,6 +289,24 @@ func TestSetHelpHint_BumpsVersionOnChange(t *testing.T) {
 	}
 }
 
+func TestModel_SetSearchElidesLongText(t *testing.T) {
+	m := New()
+
+	m.SetSearch("/abc")
+	if got := m.Search(); got != "/abc" {
+		t.Fatalf("short search segment mangled: %q", got)
+	}
+
+	m.SetSearch("/" + strings.Repeat("q", 100))
+	got := m.Search()
+	if n := len([]rune(got)); n > 40 {
+		t.Fatalf("search segment is %d runes, want <= 40", n)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("elided search segment missing ellipsis: %q", got)
+	}
+}
+
 // stripANSI removes ANSI escape sequences for substring assertions.
 func stripANSI(s string) string {
 	var b strings.Builder

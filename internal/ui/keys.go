@@ -13,6 +13,9 @@ type KeyMap struct {
 	InsertMode          key.Binding
 	CommandMode         key.Binding
 	SearchMode          key.Binding
+	SearchNext          key.Binding
+	SearchPrev          key.Binding
+	WorkspaceSearch     key.Binding
 	Tab                 key.Binding
 	ShiftTab            key.Binding
 	ToggleSidebar       key.Binding
@@ -62,6 +65,9 @@ func DefaultKeyMap() KeyMap {
 		InsertMode:          key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "insert mode")),
 		CommandMode:         key.NewBinding(key.WithKeys(":"), key.WithHelp(":", "command mode")),
 		SearchMode:          key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
+		SearchNext:          key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next match")),
+		SearchPrev:          key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "prev match")),
+		WorkspaceSearch:     key.NewBinding(key.WithKeys("ctrl+f"), key.WithHelp("ctrl+f", "search workspace")),
 		Tab:                 key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next panel")),
 		ShiftTab:            key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev panel")),
 		ToggleSidebar:       key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "toggle sidebar")),

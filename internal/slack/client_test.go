@@ -149,6 +149,14 @@ type mockSlackAPI struct {
 	uploadFileContextFn             func(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error)
 	getUsersInConversationContextFn func(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error)
 	openConversationContextFn       func(ctx context.Context, params *slack.OpenConversationParameters) (*slack.Channel, bool, bool, error)
+	searchMessagesFn                func(ctx context.Context, query string, params slack.SearchParameters) (*slack.SearchMessages, error)
+}
+
+func (m *mockSlackAPI) SearchMessagesContext(ctx context.Context, query string, params slack.SearchParameters) (*slack.SearchMessages, error) {
+	if m.searchMessagesFn != nil {
+		return m.searchMessagesFn(ctx, query, params)
+	}
+	return &slack.SearchMessages{}, nil
 }
 
 func (m *mockSlackAPI) GetConversations(params *slack.GetConversationsParameters) ([]slack.Channel, string, error) {
@@ -2254,5 +2262,219 @@ func TestOpenConversation_AlreadyOpenFlagPropagates(t *testing.T) {
 	}
 	if !alreadyOpen {
 		t.Error("expected alreadyOpen=true")
+	}
+}
+
+func TestSearchMessages_PassesQueryVerbatim(t *testing.T) {
+	var gotQuery string
+	var gotParams slack.SearchParameters
+	mock := &mockSlackAPI{
+		searchMessagesFn: func(ctx context.Context, query string, params slack.SearchParameters) (*slack.SearchMessages, error) {
+			gotQuery = query
+			gotParams = params
+			return &slack.SearchMessages{Total: 2}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	res, err := c.SearchMessages(context.Background(), "from:@grant in:#general deploy", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery != "from:@grant in:#general deploy" {
+		t.Errorf("query mangled: %q", gotQuery)
+	}
+	if gotParams.Count != 50 {
+		t.Errorf("count = %d, want 50", gotParams.Count)
+	}
+	if res.Total != 2 {
+		t.Errorf("total = %d", res.Total)
+	}
+}
+
+func TestSearchMessages_WrapsError(t *testing.T) {
+	sentinel := errors.New("ratelimited")
+	mock := &mockSlackAPI{
+		searchMessagesFn: func(ctx context.Context, query string, params slack.SearchParameters) (*slack.SearchMessages, error) {
+			return nil, sentinel
+		},
+	}
+	c := &Client{api: mock}
+	_, err := c.SearchMessages(context.Background(), "x", 50)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error chain broken: %v does not wrap sentinel", err)
+	}
+}
+
+func TestSearchMessages_NonPositiveCountKeepsDefault(t *testing.T) {
+	var gotParams slack.SearchParameters
+	mock := &mockSlackAPI{
+		searchMessagesFn: func(ctx context.Context, query string, params slack.SearchParameters) (*slack.SearchMessages, error) {
+			gotParams = params
+			return &slack.SearchMessages{}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	if _, err := c.SearchMessages(context.Background(), "x", 0); err != nil {
+		t.Fatal(err)
+	}
+	want := slack.NewSearchParameters().Count
+	if gotParams.Count != want {
+		t.Errorf("count = %d, want slack-go default %d", gotParams.Count, want)
+	}
+}
+
+func TestGetHistoryAround_FetchesBothDirections(t *testing.T) {
+	var calls []*slack.GetConversationHistoryParameters
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			calls = append(calls, params)
+			if params.Latest != "" {
+				// older-or-equal page, newest first
+				return &slack.GetConversationHistoryResponse{Messages: []slack.Message{
+					{Msg: slack.Msg{Timestamp: "1700000005.000000"}},
+					{Msg: slack.Msg{Timestamp: "1700000004.000000"}},
+				}}, nil
+			}
+			// newer page, newest first
+			return &slack.GetConversationHistoryResponse{Messages: []slack.Message{
+				{Msg: slack.Msg{Timestamp: "1700000007.000000"}},
+				{Msg: slack.Msg{Timestamp: "1700000006.000000"}},
+			}}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	got, err := c.GetHistoryAround(context.Background(), "C1", "1700000005.000000", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 history calls, got %d", len(calls))
+	}
+	older, newer := calls[0], calls[1]
+	if older.Latest != "1700000005.000000" || !older.Inclusive || older.Limit != 25 || older.ChannelID != "C1" {
+		t.Errorf("older call params: %+v", older)
+	}
+	if newer.Oldest != "1700000005.000000" || newer.Inclusive || newer.Limit != 25 {
+		t.Errorf("newer call params: %+v", newer)
+	}
+
+	// Combined newest-first: newer page then older page.
+	want := []string{"1700000007.000000", "1700000006.000000", "1700000005.000000", "1700000004.000000"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d messages, want %d", len(got), len(want))
+	}
+	for i, ts := range want {
+		if got[i].Timestamp != ts {
+			t.Errorf("got[%d].Timestamp = %s, want %s", i, got[i].Timestamp, ts)
+		}
+	}
+}
+
+func TestGetHistoryAround_DropsIncompleteNewerPage(t *testing.T) {
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			if params.Latest != "" {
+				return &slack.GetConversationHistoryResponse{Messages: []slack.Message{
+					{Msg: slack.Msg{Timestamp: "1700000005.000000"}},
+					{Msg: slack.Msg{Timestamp: "1700000004.000000"}},
+				}}, nil
+			}
+			// Oldest-anchored call: more than limit messages exist after
+			// ts, so this page holds the channel's most recent messages,
+			// NOT those adjacent to ts — including it would leave a gap.
+			return &slack.GetConversationHistoryResponse{
+				HasMore: true,
+				Messages: []slack.Message{
+					{Msg: slack.Msg{Timestamp: "1700000099.000000"}},
+					{Msg: slack.Msg{Timestamp: "1700000098.000000"}},
+				},
+			}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	got, err := c.GetHistoryAround(context.Background(), "C1", "1700000005.000000", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"1700000005.000000", "1700000004.000000"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d messages, want %d (newer page should be dropped)", len(got), len(want))
+	}
+	for i, ts := range want {
+		if got[i].Timestamp != ts {
+			t.Errorf("got[%d].Timestamp = %s, want %s", i, got[i].Timestamp, ts)
+		}
+	}
+}
+
+func TestGetHistoryAround_WrapsOlderError(t *testing.T) {
+	sentinel := errors.New("channel_not_found")
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			return nil, sentinel
+		},
+	}
+	c := &Client{api: mock}
+
+	_, err := c.GetHistoryAround(context.Background(), "C1", "1700000005.000000", 25)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error chain broken: %v does not wrap sentinel", err)
+	}
+}
+
+func TestGetHistoryAround_WrapsNewerError(t *testing.T) {
+	sentinel := errors.New("ratelimited")
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			if params.Latest != "" {
+				return &slack.GetConversationHistoryResponse{}, nil
+			}
+			return nil, sentinel
+		},
+	}
+	c := &Client{api: mock}
+
+	_, err := c.GetHistoryAround(context.Background(), "C1", "1700000005.000000", 25)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error chain broken: %v does not wrap sentinel", err)
+	}
+}
+
+func TestGetHistoryAround_HonorsCancelledContext(t *testing.T) {
+	var calls int
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			calls++
+			return &slack.GetConversationHistoryResponse{}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := c.GetHistoryAround(ctx, "C1", "1700000005.000000", 25)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error chain broken: %v does not wrap context.Canceled", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call before ctx check aborts, got %d", calls)
 	}
 }

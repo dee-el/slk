@@ -21,6 +21,7 @@ import (
 	emojiutil "github.com/gammons/slk/internal/emoji"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/messages"
+	"github.com/gammons/slk/internal/ui/searchresults"
 	"github.com/gammons/slk/internal/ui/sidebar"
 )
 
@@ -69,7 +70,46 @@ type (
 	}
 	OlderMessagesLoadedMsg struct {
 		ChannelID string
-		Messages  []messages.MessageItem
+		// AnchorTS is the OldestTS the fetch was keyed to (the
+		// buffer's oldest message at dispatch time). The reducer
+		// drops the result if the buffer's oldest no longer matches
+		// — that means the buffer was replaced mid-flight (e.g. by a
+		// jump-to-message FetchAround) and prepending would splice an
+		// unrelated older block onto the new window.
+		AnchorTS string
+		Messages []messages.MessageItem
+	}
+	// MessagesAroundLoadedMsg delivers a history window fetched around
+	// TargetTS (jump-to-message navigation: search matches, search
+	// results, permalinks whose target is outside the loaded buffer).
+	// The reducer replaces the pane buffer and selects TargetTS.
+	MessagesAroundLoadedMsg struct {
+		ChannelID string
+		TargetTS  string
+		Messages  []messages.MessageItem // ascending by TS, like MessagesLoadedMsg
+		Err       error
+	}
+	// ChannelSearchResultsMsg delivers in-channel FTS results for the `/`
+	// search. TSes are match timestamps newest-first; Terms are the folded
+	// query terms for highlighting. Empty TSes = no matches. Gen echoes
+	// App.searchGen at dispatch time (stamped UI-side in mode_search.go);
+	// the reducer drops results from a superseded generation.
+	ChannelSearchResultsMsg struct {
+		ChannelID string
+		Query     string
+		Terms     []string
+		TSes      []string
+		Gen       uint64
+		Err       error
+	}
+	// WorkspaceSearchResultsMsg delivers server-side search.messages
+	// results for the ctrl+f modal. Total is Slack's reported total match
+	// count (may exceed len(Items); v1 fetches the first page only).
+	WorkspaceSearchResultsMsg struct {
+		Query string
+		Items []searchresults.Item
+		Total int
+		Err   error
 	}
 	NewMessageMsg struct {
 		ChannelID string

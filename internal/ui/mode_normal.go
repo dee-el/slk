@@ -55,12 +55,47 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		return a.compose.Focus()
 
 	case key.Matches(msg, a.keys.Escape):
+		// An active `/` search absorbs the first Esc: clear it and
+		// stop, leaving thread panels / edits untouched. v1
+		// limitation: Esc during the in-flight window doesn't cancel
+		// a local channel search; acceptable because local FTS is
+		// ms-fast — workspace search cancels via modal close instead.
+		// The statusbar check covers the no-active-state case where
+		// only the "/foo  no matches" segment lingers.
+		if a.search != nil || a.statusbar.Search() != "" {
+			a.clearActiveSearch()
+			return nil
+		}
 		a.cancelEdit()
 		a.SetMode(ModeNormal)
 		a.compose.Blur()
 		if a.threadVisible {
 			a.CloseThread()
 		}
+
+	case key.Matches(msg, a.keys.SearchMode):
+		// Spec scopes `/` to the channel message pane in v1: no-op
+		// while the thread panel has focus.
+		if a.focusedPanel == PanelThread {
+			return nil
+		}
+		a.searchInput = ""
+		a.statusbar.SetSearch("/")
+		a.SetMode(ModeSearch)
+		return nil
+
+	// n/N match navigation: like `/`, scoped to the channel message
+	// pane in v1 — a no-op while the thread panel has focus.
+	case key.Matches(msg, a.keys.SearchNext) && a.search != nil && a.focusedPanel != PanelThread:
+		return a.searchStep(1)
+
+	case key.Matches(msg, a.keys.SearchPrev) && a.search != nil && a.focusedPanel != PanelThread:
+		return a.searchStep(-1)
+
+	case key.Matches(msg, a.keys.WorkspaceSearch):
+		a.searchResults.Open()
+		a.SetMode(ModeWorkspaceSearch)
+		return nil
 
 	case key.Matches(msg, a.keys.Tab):
 		a.FocusNext()

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -119,22 +120,24 @@ func TestOpenLink_ActiveChannel_SelectsMessage(t *testing.T) {
 	}
 }
 
-func TestOpenLink_ActiveChannel_TSNotLoaded_Toasts(t *testing.T) {
+func TestOpenLink_ActiveChannel_TSNotLoaded_FetchesAround(t *testing.T) {
 	app, _ := linkTestApp(t)
+	var fetchedChannel, fetchedTS string
+	setChannelFetchAroundForTest(app, func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
+		fetchedChannel, fetchedTS = string(channelID), string(ts)
+		return nil
+	})
 	app.activeChannelID = "C054JFCBN69"
 	app.messagepane.SetMessages([]messages.MessageItem{
 		{TS: "1779284734.000000", Text: "only newer"},
 	})
 	_, cmd := app.Update(OpenLinkMsg{URL: "https://myteam.slack.com/archives/C054JFCBN69/p1779284733270139"})
-	msgs := drainCmd(cmd)
-	foundToast := false
-	for _, m := range msgs {
-		if _, ok := m.(ToastMsg); ok {
-			foundToast = true
-		}
+	drainCmd(cmd)
+	if fetchedChannel != "C054JFCBN69" || fetchedTS != "1779284733.270139" {
+		t.Errorf("FetchAround not dispatched: ch=%q ts=%q", fetchedChannel, fetchedTS)
 	}
-	if !foundToast {
-		t.Errorf("expected ToastMsg, got %#v", msgs)
+	if app.pendingLinkNav != nil {
+		t.Errorf("pendingLinkNav not cleared: %+v", app.pendingLinkNav)
 	}
 }
 
@@ -183,7 +186,7 @@ func TestMessagesLoaded_CompletesPendingNav(t *testing.T) {
 	}
 }
 
-func TestOpenLink_OtherChannel_FreshCacheMissingTS_Toasts(t *testing.T) {
+func TestOpenLink_OtherChannel_FreshCacheMissingTS_FetchesAround(t *testing.T) {
 	app, _ := linkTestApp(t)
 	app.activeChannelID = "CELSEWHERE"
 	// Wire C054JFCBN69 as a tier-1 "fresh" channel (synced just now, so
@@ -198,23 +201,24 @@ func TestOpenLink_OtherChannel_FreshCacheMissingTS_Toasts(t *testing.T) {
 	app.setChannelSyncedAtReaderForTest(func(channelID ids.ChannelID) int64 {
 		return time.Now().Unix()
 	})
+	var fetchedChannel, fetchedTS string
+	setChannelFetchAroundForTest(app, func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
+		fetchedChannel, fetchedTS = string(channelID), string(ts)
+		return nil
+	})
 
 	_, cmd := app.Update(OpenLinkMsg{URL: "https://myteam.slack.com/archives/C054JFCBN69/p1779284733270139"})
 	// routeLink dispatched a ChannelSelectedMsg; feed it back through Update
-	// (as the real program loop would) and collect any resulting toast.
-	toastFound := false
+	// (as the real program loop would) so the tier-1 fresh-cache path
+	// completes the pending nav authoritatively.
 	for _, m := range drainCmd(cmd) {
 		if cs, ok := m.(ChannelSelectedMsg); ok {
 			_, c2 := app.Update(cs)
-			for _, mm := range drainCmd(c2) {
-				if _, ok := mm.(ToastMsg); ok {
-					toastFound = true
-				}
-			}
+			drainCmd(c2)
 		}
 	}
-	if !toastFound {
-		t.Errorf("expected a toast when permalink targets a ts missing from a fresh-cache channel")
+	if fetchedChannel != "C054JFCBN69" || fetchedTS != "1779284733.270139" {
+		t.Errorf("FetchAround not dispatched on tier-1 fresh path: ch=%q ts=%q", fetchedChannel, fetchedTS)
 	}
 	if app.pendingLinkNav != nil {
 		t.Errorf("pendingLinkNav leaked on tier-1 fresh path: %+v", app.pendingLinkNav)
@@ -228,5 +232,104 @@ func TestChannelSelected_DifferentChannel_DropsPendingNav(t *testing.T) {
 	drainCmd(cmd)
 	if app.pendingLinkNav != nil {
 		t.Errorf("pendingLinkNav should be dropped on unrelated navigation: %+v", app.pendingLinkNav)
+	}
+}
+
+func TestMessagesAroundLoaded_ReplacesBufferAndSelects(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C1"
+	app.Update(MessagesAroundLoadedMsg{
+		ChannelID: "C1",
+		TargetTS:  "1700000004.000000",
+		Messages: []messages.MessageItem{
+			{TS: "1700000003.000000", Text: "a"},
+			{TS: "1700000004.000000", Text: "b"},
+			{TS: "1700000005.000000", Text: "c"},
+		},
+	})
+	sel, ok := app.messagepane.SelectedMessage()
+	if !ok || sel.TS != "1700000004.000000" {
+		t.Fatalf("selected %v ok=%v, want target ts", sel.TS, ok)
+	}
+}
+
+// A failed jump must be non-destructive: if the fetched window doesn't
+// contain the target, the current buffer (and position) stays intact —
+// per the spec's error table — and the user just gets a toast.
+func TestMessagesAroundLoaded_TargetMissingKeepsBuffer(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C1"
+	app.messagepane.SetMessages([]messages.MessageItem{{TS: "1.0", Text: "keep"}})
+	_, cmd := app.Update(MessagesAroundLoadedMsg{
+		ChannelID: "C1",
+		TargetTS:  "9.0",
+		Messages:  []messages.MessageItem{{TS: "2.0", Text: "window"}},
+	})
+	sel, ok := app.messagepane.SelectedMessage()
+	if !ok || sel.Text != "keep" {
+		t.Fatalf("buffer replaced on failed jump: sel=%+v ok=%v", sel, ok)
+	}
+	var toast string
+	for _, m := range drainCmd(cmd) {
+		if tm, ok := m.(ToastMsg); ok {
+			toast = tm.Text
+		}
+	}
+	if toast != "Message not found in loaded history" {
+		t.Fatalf("toast = %q", toast)
+	}
+}
+
+func TestMessagesAroundLoaded_ErrorToasts(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C1"
+	_, cmd := app.Update(MessagesAroundLoadedMsg{ChannelID: "C1", TargetTS: "1", Err: errors.New("boom")})
+	msgs := drainCmd(cmd)
+	found := false
+	for _, m := range msgs {
+		if _, ok := m.(ToastMsg); ok {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected ToastMsg on fetch failure")
+	}
+}
+
+func TestMessagesAroundLoaded_StaleChannelDropped(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C2"
+	app.messagepane.SetMessages([]messages.MessageItem{{TS: "1.0", Text: "keep"}})
+	app.Update(MessagesAroundLoadedMsg{
+		ChannelID: "C1",
+		TargetTS:  "2.0",
+		Messages:  []messages.MessageItem{{TS: "2.0", Text: "stale"}},
+	})
+	sel, _ := app.messagepane.SelectedMessage()
+	if sel.Text != "keep" {
+		t.Fatal("stale MessagesAroundLoadedMsg replaced active channel buffer")
+	}
+}
+
+// Permalink upgrade: target outside the buffer now triggers FetchAround
+// instead of the "older than loaded history" toast.
+func TestCompletePendingNav_OffBufferTriggersFetchAround(t *testing.T) {
+	app, _ := linkTestApp(t)
+	var fetchedChannel, fetchedTS string
+	setChannelFetchAroundForTest(app, func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
+		fetchedChannel, fetchedTS = string(channelID), string(ts)
+		return nil
+	})
+	app.activeChannelID = "C054JFCBN69"
+	app.pendingLinkNav = &pendingLinkNav{channelID: "C054JFCBN69", messageTS: "1700000001.000000"}
+
+	_, cmd := app.Update(MessagesLoadedMsg{ChannelID: "C054JFCBN69", Messages: []messages.MessageItem{{TS: "1700000099.000000"}}})
+	drainCmd(cmd)
+
+	if fetchedChannel != "C054JFCBN69" || fetchedTS != "1700000001.000000" {
+		t.Fatalf("FetchAround not dispatched: ch=%q ts=%q", fetchedChannel, fetchedTS)
+	}
+	if app.pendingLinkNav != nil {
+		t.Fatal("pendingLinkNav not cleared")
 	}
 }

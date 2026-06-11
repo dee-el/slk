@@ -40,6 +40,7 @@ import (
 	"github.com/gammons/slk/internal/ui/presencemenu"
 	"github.com/gammons/slk/internal/ui/reactionpicker"
 	"github.com/gammons/slk/internal/ui/reactionsview"
+	"github.com/gammons/slk/internal/ui/searchresults"
 	"github.com/gammons/slk/internal/ui/sidebar"
 	"github.com/gammons/slk/internal/ui/statusbar"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -91,6 +92,7 @@ type App struct {
 	compose          compose.Model
 	statusbar        statusbar.Model
 	channelFinder    channelfinder.Model
+	searchResults    searchresults.Model
 	newMessagePicker newmessagepicker.Model
 	workspaceFinder  workspacefinder.Model
 	themeSwitcher    themeswitcher.Model
@@ -250,6 +252,16 @@ type App struct {
 	// reducer_links.go.
 	pendingLinkNav *pendingLinkNav
 
+	// search is the active in-channel search (nil = none).
+	// searchInput is the prompt buffer while in ModeSearch.
+	// searchGen is a monotonic generation counter: bumped on every
+	// dispatch and clear, echoed through ChannelSearchResultsMsg.Gen
+	// so stale in-flight results are dropped (see reducer_search.go).
+	search      *activeSearch
+	searchInput string
+	searchGen   uint64
+	searchSvc   SearchService
+
 	// browserOpener launches a URL in the OS browser. Defaults to
 	// openURLCmd; tests inject fakes.
 	browserOpener func(url string) tea.Cmd
@@ -384,6 +396,7 @@ func NewApp() *App {
 		compose:              compose.New(""),
 		statusbar:            statusbar.New(),
 		channelFinder:        channelfinder.New(),
+		searchResults:        searchresults.New(),
 		newMessagePicker:     newmessagepicker.New(),
 		workspaceFinder:      workspacefinder.New(),
 		themeSwitcher:        themeswitcher.New(),
@@ -417,6 +430,7 @@ func NewApp() *App {
 		threads:              noopThreadService,
 		messageSvc:           noopMessageService,
 		channels:             noopChannelService,
+		searchSvc:            noopSearchService,
 		lastChannelByTeam:    map[string]string{},
 		workspaceDomains:     map[string]string{},
 		browserOpener:        openURLCmd,
@@ -488,6 +502,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		reduceSend,
 		reduceChannels,
 		reduceLinks,
+		reduceSearch,
 		reduceWorkspace,
 		reduceNewMessagePicker,
 		reduceIO,
@@ -1705,6 +1720,29 @@ func (a *App) SetChannelService(s ChannelService) {
 		s = noopChannelService
 	}
 	a.channels = s
+}
+
+// SetSearchService injects the search backend (wired by cmd/slk).
+// Build one via NewSearchService from a SearchServiceFuncs bundle.
+func (a *App) SetSearchService(s SearchService) {
+	if s == nil {
+		s = noopSearchService
+	}
+	a.searchSvc = s
+}
+
+// clearActiveSearch removes in-channel search state: highlights,
+// status segment, prompt buffer. It also invalidates any in-flight
+// query by bumping the generation counter. Always runs unguarded:
+// the status segment can be set without active state (e.g. the
+// "no matches" text), and the Set* calls below are no-ops when
+// already clear.
+func (a *App) clearActiveSearch() {
+	a.search = nil
+	a.searchInput = ""
+	a.searchGen++
+	a.messagepane.SetSearchTerms(nil)
+	a.statusbar.SetSearch("")
 }
 
 // SetMessageService wires the App's MessageService collaborator

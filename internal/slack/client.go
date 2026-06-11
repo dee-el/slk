@@ -26,6 +26,7 @@ type SlackAPI interface {
 	GetConversationsForUser(params *slack.GetConversationsForUserParameters) ([]slack.Channel, string, error)
 	GetConversationHistory(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
 	GetConversationReplies(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
+	SearchMessagesContext(ctx context.Context, query string, params slack.SearchParameters) (*slack.SearchMessages, error)
 	GetUsersContext(ctx context.Context, options ...slack.GetUsersOption) ([]slack.User, error)
 	GetUsersInConversationContext(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error)
 	GetUserInfo(user string) (*slack.User, error)
@@ -560,6 +561,69 @@ func (c *Client) GetOlderHistory(ctx context.Context, channelID string, limit in
 	}
 
 	return resp.Messages, nil
+}
+
+// GetHistoryAround fetches a window of channel history centered on ts:
+// up to limit messages at-or-older than ts (inclusive), plus up to
+// limit messages newer than ts — but the newer half is included only
+// when it is complete. With only Oldest set, conversations.history
+// anchors at the channel head: it returns the most recent limit
+// messages in (ts, now], not the ones adjacent to ts. So when more
+// than limit messages were posted after the target (has_more=true),
+// the newer page is dropped entirely and the window ends at the
+// target; a contiguous window beats a gapped one. Returned
+// newest-first, matching Slack's conversations.history ordering. Used
+// by jump-to-message navigation (search results, permalinks) when the
+// target is outside the loaded buffer.
+func (c *Client) GetHistoryAround(ctx context.Context, channelID, ts string, limit int) ([]slack.Message, error) {
+	older, err := c.api.GetConversationHistory(&slack.GetConversationHistoryParameters{
+		ChannelID: channelID,
+		Latest:    ts,
+		Inclusive: true,
+		Limit:     limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("getting history around %s (older): %w", ts, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("getting history around %s: %w", ts, err)
+	}
+	newer, err := c.api.GetConversationHistory(&slack.GetConversationHistoryParameters{
+		ChannelID: channelID,
+		Oldest:    ts,
+		Inclusive: false,
+		Limit:     limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("getting history around %s (newer): %w", ts, err)
+	}
+	if newer.HasMore {
+		// The newer page is not adjacent to ts (see doc comment);
+		// including it would leave a silent hole after the target.
+		return older.Messages, nil
+	}
+	out := make([]slack.Message, 0, len(newer.Messages)+len(older.Messages))
+	out = append(out, newer.Messages...)
+	out = append(out, older.Messages...)
+	return out, nil
+}
+
+// SearchMessages runs a workspace-wide message search via Slack's
+// search.messages endpoint. The query string is passed through
+// verbatim, so Slack-side modifiers (from:, in:, before:, ...) work
+// unmodified. Results are relevance-sorted (Slack's default).
+func (c *Client) SearchMessages(ctx context.Context, query string, count int) (*slack.SearchMessages, error) {
+	params := slack.NewSearchParameters()
+	// Non-positive counts would be forwarded to Slack as count=0;
+	// keep slack-go's default (20) instead.
+	if count > 0 {
+		params.Count = count
+	}
+	res, err := c.api.SearchMessagesContext(ctx, query, params)
+	if err != nil {
+		return nil, fmt.Errorf("searching messages: %w", err)
+	}
+	return res, nil
 }
 
 // GetHistorySince fetches all messages newer than `oldest` in the

@@ -76,6 +76,12 @@ func (a *App) setOlderMessagesFetcherForTest(fn OlderMessagesFetchFunc) {
 	a.SetChannelService(NewChannelService(fns))
 }
 
+func setChannelFetchAroundForTest(a *App, fn func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg) {
+	fns := channelFuncsForTest(a)
+	fns.FetchAround = fn
+	a.SetChannelService(NewChannelService(fns))
+}
+
 func (a *App) setChannelLookupFuncForTest(fn ChannelLookupFunc) {
 	fns := channelFuncsForTest(a)
 	fns.Lookup = fn

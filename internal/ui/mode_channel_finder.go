@@ -20,21 +20,7 @@ import (
 
 func handleChannelFinderMode(a *App, msg tea.KeyMsg) tea.Cmd {
 	// Map tea.KeyMsg to string for the finder.
-	keyStr := msg.String()
-	switch msg.Key().Code {
-	case tea.KeyEnter:
-		keyStr = "enter"
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyUp:
-		keyStr = "up"
-	case tea.KeyDown:
-		keyStr = "down"
-	case tea.KeyBackspace:
-		keyStr = "backspace"
-	}
-
-	result := a.channelFinder.HandleKey(keyStr)
+	result := a.channelFinder.HandleKey(normalizeFinderKey(msg))
 	if result != nil {
 		a.channelFinder.Close()
 		a.SetMode(ModeNormal)
