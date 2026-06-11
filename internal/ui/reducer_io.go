@@ -4,38 +4,38 @@
 //
 // Owns the leftover arms that don't belong to any domain reducer:
 //
-//   tea.PasteMsg              - bracketed paste from the terminal.
-//                                Try clipboard image / file path
-//                                first, else forward to the
-//                                focused compose's textarea.
-//   UploadProgressMsg         - in-flight upload progress toast.
-//   UploadResultMsg           - upload finished: clear compose
-//                               attachments + Sent/Failed toast.
-//   ConnectionStateMsg        - WS connection state changed:
-//                               push to status bar.
-//   ToastMsg                  - generic toast (3s auto-clear).
-//   editEmptyToastMsg         - "Edit must have text" toast.
+//	tea.PasteMsg              - bracketed paste from the terminal.
+//	                             Try clipboard image / file path
+//	                             first, else forward to the
+//	                             focused compose's textarea.
+//	UploadProgressMsg         - in-flight upload progress toast.
+//	UploadResultMsg           - upload finished: clear compose
+//	                            attachments + Sent/Failed toast.
+//	ConnectionStateMsg        - WS connection state changed:
+//	                            push to status bar.
+//	ToastMsg                  - generic toast (3s auto-clear).
+//	editEmptyToastMsg         - "Edit must have text" toast.
 //
-//   imgrender.ImageReadyMsg   - lazy attachment-image fetch
-//                               landed: invalidate the affected
-//                               render caches.
-//   imgrender.ImageFailedMsg  - lazy attachment-image fetch
-//                               permanently failed: clear
-//                               in-flight bookkeeping.
-//   messages.AvatarReadyMsg   - lazy avatar fetch landed:
-//                               invalidate both pane caches.
+//	imgrender.ImageReadyMsg   - lazy attachment-image fetch
+//	                            landed: invalidate the affected
+//	                            render caches.
+//	imgrender.ImageFailedMsg  - lazy attachment-image fetch
+//	                            permanently failed: clear
+//	                            in-flight bookkeeping.
+//	messages.AvatarReadyMsg   - lazy avatar fetch landed:
+//	                            invalidate both pane caches.
 //
-//   statusbar.CopiedMsg               - "N chars copied"
-//   statusbar.CopiedClearMsg          - 2/3s expiry tick
-//   statusbar.PermalinkCopiedMsg      - "Copied permalink"
-//   statusbar.PermalinkCopyFailedMsg  - "Failed to copy link"
-//   statusbar.MarkedUnreadMsg         - "Marked unread"
-//   statusbar.MarkUnreadFailedMsg     - "Mark unread failed: ..."
-//   statusbar.EditFailedMsg           - "Edit failed: ..."
-//   statusbar.EditNotOwnMsg           - "Can only edit your own..."
-//   statusbar.DeleteFailedMsg         - "Delete failed: ..."
-//   statusbar.DeleteNotOwnMsg         - "Can only delete your own..."
-//   statusbar.SendFailedMsg           - "Send failed: ..."
+//	statusbar.CopiedMsg               - "N chars copied"
+//	statusbar.CopiedClearMsg          - 2/3s expiry tick
+//	statusbar.PermalinkCopiedMsg      - "Copied permalink"
+//	statusbar.PermalinkCopyFailedMsg  - "Failed to copy link"
+//	statusbar.MarkedUnreadMsg         - "Marked unread"
+//	statusbar.MarkUnreadFailedMsg     - "Mark unread failed: ..."
+//	statusbar.EditFailedMsg           - "Edit failed: ..."
+//	statusbar.EditNotOwnMsg           - "Can only edit your own..."
+//	statusbar.DeleteFailedMsg         - "Delete failed: ..."
+//	statusbar.DeleteNotOwnMsg         - "Can only delete your own..."
+//	statusbar.SendFailedMsg           - "Send failed: ..."
 //
 // Free reducer: these arms have no shared domain or invariant,
 // only the common "push to status bar / clear after N seconds"
@@ -95,6 +95,9 @@ var reduceIO reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 	case statusbar.CopiedMsg:
 		a.statusbar.ShowCopied(m.N)
 		return copiedClearAfter(2 * time.Second), true
+
+	case statusbar.CopyFailedMsg:
+		return toastWithClear(a, "Failed to copy selection", 2*time.Second), true
 
 	case statusbar.CopiedClearMsg:
 		_ = m

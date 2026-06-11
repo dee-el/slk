@@ -123,3 +123,11 @@ type clipboardReader func(format clipboard.Format) []byte
 // defaultClipboardReader is the real clipboard read function. It's
 // overridable per-App via SetClipboardReader for tests.
 var defaultClipboardReader clipboardReader = clipboard.Read
+
+// clipboardWriter abstracts clipboard.Write so tests can inject fake
+// clipboard writes. Production code uses the real clipboard.Write.
+type clipboardWriter func(format clipboard.Format, data []byte) <-chan struct{}
+
+// defaultClipboardWriter is the real clipboard write function. It's
+// overridable per-App via SetClipboardWriter for tests.
+var defaultClipboardWriter clipboardWriter = clipboard.Write

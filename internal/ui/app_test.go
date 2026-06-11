@@ -443,6 +443,10 @@ func TestHandleInsertMode_EmptyEnterStaysInInsert(t *testing.T) {
 
 func TestCopyPermalink_FromMessagesPane(t *testing.T) {
 	app := NewApp()
+	app.SetClipboardAvailable(true)
+	app.SetClipboardWriter(func(format clipboard.Format, data []byte) <-chan struct{} {
+		return nil
+	})
 	app.activeChannelID = "C123"
 	app.focusedPanel = PanelMessages
 	app.messagepane.SetMessages([]messages.MessageItem{
@@ -477,6 +481,10 @@ func TestCopyPermalink_FromMessagesPane(t *testing.T) {
 
 func TestCopyPermalink_FromThreadPane(t *testing.T) {
 	app := NewApp()
+	app.SetClipboardAvailable(true)
+	app.SetClipboardWriter(func(format clipboard.Format, data []byte) <-chan struct{} {
+		return nil
+	})
 	parent := messages.MessageItem{TS: "1700000000.000100"}
 	replies := []messages.MessageItem{
 		{TS: "1700000000.000100", UserName: "alice", Text: "parent"},
@@ -597,6 +605,10 @@ func drainForPermalinkCopied(t *testing.T, msg tea.Msg) bool {
 
 func TestCopyPermalink_ShiftYTriggersCopy(t *testing.T) {
 	app := NewApp()
+	app.SetClipboardAvailable(true)
+	app.SetClipboardWriter(func(format clipboard.Format, data []byte) <-chan struct{} {
+		return nil
+	})
 	app.activeChannelID = "C123"
 	app.focusedPanel = PanelMessages
 	app.messagepane.SetMessages([]messages.MessageItem{

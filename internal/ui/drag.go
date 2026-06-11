@@ -32,6 +32,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gammons/slk/internal/ui/statusbar"
+
+	"golang.design/x/clipboard"
 )
 
 // dragState captures an in-progress mouse drag. The originating panel
@@ -369,10 +371,15 @@ func (d *dragState) Handle(a *App, msg tea.Msg) (tea.Cmd, bool) {
 			return nil, true
 		}
 		n := len([]rune(text))
-		return tea.Batch(
-			tea.SetClipboard(text),
-			func() tea.Msg { return statusbar.CopiedMsg{N: n} },
-		), true
+
+		copyCmd := func() tea.Msg {
+			if !a.clipboardAvailable {
+				return statusbar.CopyFailedMsg{}
+			}
+			_ = a.clipboardWrite(clipboard.FmtText, []byte(text))
+			return statusbar.CopiedMsg{N: n}
+		}
+		return copyCmd, true
 	}
 	return nil, false
 }

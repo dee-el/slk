@@ -153,6 +153,11 @@ type App struct {
 	// clipboard contents. Tests inject fakes via SetClipboardReader.
 	clipboardRead clipboardReader
 
+	// clipboardWrite is the function used by copyPermalink and drag-copy
+	// to write OS clipboard contents. Tests inject fakes via
+	// SetClipboardWriter.
+	clipboardWrite clipboardWriter
+
 	// threads is the App's ThreadService collaborator (fetch / mark /
 	// reply / list-fetch + parent-channel last-read lookup for the
 	// unread boundary). See internal/ui/services.go. Defaulted to a
@@ -436,6 +441,7 @@ func NewApp() *App {
 		browserOpener:        openURLCmd,
 		navHistory:           newNavHistoryStore(),
 		clipboardRead:        defaultClipboardReader,
+		clipboardWrite:       defaultClipboardWriter,
 	}
 	app.editing = newEditController()
 	// typing tracker is referenced by typingOut so it must exist first;
@@ -907,9 +913,11 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 	messageSvc := a.messageSvc
 	cID := ids.ChannelID(channelID)
 	mTS := ids.MessageTS(ts)
+
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
 		url, err := messageSvc.Permalink(ctx, cID, mTS)
 		if err != nil {
 			log.Printf("copy permalink: %v", err)
@@ -921,10 +929,13 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 			// false success toast.
 			return nil
 		}
-		return tea.BatchMsg{
-			tea.SetClipboard(url),
-			func() tea.Msg { return statusbar.PermalinkCopiedMsg{} },
+
+		if !a.clipboardAvailable {
+			return statusbar.PermalinkCopyFailedMsg{}
 		}
+		_ = a.clipboardWrite(clipboard.FmtText, []byte(url))
+
+		return statusbar.PermalinkCopiedMsg{}
 	}
 }
 
@@ -1777,6 +1788,17 @@ func (a *App) SetClipboardReader(fn clipboardReader) {
 		return
 	}
 	a.clipboardRead = fn
+}
+
+// SetClipboardWriter replaces the clipboard write function. Used by
+// tests to inject a fake writer. Pass nil to restore the default
+// real clipboard writer.
+func (a *App) SetClipboardWriter(fn clipboardWriter) {
+	if fn == nil {
+		a.clipboardWrite = defaultClipboardWriter
+		return
+	}
+	a.clipboardWrite = fn
 }
 
 // SetThreadService wires the App's ThreadService collaborator

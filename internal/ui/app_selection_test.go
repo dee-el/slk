@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 
@@ -9,6 +8,7 @@ import (
 	"github.com/gammons/slk/internal/ids"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/statusbar"
+	"golang.design/x/clipboard"
 )
 
 func newTestAppWithMessages(t *testing.T) *App {
@@ -44,20 +44,14 @@ func drainBatch(cmd tea.Cmd) []tea.Msg {
 	}
 }
 
-// looksLikeSetClipboardMsg returns true when m is the unexported
-// setClipboardMsg type from bubbletea (a defined string type). It is
-// the only string-kind Msg that flows through App, so reflecting the
-// kind is sufficient to identify it.
-func looksLikeSetClipboardMsg(m tea.Msg) (string, bool) {
-	v := reflect.ValueOf(m)
-	if v.Kind() == reflect.String {
-		return v.String(), true
-	}
-	return "", false
-}
-
 func TestApp_DragInMessagesEmitsClipboardAndToast(t *testing.T) {
 	a := newTestAppWithMessages(t)
+	a.SetClipboardAvailable(true)
+	var gotData []byte
+	a.SetClipboardWriter(func(format clipboard.Format, data []byte) <-chan struct{} {
+		gotData = data
+		return nil
+	})
 	pressX := a.layout.sidebarEnd + 2
 	// Terminal Y = 4 → panelAt subtracts the 1-row panel border to give
 	// pane-local y=3, which is past the chrome (header + separator =
@@ -73,17 +67,8 @@ func TestApp_DragInMessagesEmitsClipboardAndToast(t *testing.T) {
 		t.Fatal("expected a command on release")
 	}
 	msgs := drainBatch(cmd)
-	var sawClipboard, sawCopiedToast bool
+	var sawCopiedToast bool
 	for _, m := range msgs {
-		if payload, ok := looksLikeSetClipboardMsg(m); ok {
-			if payload == "" {
-				t.Errorf("clipboard payload empty")
-			}
-			if strings.ContainsRune(payload, '▌') {
-				t.Errorf("clipboard contained border char")
-			}
-			sawClipboard = true
-		}
 		if v, ok := m.(statusbar.CopiedMsg); ok {
 			if v.N <= 0 {
 				t.Errorf("CopiedMsg.N = %d", v.N)
@@ -91,8 +76,11 @@ func TestApp_DragInMessagesEmitsClipboardAndToast(t *testing.T) {
 			sawCopiedToast = true
 		}
 	}
-	if !sawClipboard {
-		t.Errorf("expected setClipboardMsg in batched output (drained: %v)", msgs)
+	if len(gotData) == 0 {
+		t.Errorf("expected data written to clipboard")
+	}
+	if strings.ContainsRune(string(gotData), '▌') {
+		t.Errorf("clipboard contained border char: %q", string(gotData))
 	}
 	if !sawCopiedToast {
 		t.Errorf("expected statusbar.CopiedMsg in batched output (drained: %v)", msgs)
@@ -101,15 +89,24 @@ func TestApp_DragInMessagesEmitsClipboardAndToast(t *testing.T) {
 
 func TestApp_PlainClickDoesNotCopy(t *testing.T) {
 	a := newTestAppWithMessages(t)
+	a.SetClipboardAvailable(true)
+	var wrote bool
+	a.SetClipboardWriter(func(format clipboard.Format, data []byte) <-chan struct{} {
+		wrote = true
+		return nil
+	})
 	pressX := a.layout.sidebarEnd + 2
 	// Terminal Y past the chrome (panel border + 2-row chrome).
 	pressY := 4
 	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: pressY, Button: tea.MouseLeft})
 	_, cmd := a.Update(tea.MouseReleaseMsg{X: pressX, Y: pressY, Button: tea.MouseLeft})
 	for _, m := range drainBatch(cmd) {
-		if _, ok := looksLikeSetClipboardMsg(m); ok {
-			t.Fatal("plain click must not write to clipboard")
+		if _, ok := m.(statusbar.CopiedMsg); ok {
+			t.Fatal("plain click must not emit CopiedMsg")
 		}
+	}
+	if wrote {
+		t.Fatal("plain click must not write to clipboard")
 	}
 	if a.messagepane.HasSelection() {
 		t.Fatal("plain click must not leave a pinned selection")
@@ -417,6 +414,12 @@ func TestDrag_MotionCoalescing_DefersExtendSelectionAt(t *testing.T) {
 // position even if the flush tick hasn't fired yet.
 func TestDrag_MotionCoalescing_ReleaseFlushesPending(t *testing.T) {
 	a := newTestAppWithMessages(t)
+	a.SetClipboardAvailable(true)
+	var gotData []byte
+	a.SetClipboardWriter(func(format clipboard.Format, data []byte) <-chan struct{} {
+		gotData = data
+		return nil
+	})
 	pressX := a.layout.sidebarEnd + 2
 	pressY := 4
 	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: pressY, Button: tea.MouseLeft})
@@ -425,14 +428,19 @@ func TestDrag_MotionCoalescing_ReleaseFlushesPending(t *testing.T) {
 	// the 16 ms window" case.
 	_, cmd := a.Update(tea.MouseReleaseMsg{X: pressX + 10, Y: pressY + 1, Button: tea.MouseLeft})
 
-	var sawClipboard bool
-	for _, m := range drainBatch(cmd) {
-		if payload, ok := looksLikeSetClipboardMsg(m); ok && payload != "" {
-			sawClipboard = true
+	msgs := drainBatch(cmd)
+	if len(gotData) == 0 {
+		t.Errorf("Release must drain pending motion and write to clipboard; got data=%q", string(gotData))
+	}
+	found := false
+	for _, m := range msgs {
+		if _, ok := m.(statusbar.CopiedMsg); ok {
+			found = true
+			break
 		}
 	}
-	if !sawClipboard {
-		t.Errorf("Release must drain pending motion and emit clipboard cmd; got drained=%v", drainBatch(cmd))
+	if !found {
+		t.Errorf("Release must emit CopiedMsg; got %v", msgs)
 	}
 }
 

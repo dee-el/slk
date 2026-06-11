@@ -27,8 +27,8 @@ type Model struct {
 	unreadCount int
 	connState   ConnectionState
 	inThread    bool
-	toast       string    // "" == no toast; otherwise rendered verbatim in the right slot
-	presence    string    // "active", "away", or "" (unknown — segment hidden)
+	toast       string // "" == no toast; otherwise rendered verbatim in the right slot
+	presence    string // "active", "away", or "" (unknown — segment hidden)
 	dndEnabled  bool
 	dndEndTS    time.Time // zero if not in DND
 	syncing     bool      // true while a background cache-verify fetch is in flight
@@ -364,6 +364,11 @@ func formatDND(endTS time.Time) string {
 type CopiedMsg struct {
 	N int
 }
+
+// CopyFailedMsg is delivered when a mouse-selection copy operation fails
+// (e.g. because the system clipboard driver is unavailable). App handles
+// it by setting the toast to "Failed to copy selection" and scheduling a CopiedClearMsg.
+type CopyFailedMsg struct{}
 
 // CopiedClearMsg is the follow-up tick that clears the toast.
 type CopiedClearMsg struct{}
