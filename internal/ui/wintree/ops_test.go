@@ -167,6 +167,35 @@ func TestSplit_SameDirRefusalCountsAllSiblings(t *testing.T) {
 	}
 }
 
+func TestSplit_RefusesWhenNestedSiblingWouldShrinkBelowMin(t *testing.T) {
+	bounds := Rect{X: 0, Y: 0, W: 180, H: 48}
+	tr, a := New(Channel{})
+	b, err := tr.Split(a, SplitSideBySide, bounds) // [A | B]
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := tr.Split(b, SplitStacked, bounds) // [A | [B / C]]
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.Split(c, SplitSideBySide, bounds); err != nil { // [A | [B / [C|D]]]
+		t.Fatal(err)
+	}
+	// Adding a third top-level column would shrink C and D to W=30 < MinWidth.
+	if _, err := tr.Split(a, SplitSideBySide, bounds); !errors.Is(err, ErrNoRoom) {
+		t.Fatalf("err = %v, want ErrNoRoom (nested leaves would shrink below min)", err)
+	}
+	// Tree must be unchanged after the refusal.
+	if tr.Len() != 4 {
+		t.Fatalf("Len = %d, want 4 (refused split must roll back)", tr.Len())
+	}
+	for id, r := range tr.ComputeRects(bounds) {
+		if r.W < MinWidth || r.H < MinHeight {
+			t.Fatalf("window %v rect %+v below minimums after rollback", id, r)
+		}
+	}
+}
+
 func TestClose_CollapsesAndReturnsNeighbor(t *testing.T) {
 	tr, a := New(Channel{ID: "C1"})
 	b, _ := tr.Split(a, SplitSideBySide, testBounds)
@@ -185,6 +214,25 @@ func TestClose_CollapsesAndReturnsNeighbor(t *testing.T) {
 	}
 	if rects[b].H != testBounds.H {
 		t.Fatalf("b should re-expand to full height, got %+v", rects[b])
+	}
+}
+
+func TestClose_FirstChildFocusFallsToNewFirstSibling(t *testing.T) {
+	tr, a := New(Channel{})
+	b, _ := tr.Split(a, SplitSideBySide, testBounds)
+	next, err := tr.Close(a) // close FIRST child (idx==0 path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != b {
+		t.Fatalf("focus = %v, want %v", next, b)
+	}
+}
+
+func TestClose_UnknownIDNotFound(t *testing.T) {
+	tr, _ := New(Channel{})
+	if _, err := tr.Close(LeafID(999)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
 
@@ -207,6 +255,13 @@ func TestOnly_CollapsesToSingleWindow(t *testing.T) {
 	}
 	if ch, _ := tr.Channel(b); ch.ID != "C1" {
 		t.Fatalf("surviving window lost its channel: %+v", ch)
+	}
+}
+
+func TestCycle_SingleWindowReturnsSelf(t *testing.T) {
+	tr, a := New(Channel{})
+	if got := tr.Cycle(a, 1); got != a {
+		t.Fatalf("Cycle = %v, want %v", got, a)
 	}
 }
 

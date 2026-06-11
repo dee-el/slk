@@ -3,58 +3,33 @@ package wintree
 // Split divides window id in the given direction within bounds. The
 // new window clones the source's channel, is placed after (below /
 // right of) the source, and its id is returned. Returns ErrNoRoom
-// when the resulting windows would violate MinWidth/MinHeight at the
-// current bounds, ErrNotFound for an unknown id.
+// when ANY resulting window rect would violate MinWidth/MinHeight at
+// the current bounds (including leaves nested in shrunk sibling
+// subtrees), ErrNotFound for an unknown id. Refused splits leave the
+// tree unchanged and do not consume an id.
 func (t *Tree) Split(id LeafID, dir Dir, bounds Rect) (LeafID, error) {
 	leaf, parent := t.findLeaf(id)
 	if leaf == nil {
 		return 0, ErrNotFound
 	}
 
-	min := MinWidth
-	if dir == SplitStacked {
-		min = MinHeight
-	}
-
-	// Refusal check. Inserting a sibling into a same-direction parent
-	// re-divides the PARENT's extent among k+1 children; otherwise the
-	// leaf's own rect divides in two.
-	sameDirParent := parent != nil && parent.dir == dir
-	if sameDirParent {
-		pr, ok := t.nodeRect(parent, bounds)
-		if !ok {
-			return 0, ErrNotFound
-		}
-		extent := pr.W
-		if dir == SplitStacked {
-			extent = pr.H
-		}
-		if extent/(len(parent.children)+1) < min {
-			return 0, ErrNoRoom
-		}
-	} else {
-		lr, ok := t.nodeRect(leaf, bounds)
-		if !ok {
-			return 0, ErrNotFound
-		}
-		extent := lr.W
-		if dir == SplitStacked {
-			extent = lr.H
-		}
-		if extent/2 < min {
-			return 0, ErrNoRoom
-		}
-	}
-
 	nid := t.next
 	t.next++
 	newLeaf := &node{id: nid, ch: leaf.ch}
 
-	if sameDirParent {
+	// Perform the insertion, then validate the actual resulting rects;
+	// undo on violation. Checking real geometry (rather than predicting
+	// the division) catches nested same-axis leaves inside siblings
+	// that the insertion shrinks.
+	var undo func()
+	if parent != nil && parent.dir == dir {
 		idx := childIndex(parent, leaf)
 		parent.children = append(parent.children, nil)
 		copy(parent.children[idx+2:], parent.children[idx+1:])
 		parent.children[idx+1] = newLeaf
+		undo = func() {
+			parent.children = append(parent.children[:idx+1], parent.children[idx+2:]...)
+		}
 	} else {
 		// Replace the leaf in place with a split node so the parent's
 		// child pointer stays valid: the old window moves into child 0.
@@ -63,6 +38,20 @@ func (t *Tree) Split(id LeafID, dir Dir, bounds Rect) (LeafID, error) {
 		leaf.ch = Channel{}
 		leaf.dir = dir
 		leaf.children = []*node{old, newLeaf}
+		undo = func() {
+			leaf.id = old.id
+			leaf.ch = old.ch
+			leaf.dir = 0
+			leaf.children = nil
+		}
+	}
+
+	for _, r := range t.ComputeRects(bounds) {
+		if r.W < MinWidth || r.H < MinHeight {
+			undo()
+			t.next--
+			return 0, ErrNoRoom
+		}
 	}
 	return nid, nil
 }
