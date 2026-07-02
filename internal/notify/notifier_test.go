@@ -71,6 +71,30 @@ func TestShouldNotify_Mention_Disabled(t *testing.T) {
 	}
 }
 
+func TestShouldNotify_SpecialMentions(t *testing.T) {
+	ctx := NotifyContext{
+		CurrentUserID:   "U1",
+		ActiveChannelID: "C_OTHER",
+		IsActiveWS:      true,
+		OnMention:       true,
+	}
+	if !ShouldNotify(ctx, "C1", "U2", "hey <!here> check this", "channel") {
+		t.Error("should notify for @here mention")
+	}
+	if !ShouldNotify(ctx, "C1", "U2", "hey <!channel> check this", "channel") {
+		t.Error("should notify for @channel mention")
+	}
+	if !ShouldNotify(ctx, "C1", "U2", "hey <!everyone> check this", "channel") {
+		t.Error("should notify for @everyone mention")
+	}
+
+	ctxNoMention := ctx
+	ctxNoMention.OnMention = false
+	if ShouldNotify(ctxNoMention, "C1", "U2", "hey <!here> check this", "channel") {
+		t.Error("should not notify for @here when OnMention is false")
+	}
+}
+
 func TestShouldNotify_Keyword(t *testing.T) {
 	ctx := NotifyContext{
 		CurrentUserID:   "U1",

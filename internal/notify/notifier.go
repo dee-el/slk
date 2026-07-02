@@ -61,7 +61,10 @@ func ShouldNotify(ctx NotifyContext, channelID, userID, text, channelType string
 	}
 
 	// Check mention trigger
-	if ctx.OnMention && strings.Contains(text, "<@"+ctx.CurrentUserID+">") {
+	if ctx.OnMention && (strings.Contains(text, "<@"+ctx.CurrentUserID+">") ||
+		strings.Contains(text, "<!here>") ||
+		strings.Contains(text, "<!channel>") ||
+		strings.Contains(text, "<!everyone>")) {
 		return true
 	}
 
