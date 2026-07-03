@@ -25,7 +25,7 @@
 | `Ctrl+b` | Any | Toggle sidebar |
 | `Ctrl+]` | Any | Toggle thread panel |
 | `Ctrl+t` / `Ctrl+p` | Any | Fuzzy channel finder |
-| `Ctrl+w` | Any | Workspace picker |
+| `:ws` | Normal | Workspace picker |
 | `1`–`9` | Normal | Jump to workspace N |
 | `r` | Normal (message) | Open reaction picker |
 | `R` | Normal (message) | Quick-toggle existing reactions |

@@ -93,53 +93,61 @@ var reduceChannels reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		}
 		debuglog.Cache("MessagesLoadedMsg: channel=%s active=%s kind=%s count=%d",
 			m.ChannelID, a.activeChannelID, kind, len(m.Messages))
-		if m.ChannelID != a.activeChannelID {
-			return nil, true
+		// Fan out to every window viewing the channel, focused or
+		// not (Phase 3).
+		models := a.modelsForChannel(m.ChannelID)
+		if len(models) == 0 {
+			return nil, true // no window views this channel — stale fetch
 		}
-		a.statusbar.SetSyncing(false)
-		a.messagepane.SetLoading(false)
-		a.messagepane.SetLastReadTS(m.LastReadTS)
-		// nil Messages from the fetcher signals network FAILURE,
-		// not an empty channel (empty channels return
-		// []messages.MessageItem{}). On failure, preserve whatever
-		// the cache already rendered so a transient blip doesn't
-		// blank a working view. The Slack-side fetcher logs the
-		// error before returning nil.
-		if m.Messages != nil {
-			a.messagepane.SetMessages(m.Messages)
+		if m.ChannelID == a.activeChannelID {
+			a.statusbar.SetSyncing(false)
+		}
+		for _, mm := range models {
+			mm.SetLoading(false)
+			mm.SetLastReadTS(m.LastReadTS)
+			// nil Messages from the fetcher signals network FAILURE,
+			// not an empty channel (empty channels return
+			// []messages.MessageItem{}). On failure, preserve whatever
+			// the cache already rendered so a transient blip doesn't
+			// blank a working view. The Slack-side fetcher logs the
+			// error before returning nil. cloneMessageItems gives each
+			// window its own copy — two same-channel windows must not
+			// alias one slice (in-place model writes would cross-leak).
+			if m.Messages != nil {
+				mm.SetMessages(cloneMessageItems(m.Messages))
+			}
 		}
 		// Authoritative permalink completion: this is the freshest
-		// data we'll get for this channel.
-		return a.completePendingLinkNav(m.ChannelID, true), true
+		// data we'll get for this channel. Focused-window semantics
+		// (completePendingLinkNav selects in a.messagepane), so keep
+		// the legacy active-channel gate.
+		if m.ChannelID == a.activeChannelID {
+			return a.completePendingLinkNav(m.ChannelID, true), true
+		}
+		return nil, true
 
 	case OlderMessagesLoadedMsg:
 		debuglog.Cache("OlderMessagesLoadedMsg: channel=%s active=%s anchor=%s count=%d",
 			m.ChannelID, a.activeChannelID, m.AnchorTS, len(m.Messages))
-		if m.ChannelID != a.activeChannelID {
-			// Stale channel: still reset the in-flight flag, or
-			// scroll-backfill stays permanently disabled after
-			// navigating away mid-fetch. Do NOT touch the pane's
-			// loading state — the pane now belongs to the new
-			// channel, whose own lifecycle (ChannelSelectedMsg
-			// tiers / MessagesLoadedMsg) owns the spinner; clearing
-			// it here could kill a tier-3 cold-start spinner.
-			a.fetchingOlder = false
-			return nil, true
+		// Always clear the per-channel in-flight flag — even when no
+		// window views the channel anymore — or scroll-backfill stays
+		// permanently disabled after navigating away mid-fetch.
+		delete(a.fetchingOlder, m.ChannelID)
+		for _, mm := range a.modelsForChannel(m.ChannelID) {
+			mm.SetLoading(false)
+			if m.AnchorTS != mm.OldestTS() {
+				// This window's buffer was replaced mid-flight (e.g. by
+				// a jump-to-message FetchAround): the block is anchored
+				// to the OLD buffer's oldest message and prepending it
+				// would produce an out-of-order/duplicated buffer. Skip
+				// just this window; siblings with the original buffer
+				// still want the block.
+				debuglog.Cache("OlderMessagesLoadedMsg: channel=%s anchor=%s != oldest=%s (buffer replaced, dropping for window)",
+					m.ChannelID, m.AnchorTS, mm.OldestTS())
+				continue
+			}
+			mm.PrependMessages(cloneMessageItems(m.Messages))
 		}
-		if m.AnchorTS != a.messagepane.OldestTS() {
-			// The buffer was replaced mid-flight (e.g. by a
-			// jump-to-message FetchAround); this block is anchored
-			// to the OLD buffer's oldest message and prepending it
-			// would produce an out-of-order/duplicated buffer.
-			debuglog.Cache("OlderMessagesLoadedMsg: channel=%s anchor=%s != oldest=%s (buffer replaced, dropping)",
-				m.ChannelID, m.AnchorTS, a.messagepane.OldestTS())
-			a.fetchingOlder = false
-			a.messagepane.SetLoading(false)
-			return nil, true
-		}
-		a.fetchingOlder = false
-		a.messagepane.SetLoading(false)
-		a.messagepane.PrependMessages(m.Messages)
 		return nil, true
 
 	case MessagesAroundLoadedMsg:
@@ -233,6 +241,45 @@ var reduceChannels reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// retargetActiveChannel points the App's active-channel context
+// (activeChannelID, typing throttle, compose targets, statusbar) at
+// the given channel and fires the async membership fetch. Factored
+// out of reduceChannelSelected so window-focus changes — which swap
+// per-window models without re-running channel selection (Phase 3)
+// — can reuse it. Selection-only semantics (nav-history push,
+// RecordVisit, thread close, tiered cache load, mark-read) stay in
+// the reducer.
+func (a *App) retargetActiveChannel(id, name, chType string) {
+	a.activeChannelID = id
+	a.typingOut.ResetThrottle() // reset typing throttle for new channel
+	a.compose.SetChannel(name)
+	a.compose.SetActiveChannel(id)
+	a.threadCompose.SetActiveChannel(id)
+	// Fire the membership fetcher on a fresh goroutine so it can't
+	// block the Update loop. Fire-and-forget -- results arrive
+	// later via ChannelMembershipMsg. main.go's MembershipFetch
+	// closure ultimately calls Membership.EnsureFresh which invokes
+	// bubbletea Program.Send via pushSnapshot, and bubbletea v2's
+	// program channel is unbuffered: a Send from inside Update
+	// would deadlock waiting for the same goroutine to receive.
+	// See manager.go's EnsureFresh docs and the deadlock-regression
+	// test in app_test.go.
+	{
+		channels := a.channels
+		channelID := ids.ChannelID(id)
+		go channels.MembershipFetch(channelID)
+	}
+	a.statusbar.SetChannel(name)
+	a.statusbar.SetChannelType(chType)
+	// Clear any syncing indicator stranded by an in-flight tier-2
+	// verify fetch: the SetSyncing(false) in the MessagesLoadedMsg arm
+	// is gated on the then-active channel, so a focus change away from
+	// the verifying channel would otherwise leave the glyph stuck.
+	// Safe for the selection path too — all three tiers set syncing
+	// explicitly right after this retarget runs.
+	a.statusbar.SetSyncing(false)
+}
+
 // reduceChannelSelected handles ChannelSelectedMsg. Extracted from
 // the reduceChannels dispatch switch because the arm is ~120 lines
 // with three tiered cache-freshness branches.
@@ -277,8 +324,6 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 	// j/k through messages, react, open threads, etc. without first
 	// having to Tab/h-l out of the sidebar after picking a channel.
 	a.focusedPanel = PanelMessages
-	a.activeChannelID = m.ID
-	a.typingOut.ResetThrottle() // reset typing throttle for new channel
 	// Update local finder ordering immediately so the next Ctrl+T
 	// sees this channel at the top of the recents.
 	now := time.Now().Unix()
@@ -303,25 +348,10 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 	a.compose.CloseMention()
 	a.threadCompose.CloseMention()
 
-	a.compose.SetChannel(m.Name)
-	a.compose.SetActiveChannel(m.ID)
-	a.threadCompose.SetActiveChannel(m.ID)
-	// Fire the membership fetcher on a fresh goroutine so it can't
-	// block the Update loop. Fire-and-forget -- results arrive
-	// later via ChannelMembershipMsg. main.go's MembershipFetch
-	// closure ultimately calls Membership.EnsureFresh which invokes
-	// bubbletea Program.Send via pushSnapshot, and bubbletea v2's
-	// program channel is unbuffered: a Send from inside Update
-	// would deadlock waiting for the same goroutine to receive.
-	// See manager.go's EnsureFresh docs and the deadlock-regression
-	// test in app_test.go.
-	{
-		channels := a.channels
-		channelID := ids.ChannelID(m.ID)
-		go channels.MembershipFetch(channelID)
-	}
-	a.statusbar.SetChannel(m.Name)
-	a.statusbar.SetChannelType(m.Type)
+	a.retargetActiveChannel(m.ID, m.Name, m.Type)
+	// Record the applied selection on the focused window so window
+	// focus changes can retarget to it (see internal/ui/windows.go).
+	a.setFocusedWindowChannel(m.ID, m.Name, m.Type)
 
 	cached := a.channels.ReadCache(ids.ChannelID(m.ID))
 	syncedAt := a.channels.SyncedAt(ids.ChannelID(m.ID))

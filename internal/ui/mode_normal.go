@@ -3,8 +3,8 @@
 // Normal-mode key handler (Phase 5k).
 //
 // The bulk of slk's keybinding surface lives here:
-//   - mode entry: i (insert), Ctrl-T (channel finder), Ctrl-W
-//     (workspace finder), Ctrl-T (theme switcher), ? (help),
+//   - mode entry: i (insert), Ctrl-T (channel finder), : (command
+//     prompt), Ctrl-Y (theme switcher), ? (help),
 //     S (presence menu), R (reaction picker)
 //   - navigation: j/k (selection), Ctrl-D/U (half-page), C-f/b
 //     (page), G (bottom), Tab/h/l (focus next/prev), Ctrl-o/i
@@ -14,6 +14,9 @@
 //     M (mark unread), O (open image preview)
 //   - reaction nav sub-state: r enters; arrows + Enter select
 //     (delegated to handleReactionNav / handleThreadReactionNav)
+//   - window commands: Ctrl-W prefix arms a pending sub-state; the
+//     next key is a window chord (s/v split, h/j/k/l focus, w cycle,
+//     q/c close, o only — delegated to handleWindowChord)
 //   - workspace switch: 1-9 number keys (handled in default arm)
 //   - quit confirm: q (close thread if visible, else no-op),
 //     Q (quit confirm)
@@ -32,6 +35,14 @@ import (
 )
 
 func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
+	// ctrl+w pending sub-state: the next key is a window command
+	// (intercepted FIRST, like the reaction-nav sub-states below).
+	if a.pendingWinCmd {
+		a.pendingWinCmd = false
+		a.statusbar.SetHelpHint(a.defaultHelpHint())
+		return a.handleWindowChord(msg)
+	}
+
 	// Reaction-nav sub-state (intercept before normal keys).
 	if a.focusedPanel == PanelMessages && a.messagepane.ReactionNavActive() {
 		return a.handleReactionNav(msg)
@@ -54,6 +65,9 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		a.focusedPanel = PanelMessages
 		return a.compose.Focus()
 
+	case key.Matches(msg, a.keys.CommandMode):
+		a.enterCommandMode()
+
 	case key.Matches(msg, a.keys.Escape):
 		// An active `/` search absorbs the first Esc: clear it and
 		// stop, leaving thread panels / edits untouched. v1
@@ -72,6 +86,11 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		if a.threadVisible {
 			a.CloseThread()
 		}
+
+	case key.Matches(msg, a.keys.WindowPrefix):
+		a.pendingWinCmd = true
+		a.statusbar.SetHelpHint("ctrl+w …")
+		return nil
 
 	case key.Matches(msg, a.keys.SearchMode):
 		// Spec scopes `/` to the channel message pane in v1: no-op
@@ -190,10 +209,6 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		a.help.SetEntries(help.FromKeyMap(a.keys))
 		a.help.Open()
 		a.SetMode(ModeHelp)
-
-	case key.Matches(msg, a.keys.WorkspaceFinder):
-		a.workspaceFinder.Open()
-		a.SetMode(ModeWorkspaceFinder)
 
 	case key.Matches(msg, a.keys.ThemeSwitcher):
 		// Per-workspace scope. Header text shows the current

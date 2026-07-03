@@ -50,7 +50,7 @@ untouched.
 
 You can add as many workspaces as you like by running `slk --add-workspace`
 again. They all stay connected in parallel for live unread badges. Use
-`Ctrl+w` for the picker, or `1`–`9` to jump directly. Configure rail order
+`:ws` for the picker, or `1`–`9` to jump directly. Configure rail order
 and per-workspace settings in [[Configuration]].
 
 ## Token expiry

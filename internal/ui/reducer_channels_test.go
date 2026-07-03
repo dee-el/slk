@@ -19,7 +19,7 @@ func TestOlderMessagesLoaded_StaleAnchorDropped(t *testing.T) {
 		{TS: "1700000010.000000", Text: "old-buffer oldest"},
 		{TS: "1700000011.000000", Text: "old-buffer newer"},
 	})
-	app.fetchingOlder = true
+	app.fetchingOlder["C1"] = true
 	app.messagepane.SetLoading(true)
 
 	// Jump-to-message replaces the buffer mid-flight.
@@ -45,7 +45,7 @@ func TestOlderMessagesLoaded_StaleAnchorDropped(t *testing.T) {
 		t.Errorf("stale-anchor prepend was applied: OldestTS = %q, want %q",
 			got, "1700000049.000000")
 	}
-	if app.fetchingOlder {
+	if app.fetchingOlder["C1"] {
 		t.Error("fetchingOlder not reset after stale-anchor drop")
 	}
 	if app.messagepane.IsLoading() {
@@ -60,7 +60,7 @@ func TestOlderMessagesLoaded_MatchingAnchorPrepends(t *testing.T) {
 	app.messagepane.SetMessages([]messages.MessageItem{
 		{TS: "1700000010.000000", Text: "oldest"},
 	})
-	app.fetchingOlder = true
+	app.fetchingOlder["C1"] = true
 
 	app.Update(OlderMessagesLoadedMsg{
 		ChannelID: "C1",
@@ -74,7 +74,7 @@ func TestOlderMessagesLoaded_MatchingAnchorPrepends(t *testing.T) {
 		t.Errorf("prepend not applied: OldestTS = %q, want %q",
 			got, "1700000001.000000")
 	}
-	if app.fetchingOlder {
+	if app.fetchingOlder["C1"] {
 		t.Error("fetchingOlder not reset after successful prepend")
 	}
 }
@@ -85,7 +85,7 @@ func TestOlderMessagesLoaded_MatchingAnchorPrepends(t *testing.T) {
 func TestOlderMessagesLoaded_StaleChannelResetsFetchingOlder(t *testing.T) {
 	app := NewApp()
 	app.activeChannelID = "C2"
-	app.fetchingOlder = true
+	app.fetchingOlder["C1"] = true
 
 	app.Update(OlderMessagesLoadedMsg{
 		ChannelID: "C1",
@@ -95,7 +95,7 @@ func TestOlderMessagesLoaded_StaleChannelResetsFetchingOlder(t *testing.T) {
 		},
 	})
 
-	if app.fetchingOlder {
+	if app.fetchingOlder["C1"] {
 		t.Error("fetchingOlder not reset on stale-channel drop")
 	}
 }

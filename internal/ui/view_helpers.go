@@ -175,6 +175,40 @@ func exactSize(s string, w, h int) string {
 // new unpadded source is introduced, that test fails (a short line yields
 // a row narrower than fullWidth).
 func borderedTopPane(content string, innerWidth, fullWidth, rows int, focused bool, bg color.Color) string {
+	return borderedPaneCore(content, innerWidth, fullWidth, rows, focused, bg, false)
+}
+
+// borderedPane is borderedTopPane's fully-enclosed sibling: top edge
+// + left/right verticals + BOTTOM edge, assembled by concatenation
+// for content whose every line is already EXACTLY innerWidth display
+// cells. It is the zero-measurement equivalent of
+//
+//	bs.Width(innerWidth+2).Render(content)
+//
+// (all four borders enabled) — which is exactly the form lipgloss v2
+// needs: Style.Width is BORDER-INCLUSIVE, so passing innerWidth gives
+// the content an (innerWidth-2)-cell budget and re-wraps every line
+// touching its last 2 cells (the unfocused-split-pane garbling bug).
+// Like borderedTopPane, this form also never lets lipgloss re-measure
+// the model's width-padded lines (terminal-probed emoji widths can
+// disagree with x/ansi measurement).
+//
+// Output is exactly fullWidth x rows cells: rows-2 content rows
+// between the two edge rows, blank-padded or silently clamped to fit
+// (mirroring exactSize's MaxHeight behavior).
+//
+// INVARIANT: every line of content MUST be exactly innerWidth display
+// cells (same caller contract as borderedTopPane; gated by
+// TestBorderedPane_MatchesLipgloss).
+func borderedPane(content string, innerWidth, fullWidth, rows int, focused bool, bg color.Color) string {
+	return borderedPaneCore(content, innerWidth, fullWidth, rows, focused, bg, true)
+}
+
+// borderedPaneCore assembles the bordered pane shared by
+// borderedTopPane (bottomEdge=false: the messages panel renders its
+// own bottom region) and borderedPane (bottomEdge=true: fully
+// enclosed unfocused window panes).
+func borderedPaneCore(content string, innerWidth, fullWidth, rows int, focused bool, bg color.Color, bottomEdge bool) string {
 	bs := styles.UnfocusedBorder
 	if focused {
 		bs = styles.FocusedBorder
@@ -203,6 +237,11 @@ func borderedTopPane(content string, innerWidth, fullWidth, rows int, focused bo
 		}
 		if r == 0 {
 			b.WriteString(topEdge)
+			b.WriteString(gutter)
+			continue
+		}
+		if bottomEdge && r == rows-1 {
+			b.WriteString(edge.Render(bd.BottomLeft + strings.Repeat(bd.Bottom, innerWidth) + bd.BottomRight))
 			b.WriteString(gutter)
 			continue
 		}

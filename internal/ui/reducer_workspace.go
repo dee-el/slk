@@ -108,7 +108,9 @@ var reduceWorkspace reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		if m.TeamID != a.activeTeamID {
 			return nil, true
 		}
-		a.messagepane.PatchUserName(m.UserID, m.DisplayName)
+		for _, mp := range a.allWinModels() {
+			mp.PatchUserName(m.UserID, m.DisplayName)
+		}
 		a.threadPanel.PatchUserName(m.UserID, m.DisplayName)
 		// IsBot affects DM channel-type classification, but that's
 		// orchestrated by DMNameResolvedMsg; this handler is only
@@ -176,7 +178,7 @@ func reduceWorkspaceReady(a *App, m WorkspaceReadyMsg) tea.Cmd {
 		// manually switches workspaces.
 		if m.Theme != "" {
 			styles.Apply(m.Theme, a.themeOverrides)
-			a.messagepane.InvalidateCache()
+			a.invalidateAllWinModelCaches()
 			a.threadPanel.InvalidateCache()
 			a.sidebar.InvalidateCache()
 			a.compose.RefreshStyles()
@@ -266,12 +268,17 @@ func reduceWorkspaceSwitched(a *App, m WorkspaceSwitchedMsg) tea.Cmd {
 	a.lastOpenedThreadTS = ""
 	a.CloseThread()
 	a.clearSelections()
+	// The window tree + per-window models are per-workspace state:
+	// collapse to a single empty window so no leaf carries a
+	// cross-workspace channel. The queued ChannelSelectedMsg for
+	// this workspace re-populates it.
+	a.resetWindowTree()
 	a.compose.Reset()
 	a.statusbar.SetSyncing(false) // defensive: don't carry stale sync state across workspaces
-	// Pane is left as-is -- the queued ChannelSelectedMsg below
-	// will paint over it via the three-tier dispatch (Task 10).
-	// For empty workspaces (no Channels) the pane is cleared
-	// explicitly in the else branch below.
+	// resetWindowTree replaced the pane with a fresh empty model;
+	// the queued ChannelSelectedMsg below paints it via the
+	// three-tier dispatch. For empty workspaces (no Channels) the
+	// pane's empty state is confirmed in the else branch below.
 	a.SetMode(ModeNormal)
 	a.compose.Blur()
 	a.sidebar.SetSectionsProvider(m.SectionsProvider)
@@ -293,7 +300,7 @@ func reduceWorkspaceSwitched(a *App, m WorkspaceSwitchedMsg) tea.Cmd {
 	// below take effect on the next render.
 	if m.Theme != "" {
 		styles.Apply(m.Theme, a.themeOverrides)
-		a.messagepane.InvalidateCache()
+		a.invalidateAllWinModelCaches()
 		a.threadPanel.InvalidateCache()
 		a.sidebar.InvalidateCache()
 		a.compose.RefreshStyles()

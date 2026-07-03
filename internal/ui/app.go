@@ -47,6 +47,7 @@ import (
 	"github.com/gammons/slk/internal/ui/themeswitcher"
 	"github.com/gammons/slk/internal/ui/thread"
 	"github.com/gammons/slk/internal/ui/threadsview"
+	"github.com/gammons/slk/internal/ui/wintree"
 	"github.com/gammons/slk/internal/ui/workspace"
 	"github.com/gammons/slk/internal/ui/workspacefinder"
 	"golang.design/x/clipboard"
@@ -88,7 +89,7 @@ type App struct {
 	// Sub-models
 	workspaceRail    workspace.Model
 	sidebar          sidebar.Model
-	messagepane      messages.Model
+	messagepane      *messages.Model
 	compose          compose.Model
 	statusbar        statusbar.Model
 	channelFinder    channelfinder.Model
@@ -111,6 +112,29 @@ type App struct {
 	width          int
 	height         int
 	keys           KeyMap
+
+	// cmdline accumulates the text typed at the vi-style ':' prompt
+	// while in ModeCommand. Owned by mode_command.go; always "" in
+	// every other mode.
+	cmdline string
+
+	// wins is the vim-style window tree subdividing the messages
+	// region; focusedWin is the active window within it. Phase 2:
+	// the focused window renders the single live messages model,
+	// unfocused windows render placeholders.
+	wins       *wintree.Tree
+	focusedWin wintree.LeafID
+
+	// winModels holds one live messages.Model per window (Phase 3).
+	// INVARIANT: messagepane == winModels[focusedWin] always; keys
+	// exactly match wins.Leaves(). Maintained by newWindowModel /
+	// focusWindow / closeWindow / onlyWindow / resetWindowTree.
+	winModels map[wintree.LeafID]*messages.Model
+
+	// pendingWinCmd is true between a ctrl+w press and its chord key
+	// (vim window-command prefix). Esc or an unmapped key cancels;
+	// any mode change disarms (see SetMode).
+	pendingWinCmd bool
 
 	// layout owns the per-frame layout geometry (horizontal bands for
 	// mouse hit-testing + per-pane content heights for pageSize). See
@@ -166,13 +190,27 @@ type App struct {
 	threads ThreadService
 
 	threadsDirtyDebounce time.Duration
-	fetchingOlder        bool
+	// fetchingOlder tracks in-flight older-history backfills per
+	// channel ID (Phase 3: a global bool would let one window's
+	// backfill block another channel's, and a fetch completing for
+	// a no-longer-viewed channel must still clear its own flag).
+	fetchingOlder map[string]bool
 
 	// Cached user-id -> display-name map (mirror of what SetUserNames
 	// last received). Used by openSelectedThreadCmd to populate the
 	// thread panel parent's UserName without round-tripping through any
 	// sub-component's API.
 	userNames map[string]string
+
+	// Per-window model config retention (Phase 3): the most recent
+	// values pushed through the App-level Set* forwarders, kept so
+	// newWindowModel can configure late-created window models
+	// identically to the root model. See internal/ui/winmodels.go.
+	avatarFn     messages.AvatarFunc
+	imageCtx     imgrender.ImageContext
+	emojiCtx     messages.EmojiContext
+	emojiCustoms map[string]string
+	channelNames map[string]string
 
 	// externalUsers tracks which user IDs are Slack Connect / shared-channel
 	// guests. Populated by main.go via SetExternalUsers as users are
@@ -394,10 +432,12 @@ type App struct {
 }
 
 func NewApp() *App {
+	// The window tree starts as a single window with no channel; the
+	// first ChannelSelectedMsg apply records the channel on it.
+	wins, rootWin := wintree.New(wintree.Channel{})
 	app := &App{
 		workspaceRail:        workspace.New(nil, 0),
 		sidebar:              sidebar.New(nil),
-		messagepane:          messages.New(nil, ""),
 		compose:              compose.New(""),
 		statusbar:            statusbar.New(),
 		channelFinder:        channelfinder.New(),
@@ -416,6 +456,8 @@ func NewApp() *App {
 		confirmPrompt:        confirmprompt.New(),
 		mode:                 ModeNormal,
 		focusedPanel:         PanelSidebar,
+		wins:                 wins,
+		focusedWin:           rootWin,
 		sidebarVisible:       true,
 		view:                 ViewChannels,
 		keys:                 DefaultKeyMap(),
@@ -423,6 +465,7 @@ func NewApp() *App {
 		bootstrap:            newWorkspaceBootstrap(),
 		windowTitle:          "slk",
 		threadsDirtyDebounce: 150 * time.Millisecond,
+		fetchingOlder:        map[string]bool{},
 		mouseWheelLines:      3,
 		userNames:            map[string]string{},
 		externalUsers:        map[string]bool{},
@@ -443,6 +486,13 @@ func NewApp() *App {
 		clipboardRead:        defaultClipboardReader,
 		clipboardWrite:       defaultClipboardWriter,
 	}
+	// Root model deliberately bypasses newWindowModel: the config
+	// retention fields (avatarFn, userNames, emojiCtx, ...) are still
+	// empty at construction — main.go's Set* forwarders run later and
+	// reach the root model through the messagepane pointer directly.
+	rootModel := messages.New(nil, "")
+	app.winModels = map[wintree.LeafID]*messages.Model{rootWin: &rootModel}
+	app.messagepane = app.winModels[rootWin]
 	app.editing = newEditController()
 	// typing tracker is referenced by typingOut so it must exist first;
 	// construct outside the literal because struct literals can't
@@ -465,10 +515,18 @@ func NewApp() *App {
 	}})
 	// Seed the statusbar hint with the configured help key label so it
 	// stays accurate if the binding is ever changed.
-	if helpKey := app.keys.Help.Help().Key; helpKey != "" {
-		app.statusbar.SetHelpHint(helpKey + " for keybindings")
-	}
+	app.statusbar.SetHelpHint(app.defaultHelpHint())
 	return app
+}
+
+// defaultHelpHint is the resting statusbar hint ("? for keybindings").
+// Seeded at construction and restored when a transient hint (e.g. the
+// ctrl+w chord prefix) ends — clearing to "" would erase it for good.
+func (a *App) defaultHelpHint() string {
+	if helpKey := a.keys.Help.Help().Key; helpKey != "" {
+		return helpKey + " for keybindings"
+	}
+	return ""
 }
 
 func (a *App) Init() tea.Cmd {
@@ -668,7 +726,14 @@ func (a *App) walkNavCmd(step int) tea.Cmd {
 // handleConfirmMode moved to mode_confirm.go (Phase 5j).
 
 func (a *App) updateReactionOnMessage(channelID, messageTS, emojiName, userID string, remove bool) {
-	a.messagepane.UpdateReaction(messageTS, emojiName, userID, remove)
+	// Pane writes fan out to every window viewing the channel
+	// (per-window models deep-copy Reactions at clone/load time, so
+	// per-model in-place updates can't cross-leak). The thread panel
+	// is a singleton following the focused window; its write is
+	// unconditional as before — UpdateReaction no-ops on a missing TS.
+	for _, mm := range a.modelsForChannel(channelID) {
+		mm.UpdateReaction(messageTS, emojiName, userID, remove)
+	}
 	a.threadPanel.UpdateReaction(messageTS, emojiName, userID, remove)
 }
 
@@ -1295,10 +1360,12 @@ func (a *App) scrollFocusedPanel(delta int) tea.Cmd {
 // Returns nil otherwise. Centralizes the spinner-tick + fetch-cmd batching
 // previously duplicated across handleUp / the mouse-wheel handler / page-up.
 func (a *App) maybeFetchOlderHistory(atTop bool) tea.Cmd {
-	if !atTop || a.fetchingOlder {
+	// Backfill is triggered by focused-window scrolling, so the
+	// gate/set are keyed by the focused channel.
+	if !atTop || a.fetchingOlder[a.activeChannelID] {
 		return nil
 	}
-	a.fetchingOlder = true
+	a.fetchingOlder[a.activeChannelID] = true
 	a.messagepane.SetLoading(true)
 	chID := ids.ChannelID(a.activeChannelID)
 	oldestTS := ids.MessageTS(a.messagepane.OldestTS())
@@ -1429,8 +1496,26 @@ func (a *App) openThreadPanel(parent messages.MessageItem, channelID, threadTS s
 }
 
 func (a *App) SetMode(mode Mode) {
+	// A mode change always disarms a pending ctrl+w chord — a global
+	// intercept (e.g. ctrl+c quit-confirm) must not strand it armed.
+	// The `if` guard scopes the hint restore to chord disarms only, so
+	// other helpHint states aren't clobbered by unrelated mode changes.
+	if a.pendingWinCmd {
+		a.pendingWinCmd = false
+		a.statusbar.SetHelpHint(a.defaultHelpHint())
+	}
 	if mode == ModeInsert {
 		a.clearSelections()
+	}
+	// Leaving command mode by ANY path — including global intercepts
+	// (ctrl+c quit-confirm) and async reducers that force a mode —
+	// must drop the ':' prompt, or the statusbar keeps rendering a
+	// stale command line forever. Keeps the cmdline field's "always
+	// empty outside ModeCommand" invariant true; idempotent with
+	// exitCommandMode, which clears before calling here.
+	if a.mode == ModeCommand && mode != ModeCommand {
+		a.cmdline = ""
+		a.statusbar.SetCommandLine("")
 	}
 	a.mode = mode
 	a.statusbar.SetMode(mode)
@@ -1450,12 +1535,16 @@ func (a *App) exitInsertAfterSend() {
 	a.threadCompose.Blur()
 }
 
-// clearSelections drops any active mouse selection from both message
-// and thread panes. Called from any handler that changes focus, mode,
+// clearSelections drops any active mouse selection from every
+// window's message pane and from the thread pane (an unfocused
+// window can hold a selection pinned from when it was focused).
+// Called from any handler that changes focus, mode,
 // or visible content in a way that makes the existing selection
 // nonsensical (workspace switch, mode change, focus cycle, etc.).
 func (a *App) clearSelections() {
-	a.messagepane.ClearSelection()
+	for _, m := range a.allWinModels() {
+		m.ClearSelection()
+	}
 	a.threadPanel.ClearSelection()
 }
 
@@ -1718,7 +1807,10 @@ func (a *App) SetChannels(items []sidebar.ChannelItem) {
 	}
 	a.compose.SetChannels(picks)
 	a.threadCompose.SetChannels(picks)
-	a.messagepane.SetChannelNames(names)
+	a.channelNames = names
+	for _, m := range a.allWinModels() {
+		m.SetChannelNames(names)
+	}
 	a.threadPanel.SetChannelNames(names)
 	a.threadsView.SetChannelNames(names)
 }
@@ -1831,7 +1923,10 @@ func (a *App) SetChannelFinderItems(items []channelfinder.Item) {
 
 // SetAvatarFunc sets the function used to get rendered avatars for messages.
 func (a *App) SetAvatarFunc(fn messages.AvatarFunc) {
-	a.messagepane.SetAvatarFunc(fn)
+	a.avatarFn = fn
+	for _, m := range a.allWinModels() {
+		m.SetAvatarFunc(fn)
+	}
 	a.threadPanel.SetAvatarFunc(fn)
 }
 
@@ -1839,7 +1934,10 @@ func (a *App) SetAvatarFunc(fn messages.AvatarFunc) {
 // messages pane. Should be called once at startup, before the first
 // View(). Pass a zero-valued ImageContext to disable inline rendering.
 func (a *App) SetImageContext(ctx imgrender.ImageContext) {
-	a.messagepane.SetImageContext(ctx)
+	a.imageCtx = ctx
+	for _, m := range a.allWinModels() {
+		m.SetImageContext(ctx)
+	}
 	a.threadPanel.SetImageContext(ctx)
 }
 
@@ -1851,7 +1949,10 @@ func (a *App) SetImageContext(ctx imgrender.ImageContext) {
 //
 // Phase 8 extends this to the picker; Phase 9 to autocomplete.
 func (a *App) SetEmojiContext(ctx messages.EmojiContext) {
-	a.messagepane.SetEmojiContext(ctx)
+	a.emojiCtx = ctx
+	for _, m := range a.allWinModels() {
+		m.SetEmojiContext(ctx)
+	}
 	a.threadPanel.SetEmojiContext(thread.EmojiContext{
 		PlaceCtx: ctx.PlaceCtx,
 		Cells:    ctx.Cells,
@@ -2120,7 +2221,9 @@ func openURLCmd(url string) tea.Cmd {
 func (a *App) SetUserNames(names map[string]string) {
 	a.userNames = names
 	a.threadsView.SetUserNames(names)
-	a.messagepane.SetUserNames(names)
+	for _, m := range a.allWinModels() {
+		m.SetUserNames(names)
+	}
 	a.threadPanel.SetUserNames(names)
 
 	// Build user list for mention picker
@@ -2206,7 +2309,10 @@ func (a *App) SetCustomEmoji(customs map[string]string) {
 	}
 	// Update all panes' emoji-image context so newly-known custom
 	// emoji URLs become resolvable on the next render.
-	a.messagepane.SetEmojiCustoms(customs)
+	a.emojiCustoms = customs
+	for _, m := range a.allWinModels() {
+		m.SetEmojiCustoms(customs)
+	}
 	a.threadPanel.SetEmojiCustoms(customs)
 	a.reactionPicker.SetEmojiCustoms(customs)
 	// Compose autocomplete dropdowns (main + thread) also need the
@@ -2435,7 +2541,7 @@ func (a *App) View() tea.View {
 	if a.sidebarVisible {
 		panels = append(panels, a.renderSidebar(frame.SidebarWidth, frame.SidebarBorder, frame.ContentHeight, themeVer))
 	}
-	if s := a.renderMessagesRegion(frame, themeVer, previewActive); s != "" {
+	if s := a.renderWindowsRegion(frame, themeVer, previewActive); s != "" {
 		panels = append(panels, s)
 	}
 	if a.threadVisible && frame.ThreadWidth > 0 && !previewActive {
@@ -2786,8 +2892,8 @@ func (a *App) notifyReadStateChanged() {
 func (a *App) applyChannelMark(channelID, ts string, unreadCount int) {
 	debuglog.Cache("applyChannelMark: channel=%s ts=%s unread_count=%d active=%s",
 		channelID, ts, unreadCount, a.activeChannelID)
-	if channelID == a.activeChannelID {
-		a.messagepane.SetLastReadTS(ts)
+	for _, mm := range a.modelsForChannel(channelID) {
+		mm.SetLastReadTS(ts)
 	}
 	a.notifyReadStateChanged()
 }

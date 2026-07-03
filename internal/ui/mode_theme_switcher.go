@@ -41,7 +41,7 @@ func handleThemeSwitcherMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		// Apply theme immediately.
 		styles.Apply(result.Name, a.themeOverrides)
 		// Invalidate render caches so they rebuild with new theme colors.
-		a.messagepane.InvalidateCache()
+		a.invalidateAllWinModelCaches()
 		a.threadPanel.InvalidateCache()
 		a.sidebar.InvalidateCache()
 		// Refresh compose textarea styles for new theme.

@@ -25,6 +25,10 @@ func TestLiveOwnReactionStyledViaWorkspaceReady(t *testing.T) {
 		UserID:        "ME",
 		Channels:      []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
 	})
+	// Phase 3 routes reaction events to the windows viewing the
+	// channel; apply the queued selection so the pane views C1.
+	// (WorkspaceReadyMsg queues it as a cmd the test never runs.)
+	_, _ = a.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
 	a.messagepane.SetMessages([]messages.MessageItem{{TS: "100.0", Text: "hi"}})
 
 	a.Update(ReactionAddedMsg{ChannelID: "C1", MessageTS: "100.0", UserID: "ME", Emoji: "tada"})
@@ -45,6 +49,8 @@ func TestReactionAddedAppliesOwnUserLive(t *testing.T) {
 	a := NewApp()
 	_, _ = a.Update(tea.WindowSizeMsg{Width: 200, Height: 60})
 	a.SetCurrentUserID("ME")
+	// Phase 3: the pane must view C1 for C1 reaction events to route.
+	_, _ = a.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
 	a.messagepane.SetMessages([]messages.MessageItem{{TS: "100.0", Text: "hi"}})
 
 	// No optimistic update here — this is purely the WS echo of a reaction

@@ -74,7 +74,18 @@ func (a *App) renderMessagesRegion(frame panelLayoutFrame, themeVer int64, previ
 	// Threads switch invalidates the cached output (the cache is
 	// otherwise indistinguishable across views at the same
 	// focus/mode/theme).
-	msgLayoutKey := themeVer<<3 |
+	//
+	// The focused-window id is mixed in at bit 32 (Phase 3): per-
+	// window models have INDEPENDENT version counters, so after a
+	// pointer-swap focus change the cache could otherwise serve the
+	// previous window's frame on a (version, dims, key) collision.
+	// Bit budget: bits 1-2 focus/view, themeVer from bit 3 (bumped
+	// only on theme Apply — reaching the composeHeight bits at 16
+	// would take 2^13 theme switches, and bit 32 would take 2^29),
+	// composeHeight bits 16+ (terminal rows, < 2^10), window id
+	// bits 32+ (wintree.LeafID increments per split; tiny).
+	msgLayoutKey := int64(a.focusedWin)<<32 |
+		themeVer<<3 |
 		boolToInt(a.view == ViewThreads)<<2 |
 		boolToInt(msgFocused)<<1
 	a.compose.SetWidth(msgWidth - 2)

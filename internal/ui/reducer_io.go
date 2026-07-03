@@ -180,9 +180,12 @@ var reduceIO reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		// so the next View() picks up the cached bytes inline.
 		// Only the specific key's in-flight bit is cleared so
 		// sibling images that are still mid-fetch don't trigger
-		// fresh respawns. The model itself filters by active
-		// channel name (no-op when the user has switched away).
-		a.messagepane.HandleImageReady(m.Channel, m.TS, m.Key)
+		// fresh respawns. Fan out to every window: each model
+		// self-gates by its own channel name (no-op for windows
+		// viewing other channels).
+		for _, mp := range a.allWinModels() {
+			mp.HandleImageReady(m.Channel, m.TS, m.Key)
+		}
 		// Thread panel: v1 uses coarse cache invalidation. If any
 		// reply in the open thread has a matching TS, blow the
 		// thread cache so renderThreadMessage runs again with the
@@ -219,7 +222,9 @@ var reduceIO reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		// the surface handlers wipe their caches wholesale regardless
 		// of URL in v1.
 		a.emojiInvalidatePending = false
-		a.messagepane.HandleEmojiImageReady("")
+		for _, mp := range a.allWinModels() {
+			mp.HandleEmojiImageReady("")
+		}
 		a.threadPanel.HandleEmojiImageReady("")
 		a.reactionPicker.HandleEmojiImageReady("") // no-op in v1; future caching may use it
 		// Autocomplete dropdowns have no cache; the no-op hooks on
@@ -234,7 +239,9 @@ var reduceIO reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		// handlers no-op when the userID isn't in their current
 		// view, but coarse invalidation is cheap relative to the
 		// cost of a missing avatar.
-		a.messagepane.HandleAvatarReady(m.UserID)
+		for _, mp := range a.allWinModels() {
+			mp.HandleAvatarReady(m.UserID)
+		}
 		a.threadPanel.HandleAvatarReady(m.UserID)
 		return nil, true
 
@@ -246,7 +253,9 @@ var reduceIO reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		// doesn't keep retrying; don't trigger a re-render --
 		// the placeholder is already on screen and we have no
 		// new bytes to show.
-		a.messagepane.HandleImageFailed(m.Key)
+		for _, mp := range a.allWinModels() {
+			mp.HandleImageFailed(m.Key)
+		}
 		// Mirror the in-flight bookkeeping on the thread panel so
 		// a permanently-failed image isn't re-attempted from the
 		// thread.
