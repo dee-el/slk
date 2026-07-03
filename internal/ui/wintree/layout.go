@@ -32,8 +32,8 @@ func layoutNode(n *node, r Rect) LayoutNode {
 // childRects divides r among k children along dir: equal shares, with
 // the remainder going to the earliest children one cell each, so the
 // results always tile r exactly. This is the single source of truth
-// for split geometry — Layout, nodeRect, and Split's refusal math all
-// depend on it agreeing with itself.
+// for split geometry — Layout and Split's refusal math (which
+// validates via ComputeRects) both depend on it agreeing with itself.
 func childRects(dir Dir, k int, r Rect) []Rect {
 	out := make([]Rect, 0, k)
 	if dir == SplitSideBySide {
@@ -79,27 +79,3 @@ func (t *Tree) ComputeRects(bounds Rect) map[LeafID]Rect {
 	return out
 }
 
-// nodeRect returns the rect of an internal *node within bounds
-// (used by Split's refusal check). Same division as Layout.
-func (t *Tree) nodeRect(target *node, bounds Rect) (Rect, bool) {
-	var found Rect
-	var ok bool
-	var walk func(n *node, r Rect) bool
-	walk = func(n *node, r Rect) bool {
-		if n == target {
-			found, ok = r, true
-			return true
-		}
-		if n.isLeaf() {
-			return false
-		}
-		for i, cr := range childRects(n.dir, len(n.children), r) {
-			if walk(n.children[i], cr) {
-				return true
-			}
-		}
-		return false
-	}
-	walk(t.root, bounds)
-	return found, ok
-}
