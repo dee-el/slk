@@ -70,6 +70,9 @@ func (a *App) applyOverlays(screen string) string {
 	if a.linkPicker.IsVisible() {
 		screen = a.linkPicker.ViewOverlay(a.width, a.height, screen)
 	}
+	if a.attachmentPicker.IsVisible() {
+		screen = a.attachmentPicker.ViewOverlay(a.width, a.height, screen)
+	}
 	if a.mode == ModePresenceCustomSnooze {
 		screen = presencemenu.CustomSnoozeView(a.width, a.height, screen, a.presence.SnoozeBuf())
 	}
@@ -95,6 +98,7 @@ func (a *App) overlayActive() bool {
 		a.help.IsVisible() ||
 		a.reactionsView.IsVisible() ||
 		a.linkPicker.IsVisible() ||
+		a.attachmentPicker.IsVisible() ||
 		a.mode == ModePresenceCustomSnooze ||
 		a.bootstrap.IsLoading()
 }

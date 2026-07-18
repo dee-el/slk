@@ -13,6 +13,7 @@
 //                                   first, else cancel the edit.
 //   - Esc otherwise              -> close any open compose picker
 //                                   first, else exit insert mode.
+//   - Ctrl+O                     -> multi-file attachment picker.
 //   - Ctrl+V                     -> smartPaste (clipboard image /
 //                                   file path / verbatim text).
 //   - Ctrl+U                     -> clear compose (text +
@@ -111,6 +112,9 @@ func handleInsertMode(a *App, msg tea.KeyMsg) tea.Cmd {
 
 	code := msg.Key().Code
 	mod := msg.Key().Mod
+	if key.Matches(msg, a.keys.AttachFiles) {
+		return a.openAttachmentPicker()
+	}
 	isPaste := code == 'v' && mod == tea.ModCtrl
 	if isPaste {
 		return a.smartPaste()

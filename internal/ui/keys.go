@@ -16,6 +16,7 @@ type KeyMap struct {
 	SearchNext          key.Binding
 	SearchPrev          key.Binding
 	WorkspaceSearch     key.Binding
+	AttachFiles         key.Binding
 	Tab                 key.Binding
 	ShiftTab            key.Binding
 	ToggleSidebar       key.Binding
@@ -75,6 +76,7 @@ func DefaultKeyMap() KeyMap {
 		SearchNext:      key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next match")),
 		SearchPrev:      key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "prev match")),
 		WorkspaceSearch: key.NewBinding(key.WithKeys("ctrl+f"), key.WithHelp("ctrl+f", "search workspace")),
+		AttachFiles:     key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "attach files")),
 		Tab:             key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next panel")),
 		ShiftTab:        key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev panel")),
 		ToggleSidebar:   key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "toggle sidebar")),

@@ -76,6 +76,10 @@ func (a *App) activeModalClickTarget() (modalClickTarget, bool) {
 	case ModeConfirm:
 		// Confirm has no list: outside dismisses, inside is a no-op.
 		return modalClickTarget{a.confirmPrompt, nil, nil}, true
+	case ModeAttachmentPicker:
+		// Mouse row activation is intentionally out of scope; still expose
+		// box geometry so clicks inside are consumed instead of dismissing.
+		return modalClickTarget{a.attachmentPicker, nil, nil}, true
 	}
 	return modalClickTarget{}, false
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/gammons/slk/internal/ids"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/slackurl"
+	"github.com/gammons/slk/internal/ui/attachmentpicker"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/channelpicker"
 	"github.com/gammons/slk/internal/ui/compose"
@@ -102,16 +103,18 @@ type App struct {
 	threadPanel      *thread.Model
 	threadCompose    compose.Model
 	threadsView      threadsview.Model
+	attachmentPicker *attachmentpicker.Model
 
 	// State
-	mode           Mode
-	focusedPanel   Panel
-	sidebarVisible bool
-	threadVisible  bool
-	view           View
-	width          int
-	height         int
-	keys           KeyMap
+	mode             Mode
+	focusedPanel     Panel
+	attachmentTarget Panel
+	sidebarVisible   bool
+	threadVisible    bool
+	view             View
+	width            int
+	height           int
+	keys             KeyMap
 
 	// cmdline accumulates the text typed at the vi-style ':' prompt
 	// while in ModeCommand. Owned by mode_command.go; always "" in
@@ -459,6 +462,7 @@ func NewApp() *App {
 		threadPanel:          thread.New(),
 		threadCompose:        compose.New("thread"),
 		threadsView:          threadsview.New(nil, ""),
+		attachmentPicker:     attachmentpicker.New(maxPendingAttachments, maxAttachmentSize),
 		linkPicker:           linkpicker.New(),
 		reactionPicker:       reactionpicker.New(),
 		reactionsView:        reactionsview.New(),
@@ -578,6 +582,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		reduceSearch,
 		reduceWorkspace,
 		reduceNewMessagePicker,
+		reduceAttachmentPicker,
 		reduceIO,
 		reduceMouse,
 	); handled {
@@ -2737,7 +2742,10 @@ func (a *App) selectedMessageContext() (channelID, ts, text, userID string, pane
 	}
 }
 
-const maxAttachmentSize = 10 * 1024 * 1024 // 10 MB cap
+const (
+	maxAttachmentSize     = 10 * 1024 * 1024 // 10 MB cap per file
+	maxPendingAttachments = 10
+)
 
 // submitWithAttachments dispatches the pending attachments + caption
 // on the given compose to the configured uploader. It refuses if an
@@ -2818,6 +2826,9 @@ func (a *App) smartPaste() tea.Cmd {
 func (a *App) tryAttachFromClipboard(target *compose.Model, pathCandidate string) (bool, tea.Cmd) {
 	// 1. Image bytes from the OS clipboard.
 	if imgBytes := a.clipboardRead(clipboard.FmtImage); len(imgBytes) > 0 {
+		if len(target.Attachments()) >= maxPendingAttachments {
+			return true, a.uploadToastCmd("Maximum 10 attachments", 2*time.Second)
+		}
 		if int64(len(imgBytes)) > maxAttachmentSize {
 			return true, a.uploadToastCmd(
 				fmt.Sprintf("Image too large (%s > 10 MB limit)", humanSize(int64(len(imgBytes)))),
@@ -2839,29 +2850,58 @@ func (a *App) tryAttachFromClipboard(target *compose.Model, pathCandidate string
 
 	// 2. File-path text.
 	if path, ok := resolveFilePath(pathCandidate); ok {
-		info, err := os.Stat(path)
-		if err == nil && info.Mode().IsRegular() {
-			if info.Size() > maxAttachmentSize {
-				return true, a.uploadToastCmd("File too large (>10 MB limit)", 3*time.Second)
-			}
-			if info.Size() == 0 {
-				return true, a.uploadToastCmd("Empty file", 2*time.Second)
-			}
-			filename := filepath.Base(path)
-			target.AddAttachment(compose.PendingAttachment{
-				Filename: filename,
-				Path:     path,
-				Mime:     mime.TypeByExtension(filepath.Ext(path)),
-				Size:     info.Size(),
-			})
-			return true, a.uploadToastCmd(
-				fmt.Sprintf("Attached: %s (%s)", filename, humanSize(info.Size())),
-				2*time.Second,
-			)
+		info, statErr := os.Stat(path)
+		if statErr != nil || !info.Mode().IsRegular() {
+			return false, nil
 		}
+		attachment, err := pendingAttachmentFromPath(path)
+		if err != nil {
+			return true, a.uploadToastCmd(err.Error(), 3*time.Second)
+		}
+		if len(target.Attachments()) >= maxPendingAttachments {
+			return true, a.uploadToastCmd("Maximum 10 attachments", 2*time.Second)
+		}
+		target.AddAttachment(attachment)
+		return true, a.uploadToastCmd(
+			fmt.Sprintf("Attached: %s (%s)", attachment.Filename, humanSize(attachment.Size)),
+			2*time.Second,
+		)
 	}
 
 	return false, nil
+}
+
+func pendingAttachmentFromPath(path string) (compose.PendingAttachment, error) {
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return compose.PendingAttachment{}, fmt.Errorf("Cannot resolve file: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return compose.PendingAttachment{}, fmt.Errorf("Cannot read file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return compose.PendingAttachment{}, fmt.Errorf("Not a regular file")
+	}
+	if info.Size() == 0 {
+		return compose.PendingAttachment{}, fmt.Errorf("Empty file")
+	}
+	if info.Size() > maxAttachmentSize {
+		return compose.PendingAttachment{}, fmt.Errorf("File too large (>10 MB limit)")
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return compose.PendingAttachment{}, fmt.Errorf("Cannot read file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return compose.PendingAttachment{}, fmt.Errorf("Cannot read file: %w", err)
+	}
+	return compose.PendingAttachment{
+		Filename: filepath.Base(abs),
+		Path:     abs,
+		Mime:     mime.TypeByExtension(filepath.Ext(abs)),
+		Size:     info.Size(),
+	}, nil
 }
 
 // beginEditOfSelected starts editing the currently-selected message

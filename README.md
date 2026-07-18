@@ -23,7 +23,7 @@
 - Real-time messages, edits, deletes, reactions, typing indicators
 - Inline images (kitty graphics / sixel / half-block fallback) with full-screen preview
 - Threads side panel + a workspace-wide threads view
-- Smart paste: clipboard images, file paths, or text — multiple attachments + caption in one send
+- Multi-file picker (`Ctrl+O`) plus smart paste for clipboard images, file paths, or text — attachments + caption send together
 - Slack-native sidebar sections, kept live; or glob-based config sections
 - Browser-cookie auth (`xoxc` + `d`) — no Slack App required
 - Vim-style modal keybindings, fuzzy channel finder, workspace picker
