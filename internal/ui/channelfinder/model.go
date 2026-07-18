@@ -73,6 +73,9 @@ func New() Model {
 func (m *Model) SetItems(items []Item) {
 	synth := m.extractSynthetic()
 	m.items = append(synth, items...)
+	if m.visible {
+		m.filter()
+	}
 }
 
 // SetSyntheticItems replaces the set of non-channel destinations the finder

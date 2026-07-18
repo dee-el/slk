@@ -5,31 +5,31 @@
 // Owns the nine Update arms that drive the channel-selection
 // lifecycle and channel-list mutations:
 //
-//   ChannelSelectedMsg            - user picked a channel: reset
-//                                   view state, mark visit,
-//                                   dispatch by cache freshness
-//                                   tier (fresh / verify-in-bg /
-//                                   spinner).
-//   MessagesLoadedMsg             - initial messages fetch landed:
-//                                   replace pane contents (nil =
-//                                   network failure, keep cache).
-//   OlderMessagesLoadedMsg        - history backfill landed:
-//                                   prepend (anchor-validated: dropped
-//                                   if the buffer was replaced
-//                                   mid-flight).
-//   ChannelMarkedRemoteMsg        - WS echo of a remote mark:
-//                                   apply locally.
-//   ChannelMarkedReadMsg          - optimistic mark-read echo:
-//                                   refresh sidebar read state.
-//   ChannelMembershipMsg          - membership fetch landed:
-//                                   push to the cache used by
-//                                   mention picker / DM resolution.
-//   ChannelJoinedMsg              - finder-driven join succeeded:
-//                                   add to sidebar + open it.
-//   ChannelJoinFailedMsg          - finder-driven join failed:
-//                                   log warning (toast TBD).
-//   BrowseableChannelsLoadedMsg   - "all channels" list landed:
-//                                   push to the finder.
+//	ChannelSelectedMsg            - user picked a channel: reset
+//	                                view state, mark visit,
+//	                                dispatch by cache freshness
+//	                                tier (fresh / verify-in-bg /
+//	                                spinner).
+//	MessagesLoadedMsg             - initial messages fetch landed:
+//	                                replace pane contents (nil =
+//	                                network failure, keep cache).
+//	OlderMessagesLoadedMsg        - history backfill landed:
+//	                                prepend (anchor-validated: dropped
+//	                                if the buffer was replaced
+//	                                mid-flight).
+//	ChannelMarkedRemoteMsg        - WS echo of a remote mark:
+//	                                apply locally.
+//	ChannelMarkedReadMsg          - optimistic mark-read echo:
+//	                                refresh sidebar read state.
+//	ChannelMembershipMsg          - membership fetch landed:
+//	                                push to the cache used by
+//	                                mention picker / DM resolution.
+//	ChannelJoinedMsg              - finder-driven join succeeded:
+//	                                add to sidebar + open it.
+//	ChannelJoinFailedMsg          - finder-driven join failed:
+//	                                log warning (toast TBD).
+//	BrowseableChannelsLoadedMsg   - "all channels" list landed:
+//	                                push to the finder.
 //
 // Free reducer (not controller-absorbed): these arms cooperate on
 // the sidebar, messagepane, statusbar, channelFinder, navHistory,
@@ -278,6 +278,21 @@ func (a *App) retargetActiveChannel(id, name, chType string) {
 	// Safe for the selection path too — all three tiers set syncing
 	// explicitly right after this retarget runs.
 	a.statusbar.SetSyncing(false)
+}
+
+// refreshActiveChannelMetadata reapplies already-known display metadata for the
+// active channel without any fetches or buffer resets. Used when background
+// workspace metadata sync reclassifies or renames the live channel.
+func (a *App) refreshActiveChannelMetadata(id, name, chType string) {
+	if id == "" || id != a.activeChannelID {
+		return
+	}
+	a.messagepane.SetChannelName(name)
+	a.messagepane.SetChannelType(chType)
+	a.compose.SetChannel(name)
+	a.statusbar.SetChannel(name)
+	a.statusbar.SetChannelType(chType)
+	a.setFocusedWindowChannel(id, name, chType)
 }
 
 // reduceChannelSelected handles ChannelSelectedMsg. Extracted from

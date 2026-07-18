@@ -1102,6 +1102,21 @@ func TestPatchUserName_UpdatesMatchingRowsAndUserNamesMap(t *testing.T) {
 	}
 }
 
+func TestPatchUserName_ClonesCallerSnapshot(t *testing.T) {
+	snapshot := map[string]string{"U1": "alice"}
+	m := New([]MessageItem{{TS: "1.0", UserID: "U1", UserName: "U1", Text: "hi"}}, "general")
+	m.SetUserNames(snapshot)
+
+	m.PatchUserName("U1", "bob")
+
+	if snapshot["U1"] != "alice" {
+		t.Fatalf("caller snapshot mutated: %v", snapshot)
+	}
+	if got := m.ResolveUserName("U1"); got != "bob" {
+		t.Fatalf("ResolveUserName(U1) = %q, want bob", got)
+	}
+}
+
 func TestPatchUserName_NoOpWhenUnchanged(t *testing.T) {
 	m := New([]MessageItem{{TS: "1.0", UserID: "U1", UserName: "bob"}}, "general")
 	m.PatchUserName("U1", "bob") // prime the userNames map
@@ -1121,6 +1136,21 @@ func TestPatchUserName_NoMatchingMessagesStillUpdatesMap(t *testing.T) {
 
 	if got := m.ResolveUserName("U99"); got != "carol" {
 		t.Errorf("ResolveUserName(U99) = %q, want carol (mention map should update even with no message match)", got)
+	}
+}
+
+func TestPatchUserName_RepairsRowsWhenMapAlreadyResolved(t *testing.T) {
+	m := New([]MessageItem{{TS: "1.0", UserID: "U1", UserName: "U1", Text: "hi"}}, "general")
+	m.SetUserNames(map[string]string{"U1": "bob"})
+	verBefore := m.Version()
+
+	m.PatchUserName("U1", "bob")
+
+	if got := m.Messages()[0].UserName; got != "bob" {
+		t.Fatalf("message UserName = %q, want bob", got)
+	}
+	if m.Version() <= verBefore {
+		t.Fatal("Version should bump when stale authored rows are repaired")
 	}
 }
 

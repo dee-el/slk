@@ -108,6 +108,11 @@ var reduceWorkspace reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		if m.TeamID != a.activeTeamID {
 			return nil, true
 		}
+		if current, ok := a.userNames[m.UserID]; !ok || current != m.DisplayName {
+			names := cloneStringMap(a.userNames)
+			names[m.UserID] = m.DisplayName
+			a.SetUserNames(names)
+		}
 		for _, mp := range a.allWinModels() {
 			mp.PatchUserName(m.UserID, m.DisplayName)
 		}
@@ -116,6 +121,39 @@ var reduceWorkspace reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		// orchestrated by DMNameResolvedMsg; this handler is only
 		// the in-history name patch. IsBot is carried for forward
 		// compatibility but not consumed here.
+		return nil, true
+
+	case WorkspaceUserMetadataUpdatedMsg:
+		if m.TeamID != a.activeTeamID {
+			return nil, true
+		}
+		if a.workspaceUserStateReader == nil {
+			return nil, true
+		}
+		names, externalUsers := a.workspaceUserStateReader(m.TeamID)
+		prev := a.userNames
+		a.externalUsers = cloneBoolMap(externalUsers)
+		a.SetUserNames(names)
+		if a.workspaceMetadataReader != nil {
+			channels, finderItems := a.workspaceMetadataReader(m.TeamID)
+			a.SetChannels(channels)
+			a.SetChannelFinderItems(finderItems)
+			for _, ch := range channels {
+				if ch.ID == a.activeChannelID {
+					a.refreshActiveChannelMetadata(ch.ID, ch.Name, ch.Type)
+					break
+				}
+			}
+		}
+		for userID, displayName := range a.userNames {
+			if prev[userID] == displayName {
+				continue
+			}
+			for _, mp := range a.allWinModels() {
+				mp.PatchUserName(userID, displayName)
+			}
+			a.threadPanel.PatchUserName(userID, displayName)
+		}
 		return nil, true
 
 	case UserExternalMsg:

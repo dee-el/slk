@@ -543,6 +543,22 @@ func TestThreadPatchUserName_UpdatesMatchingRowsAndUserNamesMap(t *testing.T) {
 	}
 }
 
+func TestThreadPatchUserName_ClonesCallerSnapshot(t *testing.T) {
+	snapshot := map[string]string{"U1": "alice"}
+	m := New()
+	m.SetThread(messages.MessageItem{TS: "1.0", UserID: "U1", UserName: "U1", Text: "parent"}, nil, "C1", "1.0")
+	m.SetUserNames(snapshot)
+
+	m.PatchUserName("U1", "bob")
+
+	if snapshot["U1"] != "alice" {
+		t.Fatalf("caller snapshot mutated: %v", snapshot)
+	}
+	if got := m.UserNames()["U1"]; got != "bob" {
+		t.Fatalf("thread userNames[U1] = %q, want bob", got)
+	}
+}
+
 func TestThreadPatchUserName_NoOpWhenUnchanged(t *testing.T) {
 	m := New()
 	parent := messages.MessageItem{TS: "1.0", UserID: "U2", UserName: "alice", Text: "p"}
@@ -558,6 +574,27 @@ func TestThreadPatchUserName_NoOpWhenUnchanged(t *testing.T) {
 
 	if m.Version() != verBefore {
 		t.Error("Version should NOT bump on no-op PatchUserName")
+	}
+}
+
+func TestThreadPatchUserName_RepairsRowsWhenMapAlreadyResolved(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "1.0", UserID: "U1", UserName: "U1", Text: "parent"}
+	replies := []messages.MessageItem{{TS: "1.001", UserID: "U1", UserName: "U1", Text: "reply"}}
+	m.SetThread(parent, replies, "C1", "1.0")
+	m.SetUserNames(map[string]string{"U1": "bob"})
+	verBefore := m.Version()
+
+	m.PatchUserName("U1", "bob")
+
+	if got := m.ParentMsg().UserName; got != "bob" {
+		t.Fatalf("parent UserName = %q, want bob", got)
+	}
+	if got := m.Replies()[0].UserName; got != "bob" {
+		t.Fatalf("reply UserName = %q, want bob", got)
+	}
+	if m.Version() <= verBefore {
+		t.Fatal("Version should bump when stale authored rows are repaired")
 	}
 }
 

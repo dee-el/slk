@@ -17,11 +17,13 @@ import (
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/ids"
 	imgpkg "github.com/gammons/slk/internal/image"
+	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/compose"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/sidebar"
 	"github.com/gammons/slk/internal/ui/statusbar"
 	"github.com/gammons/slk/internal/ui/styles"
+	"github.com/gammons/slk/internal/ui/wintree"
 	"github.com/gammons/slk/internal/ui/workspace"
 	"golang.design/x/clipboard"
 )
@@ -3873,6 +3875,27 @@ func TestUserResolvedMsg_PatchesActiveWorkspace(t *testing.T) {
 	if got[0].UserName != "alice" {
 		t.Errorf("UserName = %q, want alice", got[0].UserName)
 	}
+	if got := app.userNames["U1"]; got != "alice" {
+		t.Fatalf("app userNames[U1] = %q, want alice", got)
+	}
+	foundCompose := false
+	for _, u := range app.compose.MentionUsers() {
+		if u.ID == "U1" && u.DisplayName == "alice" {
+			foundCompose = true
+		}
+	}
+	if !foundCompose {
+		t.Fatal("compose picker missing resolved user")
+	}
+	foundThreadCompose := false
+	for _, u := range app.threadCompose.MentionUsers() {
+		if u.ID == "U1" && u.DisplayName == "alice" {
+			foundThreadCompose = true
+		}
+	}
+	if !foundThreadCompose {
+		t.Fatal("thread picker missing resolved user")
+	}
 }
 
 func TestUserResolvedMsg_DropsForOtherWorkspace(t *testing.T) {
@@ -3891,6 +3914,261 @@ func TestUserResolvedMsg_DropsForOtherWorkspace(t *testing.T) {
 	got := app.messagepane.Messages()
 	if got[0].UserName != "U1" {
 		t.Errorf("UserName changed despite wrong team; got %q", got[0].UserName)
+	}
+}
+
+func TestWorkspaceUserMetadataUpdatedMsg_PatchesActiveWorkspace(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.SetUserNames(map[string]string{"U2": "bob"})
+	app.SetChannels([]sidebar.ChannelItem{
+		{ID: "D1", Name: "U1", Type: "dm", DMUserID: "U1"},
+		{ID: "G1", Name: "alice, bob", Type: "group_dm"},
+	})
+	app.SetChannelFinderItems([]channelfinder.Item{
+		{ID: "D1", Name: "U1", Type: "dm", Joined: true},
+		{ID: "G1", Name: "alice, bob", Type: "group_dm", Joined: true},
+	})
+	app.messagepane.SetMessages([]messages.MessageItem{{TS: "1.0", UserID: "U1", UserName: "U1", Text: "hi"}})
+	app.threadPanel.SetThread(
+		messages.MessageItem{TS: "2.0", UserID: "U1", UserName: "U1", Text: "parent"},
+		[]messages.MessageItem{{TS: "2.1", UserID: "U1", UserName: "U1", Text: "reply"}},
+		"C1",
+		"2.0",
+	)
+	app.SetWorkspaceUserStateReader(func(teamID string) (map[string]string, map[string]bool) {
+		if teamID != "T1" {
+			return nil, nil
+		}
+		return map[string]string{"U1": "alice", "U2": "bob"}, map[string]bool{"U1": true}
+	})
+	app.SetWorkspaceMetadataReader(func(teamID string) ([]sidebar.ChannelItem, []channelfinder.Item) {
+		if teamID != "T1" {
+			return nil, nil
+		}
+		return []sidebar.ChannelItem{
+				{ID: "D1", Name: "Helper Bot", Type: "app", DMUserID: "U1"},
+				{ID: "G1", Name: "Alice, Robert", Type: "group_dm"},
+			}, []channelfinder.Item{
+				{ID: "D1", Name: "Helper Bot", Type: "app", Joined: true},
+				{ID: "G1", Name: "Alice, Robert", Type: "group_dm", Joined: true},
+			}
+	})
+
+	app.Update(WorkspaceUserMetadataUpdatedMsg{
+		TeamID: "T1",
+	})
+
+	if got := app.userNames["U1"]; got != "alice" {
+		t.Fatalf("app userNames[U1] = %q, want alice", got)
+	}
+	if got := app.messagepane.Messages()[0].UserName; got != "alice" {
+		t.Fatalf("message UserName = %q, want alice", got)
+	}
+	if got := app.threadPanel.ParentMsg().UserName; got != "alice" {
+		t.Fatalf("thread parent UserName = %q, want alice", got)
+	}
+	if got := app.threadPanel.Replies()[0].UserName; got != "alice" {
+		t.Fatalf("thread reply UserName = %q, want alice", got)
+	}
+	found := false
+	for _, u := range app.compose.MentionUsers() {
+		if u.ID == "U1" && u.DisplayName == "alice" {
+			if !u.IsExternal {
+				t.Fatal("compose picker user missing external flag")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("compose picker missing bulk-updated user")
+	}
+	items := app.sidebar.Items()
+	if items[0].Type != "app" || items[0].Name != "Helper Bot" {
+		t.Fatalf("sidebar DM row = %+v, want type=app name=Helper Bot", items[0])
+	}
+	if items[1].Name != "Alice, Robert" {
+		t.Fatalf("sidebar MPDM row name = %q, want Alice, Robert", items[1].Name)
+	}
+	app.channelFinder.Open()
+	for _, k := range []string{"h", "e", "l", "p"} {
+		app.channelFinder.HandleKey(k)
+	}
+	res := app.channelFinder.HandleKey("enter")
+	if res == nil || res.ID != "D1" || res.Type != "app" || res.Name != "Helper Bot" {
+		t.Fatalf("finder DM result = %+v, want D1/app/Helper Bot", res)
+	}
+	app.channelFinder.Open()
+	for _, k := range []string{"r", "o", "b"} {
+		app.channelFinder.HandleKey(k)
+	}
+	res = app.channelFinder.HandleKey("enter")
+	if res == nil || res.ID != "G1" || res.Name != "Alice, Robert" {
+		t.Fatalf("finder MPDM result = %+v, want G1/Alice, Robert", res)
+	}
+}
+
+func TestWorkspaceUserMetadataUpdatedMsg_DropsForOtherWorkspace(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.SetUserNames(map[string]string{"U1": "old"})
+	app.SetChannels([]sidebar.ChannelItem{{ID: "D1", Name: "old dm", Type: "dm", DMUserID: "U1"}})
+	app.SetChannelFinderItems([]channelfinder.Item{{ID: "D1", Name: "old dm", Type: "dm", Joined: true}})
+	app.messagepane.SetMessages([]messages.MessageItem{{TS: "1.0", UserID: "U1", UserName: "U1", Text: "hi"}})
+	app.SetWorkspaceUserStateReader(func(teamID string) (map[string]string, map[string]bool) {
+		return map[string]string{"U1": "alice"}, map[string]bool{"U1": true}
+	})
+	app.SetWorkspaceMetadataReader(func(teamID string) ([]sidebar.ChannelItem, []channelfinder.Item) {
+		return []sidebar.ChannelItem{{ID: "D1", Name: "new dm", Type: "app", DMUserID: "U1"}}, []channelfinder.Item{{ID: "D1", Name: "new dm", Type: "app", Joined: true}}
+	})
+
+	app.Update(WorkspaceUserMetadataUpdatedMsg{
+		TeamID: "T2",
+	})
+
+	if got := app.userNames["U1"]; got != "old" {
+		t.Fatalf("app userNames[U1] = %q, want old", got)
+	}
+	if got := app.messagepane.Messages()[0].UserName; got != "U1" {
+		t.Fatalf("message UserName = %q, want U1", got)
+	}
+	if got := app.sidebar.Items()[0].Type; got != "dm" {
+		t.Fatalf("sidebar type = %q, want dm", got)
+	}
+	for _, u := range app.compose.MentionUsers() {
+		if u.ID == "U1" && u.IsExternal {
+			t.Fatal("external flag changed despite wrong team")
+		}
+	}
+}
+
+func TestWorkspaceUserMetadataUpdatedMsg_UsesLatestMetadataReaderRows(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.SetChannels([]sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}})
+	app.SetChannelFinderItems([]channelfinder.Item{{ID: "C1", Name: "general", Type: "channel", Joined: true}})
+	app.SetWorkspaceUserStateReader(func(teamID string) (map[string]string, map[string]bool) {
+		return map[string]string{"U1": "alice"}, map[string]bool{"U1": true}
+	})
+	app.SetWorkspaceMetadataReader(func(teamID string) ([]sidebar.ChannelItem, []channelfinder.Item) {
+		return []sidebar.ChannelItem{
+				{ID: "C1", Name: "general", Type: "channel"},
+				{ID: "D1", Name: "Helper Bot", Type: "app", DMUserID: "U1"},
+			}, []channelfinder.Item{
+				{ID: "C1", Name: "general", Type: "channel", Joined: true},
+				{ID: "D1", Name: "Helper Bot", Type: "app", Joined: true},
+				{ID: "C9", Name: "random", Type: "channel", Joined: false},
+			}
+	})
+
+	app.Update(WorkspaceUserMetadataUpdatedMsg{
+		TeamID: "T1",
+	})
+
+	items := app.sidebar.Items()
+	if len(items) != 2 || items[1].ID != "D1" || items[1].Type != "app" {
+		t.Fatalf("sidebar items = %+v, want latest reader rows with D1/app", items)
+	}
+	app.channelFinder.Open()
+	for _, k := range []string{"r", "a", "n"} {
+		app.channelFinder.HandleKey(k)
+	}
+	res := app.channelFinder.HandleKey("enter")
+	if res == nil || res.ID != "C9" || res.Joined {
+		t.Fatalf("finder result = %+v, want latest browseable C9", res)
+	}
+}
+
+func TestWorkspaceUserMetadataUpdatedMsg_DoesNotRegressAfterNewerScalarUpdates(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	userNames := map[string]string{"U1": "new"}
+	externals := map[string]bool{"U1": true}
+	app.SetWorkspaceUserStateReader(func(teamID string) (map[string]string, map[string]bool) {
+		return cloneStringMap(userNames), cloneBoolMap(externals)
+	})
+	app.SetWorkspaceMetadataReader(func(teamID string) ([]sidebar.ChannelItem, []channelfinder.Item) {
+		return []sidebar.ChannelItem{{ID: "D1", Name: "Helper Bot", Type: "app", DMUserID: "U1"}}, []channelfinder.Item{{ID: "D1", Name: "Helper Bot", Type: "app", Joined: true}}
+	})
+	app.messagepane.SetMessages([]messages.MessageItem{{TS: "1.0", UserID: "U1", UserName: "U1", Text: "hi"}})
+
+	app.Update(UserResolvedMsg{TeamID: "T1", UserID: "U1", DisplayName: "new"})
+	app.Update(UserExternalMsg{UserID: "U1", IsExternal: true})
+	app.Update(WorkspaceUserMetadataUpdatedMsg{TeamID: "T1"})
+
+	if got := app.userNames["U1"]; got != "new" {
+		t.Fatalf("app userNames[U1] = %q, want new", got)
+	}
+	if got := app.messagepane.Messages()[0].UserName; got != "new" {
+		t.Fatalf("message UserName = %q, want new", got)
+	}
+	found := false
+	for _, u := range app.compose.MentionUsers() {
+		if u.ID == "U1" {
+			found = true
+			if !u.IsExternal {
+				t.Fatal("external flag regressed after bulk signal")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("compose picker missing U1 after bulk signal")
+	}
+}
+
+func TestWorkspaceUserMetadataUpdatedMsg_RefreshesActiveChannelMetadataWithoutReset(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.activeChannelID = "D1"
+	app.SetChannels([]sidebar.ChannelItem{{ID: "D1", Name: "old dm", Type: "dm", DMUserID: "U1"}})
+	app.SetChannelFinderItems([]channelfinder.Item{{ID: "D1", Name: "old dm", Type: "dm", Joined: true}})
+	app.messagepane.SetChannel("old dm", "important topic")
+	app.messagepane.SetChannelType("dm")
+	msgs := []messages.MessageItem{
+		{TS: "1.0", UserID: "U2", UserName: "bob", Text: "first"},
+		{TS: "2.0", UserID: "U2", UserName: "bob", Text: "second"},
+	}
+	app.messagepane.SetMessages(msgs)
+	app.messagepane.SelectByIndex(0)
+	app.compose.SetChannel("old dm")
+	app.compose.SetValue("")
+	app.compose.Blur()
+	app.statusbar.SetChannel("old dm")
+	app.statusbar.SetChannelType("dm")
+	app.setFocusedWindowChannel("D1", "old dm", "dm")
+	app.SetWorkspaceUserStateReader(func(teamID string) (map[string]string, map[string]bool) {
+		return map[string]string{"U1": "Helper Bot", "U2": "bob"}, nil
+	})
+	app.SetWorkspaceMetadataReader(func(teamID string) ([]sidebar.ChannelItem, []channelfinder.Item) {
+		return []sidebar.ChannelItem{{ID: "D1", Name: "Helper Bot", Type: "app", DMUserID: "U1"}}, []channelfinder.Item{{ID: "D1", Name: "Helper Bot", Type: "app", Joined: true}}
+	})
+
+	app.Update(WorkspaceUserMetadataUpdatedMsg{TeamID: "T1"})
+
+	if got := app.messagepane.Messages(); !reflect.DeepEqual(got, msgs) {
+		t.Fatalf("messages changed: got %+v want %+v", got, msgs)
+	}
+	if got := app.messagepane.SelectedIndex(); got != 0 {
+		t.Fatalf("SelectedIndex = %d, want 0", got)
+	}
+	if got := app.messagepane.View(8, 120); !strings.Contains(got, "# Helper Bot") || strings.Contains(got, "old dm") {
+		t.Fatalf("message header = %q, want refreshed app metadata", got)
+	}
+	if got := app.messagepane.View(8, 120); !strings.Contains(got, "important topic") {
+		t.Fatalf("message header = %q, want existing topic preserved", got)
+	}
+	if got := app.statusbar.View(120); !strings.Contains(got, "#Helper Bot") || strings.Contains(got, "old dm") {
+		t.Fatalf("statusbar = %q, want refreshed app metadata", got)
+	}
+	if got := app.compose.View(80, false); !strings.Contains(got, "Message #Helper Bot") || strings.Contains(got, "old dm") {
+		t.Fatalf("compose view = %q, want refreshed placeholder", got)
+	}
+	ch, ok := app.wins.Channel(app.focusedWin)
+	if !ok {
+		t.Fatal("focused window missing channel metadata")
+	}
+	if ch != (wintree.Channel{ID: "D1", Name: "Helper Bot", Type: "app"}) {
+		t.Fatalf("focused window channel = %+v", ch)
 	}
 }
 
@@ -4081,6 +4359,32 @@ func TestSetExternalUsersPropagates(t *testing.T) {
 	}
 	if !found {
 		t.Error("U_EXT missing from picker users")
+	}
+}
+
+func TestSetUserNames_ClonesCallerInput(t *testing.T) {
+	app := NewApp()
+	input := map[string]string{"U1": "alice"}
+
+	app.SetUserNames(input)
+	input["U1"] = "mutated"
+	input["U2"] = "bob"
+
+	if got := app.userNames["U1"]; got != "alice" {
+		t.Fatalf("app userNames[U1] = %q, want alice", got)
+	}
+	if got := app.messagepane.ResolveUserName("U1"); got != "alice" {
+		t.Fatalf("messagepane ResolveUserName(U1) = %q, want alice", got)
+	}
+	if got := app.threadPanel.UserNames()["U1"]; got != "alice" {
+		t.Fatalf("threadPanel userNames[U1] = %q, want alice", got)
+	}
+	if got := app.messagepane.ResolveUserName("U2"); got != "" {
+		t.Fatalf("messagepane unexpectedly saw caller mutation for U2: %q", got)
+	}
+	users := app.compose.MentionUsers()
+	if len(users) != 1 || users[0].ID != "U1" || users[0].DisplayName != "alice" {
+		t.Fatalf("compose users = %+v, want only U1/alice", users)
 	}
 }
 

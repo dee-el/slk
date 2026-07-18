@@ -40,6 +40,34 @@ func TestGlobalFanout_PatchUserNameReachesAllWindows(t *testing.T) {
 	}
 }
 
+func TestGlobalFanout_UserResolvedRepairsRowsWhenMapAlreadyResolved(t *testing.T) {
+	a, w1, w2 := twoWindowApp(t)
+	a.SetUserNames(map[string]string{"U9": "zed"})
+	a.winModels[w1].SetMessages([]messages.MessageItem{{TS: "1.0", UserID: "U9", UserName: "U9", Text: "w1"}})
+	a.winModels[w2].SetMessages([]messages.MessageItem{{TS: "2.0", UserID: "U9", UserName: "U9", Text: "w2"}})
+	a.threadPanel.SetThread(
+		messages.MessageItem{TS: "3.0", UserID: "U9", UserName: "U9", Text: "parent"},
+		[]messages.MessageItem{{TS: "3.1", UserID: "U9", UserName: "U9", Text: "reply"}},
+		"C1",
+		"3.0",
+	)
+
+	_, _ = a.Update(UserResolvedMsg{UserID: "U9", DisplayName: "zed"})
+
+	if got := a.winModels[w1].Messages()[0].UserName; got != "zed" {
+		t.Fatalf("w1 message UserName = %q, want zed", got)
+	}
+	if got := a.winModels[w2].Messages()[0].UserName; got != "zed" {
+		t.Fatalf("w2 message UserName = %q, want zed", got)
+	}
+	if got := a.threadPanel.ParentMsg().UserName; got != "zed" {
+		t.Fatalf("thread parent UserName = %q, want zed", got)
+	}
+	if got := a.threadPanel.Replies()[0].UserName; got != "zed" {
+		t.Fatalf("thread reply UserName = %q, want zed", got)
+	}
+}
+
 func TestGlobalFanout_ChannelNamesBumpAllVersions(t *testing.T) {
 	a, w1, w2 := twoWindowApp(t)
 	v1, v2 := a.winModels[w1].Version(), a.winModels[w2].Version()

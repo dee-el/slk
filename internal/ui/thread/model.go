@@ -578,7 +578,19 @@ func (m *Model) SetAvatarFunc(fn messages.AvatarFunc) {
 	m.avatarFn = fn
 }
 
-// SetUserNames sets the user ID -> display name map for mention resolution.
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+// SetUserNames sets the immutable user ID -> display name snapshot for mention
+// resolution.
 // Bumps userNamesV unconditionally so chromeCache (and any other cache
 // keyed by this version counter) sees the change via a simple `!=` check.
 func (m *Model) SetUserNames(names map[string]string) {
@@ -597,8 +609,8 @@ func (m *Model) SetCurrentUser(userID string) {
 // rendering) and overwrites the UserName field on the parent message
 // and every cached reply authored by userID. Always invalidates the
 // render cache after a map change so mentions of <@userID> in other
-// authors' text re-resolve. Idempotent: no-op when the name is
-// unchanged.
+// authors' text re-resolve. If the map already has displayName, stale
+// authored rows are still repaired.
 //
 // Mirrors messages.Model.PatchUserName. Used by the async user-
 // resolution path: history fetchers stash MessageItem.UserName =
@@ -609,13 +621,26 @@ func (m *Model) PatchUserName(userID, displayName string) {
 	if userID == "" {
 		return
 	}
-	if m.userNames == nil {
-		m.userNames = map[string]string{}
+	rowsChanged := false
+	if m.parent.UserID == userID && m.parent.UserName != displayName {
+		m.parent.UserName = displayName
+		rowsChanged = true
 	}
-	if m.userNames[userID] == displayName {
+	for i := range m.replies {
+		if m.replies[i].UserID == userID && m.replies[i].UserName != displayName {
+			m.replies[i].UserName = displayName
+			rowsChanged = true
+		}
+	}
+	if m.userNames != nil && m.userNames[userID] == displayName {
+		if rowsChanged {
+			m.InvalidateCache()
+		}
 		return
 	}
-	m.userNames[userID] = displayName
+	next := cloneStringMap(m.userNames)
+	next[userID] = displayName
+	m.userNames = next
 	// The render cache stores rows with their mentions already resolved
 	// (RenderSlackMarkdown consults userNames at render time), so any
 	// cached row that mentioned <@userID> is now stale. Mirror
@@ -623,17 +648,7 @@ func (m *Model) PatchUserName(userID, displayName string) {
 	// Bump userNamesV so chromeCache (which renders the parent message
 	// and consults userNames for its mentions) also rebuilds.
 	m.userNamesV++
-	m.cache = nil
-	m.viewCacheValid = false
-	if m.parent.UserID == userID && m.parent.UserName != displayName {
-		m.parent.UserName = displayName
-	}
-	for i := range m.replies {
-		if m.replies[i].UserID == userID && m.replies[i].UserName != displayName {
-			m.replies[i].UserName = displayName
-		}
-	}
-	m.dirty()
+	m.InvalidateCache()
 }
 
 // SetChannelNames sets the channel ID -> name map used to resolve bare
