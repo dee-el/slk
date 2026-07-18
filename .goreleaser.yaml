@@ -9,14 +9,13 @@ before:
     - go mod tidy
 
 builds:
-  - id: slk
+  - id: slk-static
     main: ./cmd/slk
     binary: slk
     env:
       - CGO_ENABLED=0
     goos:
       - linux
-      - darwin
       - windows
     goarch:
       - amd64
@@ -33,8 +32,43 @@ builds:
       - -X main.commit={{.Commit}}
       - -X main.date={{.Date}}
 
+  # golang.design/x/clipboard requires CGO on macOS. Build both Darwin
+  # architectures on the native Intel macOS release runner so released
+  # binaries retain image/text clipboard support.
+  - id: slk-darwin
+    main: ./cmd/slk
+    binary: slk
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    overrides:
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=clang-darwin-amd64
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=clang-darwin-arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
 archives:
   - id: slk
+    ids:
+      - slk-static
+      - slk-darwin
     formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_
@@ -81,6 +115,8 @@ changelog:
 
 nfpms:
   - id: slk
+    ids:
+      - slk-static
     package_name: slk
     vendor: Grant Ammons
     homepage: https://github.com/gammons/slk
