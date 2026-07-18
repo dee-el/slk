@@ -6,19 +6,19 @@
 // sidebar, MESSAGES, thread). It has two top-level branches
 // depending on a.view:
 //
-//   ViewThreads  -> threads-list panel (no compose, no typing
-//                   line). Whole bordered panel is cached on
-//                   threadsView.Version + layout key.
-//   ViewChannels -> message pane + typing row + compose box, with
-//                   a split-cache pattern: bordered top region
-//                   (messages + top edge + sides only, no bottom
-//                   edge) cached on messagepane.Version only;
-//                   bottom region (typing + compose + bottom
-//                   edge + sides) re-rendered fresh each frame.
-//                   The two stack into a continuous bordered
-//                   panel because BorderBottom(false) on the top
-//                   + BorderTop(false) on the bottom lines up the
-//                   border glyphs.
+//	ViewThreads  -> threads-list panel (no compose, no typing
+//	                line). Whole bordered panel is cached on
+//	                threadsView.Version + layout key.
+//	ViewChannels -> message pane + typing row + compose box, with
+//	                a split-cache pattern: bordered top region
+//	                (messages + top edge + sides only, no bottom
+//	                edge) cached on messagepane.Version only;
+//	                bottom region (typing + compose + bottom
+//	                edge + sides) re-rendered fresh each frame.
+//	                The two stack into a continuous bordered
+//	                panel because BorderBottom(false) on the top
+//	                + BorderTop(false) on the bottom lines up the
+//	                border glyphs.
 //
 // PERF (see Phase 2g render-cache discussion + the split-rendering
 // note in the channels branch): caching the entire bordered panel
@@ -106,20 +106,11 @@ func (a *App) renderMessagesRegion(frame panelLayoutFrame, themeVer int64, previ
 // no compose / typing row. Whole panel is cached on
 // threadsView.Version.
 //
-// SetUserNames and SetSelfUserID MUST run BEFORE snapshotting
-// threadsView.Version: both are equality-checked in the model,
-// so identical input is a no-op, but reading Version() before
-// the Set calls would mean the cache key reflects a pre-update
-// version and the stored output would later miss its own key.
-// (This was a real regression once -- see the verbose comment
-// preserved verbatim below.)
-//
 // Channel names are NOT pushed here. They're fanned out from
 // SetChannels when the channel list changes, which is rare
 // relative to render frequency, so we keep that allocation off
 // this hot path.
 func (a *App) renderThreadsViewPanel(msgWidth, msgBorder, contentHeight int, msgFocused bool, msgLayoutKey int64) string {
-	a.threadsView.SetUserNames(a.userNames)
 	a.threadsView.SetSelfUserID(a.currentUserID)
 	tvVersion := a.threadsView.Version()
 	c := &a.renderCache.msgPanel

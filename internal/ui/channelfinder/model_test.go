@@ -287,6 +287,20 @@ func TestSetBrowseableReplacesPreviousBrowseable(t *testing.T) {
 	}
 }
 
+func TestSetItemsRefiltersWhenOpen(t *testing.T) {
+	m := New()
+	m.SetItems([]Item{{ID: "C1", Name: "general", Type: "channel", Joined: true}})
+	m.Open()
+	m.HandleKey("h")
+
+	m.SetItems([]Item{{ID: "D1", Name: "helper-bot", Type: "app", Joined: true}})
+
+	res := m.HandleKey("enter")
+	if res == nil || res.ID != "D1" {
+		t.Fatalf("result = %+v, want D1 after open-overlay SetItems refilter", res)
+	}
+}
+
 func TestEnterReturnsJoinedFlag(t *testing.T) {
 	m := New()
 	// LastVisited values pin the order: C1 (joined) appears first, C2

@@ -82,10 +82,10 @@ func borderFillStyle() lipgloss.Style {
 
 // Model holds the threads-list state.
 type Model struct {
-	summaries  []cache.ThreadSummary
+	summaries    []cache.ThreadSummary
 	userNames    map[string]string
 	channelNames map[string]string
-	selfUserID string
+	selfUserID   string
 
 	selected int
 	yOffset  int
@@ -130,10 +130,10 @@ func (m *Model) Version() int64 { return m.version }
 
 func (m *Model) dirty() { m.version++ }
 
-// SetUserNames replaces the user id -> display name map. No-op (no version
-// bump) when the new map has the same length and the same key/value pairs as
-// the current one — required so the App-level panel cache (app.go:4068-4093)
-// can hit on idle re-renders.
+// SetUserNames replaces the immutable user id -> display name snapshot. No-op
+// (no version bump) when the new map has the same length and the same
+// key/value pairs as the current one — required so the App-level panel cache
+// (app.go:4068-4093) can hit on idle re-renders.
 func (m *Model) SetUserNames(names map[string]string) {
 	if names == nil {
 		names = map[string]string{}

@@ -288,6 +288,15 @@ type App struct {
 	// from WorkspaceReadyMsg / WorkspaceSwitchedMsg. Read by the link
 	// router to match permalink hosts against the active workspace.
 	workspaceDomains map[string]string
+	// workspaceMetadataReader returns the current synchronized sidebar/finder
+	// metadata for a workspace. Used by bulk user-metadata refresh so the UI
+	// pulls the newest rows at application time instead of trusting an async
+	// snapshot captured earlier.
+	workspaceMetadataReader func(teamID string) ([]sidebar.ChannelItem, []channelfinder.Item)
+	// workspaceUserStateReader returns the current synchronized user-name and
+	// external-user snapshots for a workspace. Used by bulk user-metadata
+	// refresh so stale async signals cannot overwrite newer scalar updates.
+	workspaceUserStateReader func(teamID string) (map[string]string, map[string]bool)
 
 	// pendingLinkNav tracks an in-flight permalink navigation: the
 	// channel was (or is being) opened and the message-select /
@@ -1921,6 +1930,14 @@ func (a *App) SetChannelFinderItems(items []channelfinder.Item) {
 	a.channelFinder.SetItems(items)
 }
 
+func (a *App) SetWorkspaceMetadataReader(f func(teamID string) ([]sidebar.ChannelItem, []channelfinder.Item)) {
+	a.workspaceMetadataReader = f
+}
+
+func (a *App) SetWorkspaceUserStateReader(f func(teamID string) (map[string]string, map[string]bool)) {
+	a.workspaceUserStateReader = f
+}
+
 // SetAvatarFunc sets the function used to get rendered avatars for messages.
 func (a *App) SetAvatarFunc(fn messages.AvatarFunc) {
 	a.avatarFn = fn
@@ -2217,18 +2234,41 @@ func openURLCmd(url string) tea.Cmd {
 	}
 }
 
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneBoolMap(src map[string]bool) map[string]bool {
+	if len(src) == 0 {
+		return map[string]bool{}
+	}
+	out := make(map[string]bool, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
 // SetUserNames passes the user ID -> display name map to the message pane for mention resolution.
 func (a *App) SetUserNames(names map[string]string) {
-	a.userNames = names
-	a.threadsView.SetUserNames(names)
+	owned := cloneStringMap(names)
+	a.userNames = owned
+	a.threadsView.SetUserNames(owned)
 	for _, m := range a.allWinModels() {
-		m.SetUserNames(names)
+		m.SetUserNames(owned)
 	}
-	a.threadPanel.SetUserNames(names)
+	a.threadPanel.SetUserNames(owned)
 
 	// Build user list for mention picker
-	users := make([]mentionpicker.User, 0, len(names))
-	for id, displayName := range names {
+	users := make([]mentionpicker.User, 0, len(owned))
+	for id, displayName := range owned {
 		users = append(users, mentionpicker.User{
 			ID:          id,
 			DisplayName: displayName,
@@ -2283,7 +2323,7 @@ func (a *App) SetExternalUsers(externalIDs map[string]bool) {
 	if externalIDs == nil {
 		externalIDs = map[string]bool{}
 	}
-	a.externalUsers = externalIDs
+	a.externalUsers = cloneBoolMap(externalIDs)
 	if len(a.userNames) > 0 {
 		a.SetUserNames(a.userNames)
 	}

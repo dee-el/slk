@@ -609,6 +609,17 @@ func (m *Model) SetChannel(name, topic string) {
 	m.channelTopic = topic
 }
 
+// SetChannelName refreshes display metadata without clearing the current
+// channel topic or resetting attachment failure state.
+func (m *Model) SetChannelName(name string) {
+	if m.channelName == name {
+		return
+	}
+	m.channelName = name
+	m.chromeCacheValid = false
+	m.dirty()
+}
+
 // SetChannelType sets the channel type used to pick the header glyph
 // (# for public, \u25c6 for private, \u25cf for dm/group_dm).
 // Pass an empty string or "channel" for the default `#` prefix.
@@ -1313,7 +1324,19 @@ func (m *Model) ResolveUserName(userID string) string {
 	return m.userNames[userID]
 }
 
-// SetUserNames sets the user ID -> display name map used to resolve @mentions.
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+// SetUserNames sets the immutable user ID -> display name snapshot used to
+// resolve @mentions.
 func (m *Model) SetUserNames(names map[string]string) {
 	m.userNames = names
 	m.cache = nil // invalidate cache so mentions re-render
@@ -1329,8 +1352,8 @@ func (m *Model) SetCurrentUser(userID string) {
 // PatchUserName updates the in-memory userNames map (used for @mention
 // rendering) and overwrites the UserName field on every cached message
 // authored by userID. Invalidates the render cache so the next View()
-// re-renders affected rows. Idempotent: no-op when the name is
-// unchanged.
+// re-renders affected rows. If the map already has displayName, stale
+// authored rows are still repaired.
 //
 // Used by the async user-resolution path: history fetchers stash
 // MessageItem.UserName = m.UserID for unknown authors. When the
@@ -1340,24 +1363,27 @@ func (m *Model) PatchUserName(userID, displayName string) {
 	if userID == "" {
 		return
 	}
-	if m.userNames == nil {
-		m.userNames = map[string]string{}
+	rowsChanged := false
+	for i := range m.messages {
+		if m.messages[i].UserID == userID && m.messages[i].UserName != displayName {
+			m.messages[i].UserName = displayName
+			rowsChanged = true
+		}
 	}
-	if m.userNames[userID] == displayName {
+	if m.userNames != nil && m.userNames[userID] == displayName {
+		if rowsChanged {
+			m.InvalidateCache()
+		}
 		return
 	}
-	m.userNames[userID] = displayName
+	next := cloneStringMap(m.userNames)
+	next[userID] = displayName
+	m.userNames = next
 	// The render cache stores rows with their mentions already resolved
 	// (RenderSlackMarkdown consults userNames at render time), so any
 	// cached row that mentioned <@userID> is now stale. Mirror
 	// SetUserNames's behavior: invalidate unconditionally on map change.
-	m.cache = nil
-	for i := range m.messages {
-		if m.messages[i].UserID == userID && m.messages[i].UserName != displayName {
-			m.messages[i].UserName = displayName
-		}
-	}
-	m.dirty()
+	m.InvalidateCache()
 }
 
 // SetChannelNames sets the channel ID -> name map used to resolve bare

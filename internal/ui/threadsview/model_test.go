@@ -260,6 +260,16 @@ func TestSetUserNames_IdempotentDoesNotBumpVersion(t *testing.T) {
 	}
 }
 
+func TestSetUserNames_EquivalentSnapshotDoesNotBumpVersion(t *testing.T) {
+	m := New(map[string]string{}, "USELF")
+	m.SetUserNames(map[string]string{"U1": "alice", "U2": "bob"})
+	v0 := m.Version()
+	m.SetUserNames(map[string]string{"U1": "alice", "U2": "bob"})
+	if v1 := m.Version(); v1 != v0 {
+		t.Errorf("SetUserNames(equal snapshot) bumped Version: v0=%d v1=%d", v0, v1)
+	}
+}
+
 // TestVersion_StableAcrossIdenticalSetCalls is the regression guard for the
 // app.go:4068-4093 cache-key bug: pushing the same userNames + selfUserID
 // repeatedly must NOT bump Version, otherwise the panel cache can never hit.

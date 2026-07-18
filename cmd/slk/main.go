@@ -102,7 +102,7 @@ type WorkspaceContext struct {
 	Client     *slackclient.Client
 	ConnMgr    *slackclient.ConnectionManager
 	RTMHandler *rtmEventHandler
-	UserNames  map[string]string
+	UserNames  *userNameStore
 	// AvatarURLs maps userID -> avatar image URL. Populated from the
 	// local users cache at connect time (synchronous, before any
 	// goroutines spin up) and refreshed from the background
@@ -120,13 +120,13 @@ type WorkspaceContext struct {
 	// UserNamesByHandle maps a user's handle (the Slack `name` field
 	// without an `@`) to a display name. Used to resolve participant
 	// handles in mpdm channel names like `mpdm-grant--myles--ray-1`.
-	UserNamesByHandle map[string]string
+	UserNamesByHandle *handleNameStore
 	// BotUserIDs is the set of user IDs known to be Slack apps or bots.
 	// Populated from the local cache on startup and refreshed by the
 	// background users.list fetch and any on-demand resolveUser calls.
 	// Used during channel construction to bucket app DMs into a separate
 	// "Apps" sidebar section.
-	BotUserIDs map[string]bool
+	BotUserIDs *botUserIDStore
 	// SectionStore holds the user's Slack-native sidebar sections for
 	// this workspace. Nil when use_slack_sections is disabled, the
 	// REST bootstrap failed, or this workspace hasn't connected yet.
@@ -155,6 +155,7 @@ type WorkspaceContext struct {
 	// after a failed one. The UI uses it to decide whether to draw
 	// the "Threads list unavailable" banner.
 	SubscriptionsAvailable bool
+	metadataMu             sync.RWMutex
 	Channels               []sidebar.ChannelItem
 	// FinderItems is the merged list shown in the Ctrl+T finder. Initially
 	// contains only joined channels; the BrowseableChannelsLoadedMsg pipeline
@@ -176,10 +177,13 @@ type WorkspaceContext struct {
 	// Populated once at connect from cache.GetChannelVisits and
 	// updated on every ChannelSelectedMsg via the visit recorder.
 	// Used to populate channelfinder.Item.LastVisited for sort.
-	LastVisitedByChannel map[string]int64
+	LastVisitedByChannel *lastVisitedStore
+	// ExternalUsers tracks workspace-scoped Slack Connect / shared-channel users
+	// as synchronized canonical state for UI snapshot refresh.
+	ExternalUsers *externalUserStore
 	// UserResolver dispatches background users.info lookups for
 	// unknown message authors. Set in connectWorkspace once the
-	// in-memory UserNames map and the *tea.Program are both available.
+	// canonical UserNames store and the *tea.Program are both available.
 	// Hot-path message processors call resolveUserCached first and
 	// fall back to UserResolver.Request(userID) to enqueue an async
 	// fetch; the goroutine emits ui.UserResolvedMsg back into the
@@ -198,12 +202,9 @@ type WorkspaceContext struct {
 // scoped callback reads router.Active() at invocation time so the
 // effective workspace tracks the user's current Ctrl-N selection
 // without any closure rebinding.
-//
-// The `all` map is populated only during the connect-workspaces phase
-// (before p.Run); subsequent reads from p.Send-invoked callbacks are
-// race-free without a mutex.
 type workspaceRouter struct {
 	active atomic.Pointer[WorkspaceContext]
+	mu     sync.RWMutex
 	all    map[string]*WorkspaceContext
 }
 
@@ -213,8 +214,40 @@ func newWorkspaceRouter() *workspaceRouter {
 
 func (r *workspaceRouter) Active() *WorkspaceContext  { return r.active.Load() }
 func (r *workspaceRouter) Set(wctx *WorkspaceContext) { r.active.Store(wctx) }
+
+func (r *workspaceRouter) Add(teamID string, wctx *WorkspaceContext) {
+	if r == nil || teamID == "" || wctx == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.all == nil {
+		r.all = map[string]*WorkspaceContext{}
+	}
+	r.all[teamID] = wctx
+	r.mu.Unlock()
+}
+
 func (r *workspaceRouter) ByID(teamID string) *WorkspaceContext {
-	return r.all[teamID]
+	if r == nil || teamID == "" {
+		return nil
+	}
+	r.mu.RLock()
+	wctx := r.all[teamID]
+	r.mu.RUnlock()
+	return wctx
+}
+
+func (r *workspaceRouter) Snapshot() map[string]*WorkspaceContext {
+	if r == nil {
+		return map[string]*WorkspaceContext{}
+	}
+	r.mu.RLock()
+	out := make(map[string]*WorkspaceContext, len(r.all))
+	for teamID, wctx := range r.all {
+		out[teamID] = wctx
+	}
+	r.mu.RUnlock()
+	return out
 }
 
 // userResolver dispatches users.info lookups for unknown message
@@ -227,6 +260,8 @@ type userResolver struct {
 	client   *slackclient.Client
 	db       *cache.DB
 	avatars  *avatar.Cache
+	names    *userNameStore
+	external *externalUserStore
 	send     func(tea.Msg)
 	inflight sync.Map // userID -> struct{}
 }
@@ -236,14 +271,18 @@ func newUserResolver(
 	client *slackclient.Client,
 	db *cache.DB,
 	avatars *avatar.Cache,
+	names *userNameStore,
+	external *externalUserStore,
 	send func(tea.Msg),
 ) *userResolver {
 	return &userResolver{
-		teamID:  teamID,
-		client:  client,
-		db:      db,
-		avatars: avatars,
-		send:    send,
+		teamID:   teamID,
+		client:   client,
+		db:       db,
+		avatars:  avatars,
+		names:    names,
+		external: external,
+		send:     send,
 	}
 }
 
@@ -300,14 +339,10 @@ func (r *userResolver) Request(userID string) {
 		isExternal := u.TeamID != "" && u.TeamID != r.teamID
 		// Persist to the cache DB (its own goroutine-safe SQLite
 		// connection) and the avatar cache (internal RWMutex), but
-		// do NOT write r.userNames[userID] from this goroutine —
-		// userNames is a plain map shared with the UI goroutine and
-		// other code paths, and a direct write here trips Go's
-		// "concurrent map writes" detector under load (two parallel
-		// Request goroutines for different userIDs is enough). The
-		// UserResolvedMsg below is delivered to the bubbletea Update
-		// loop, which calls Model.PatchUserName on the UI goroutine
-		// — that is the single safe writer for in-history rows.
+		// do NOT patch UI rows from this goroutine. The UserResolvedMsg
+		// below is delivered to the bubbletea Update loop, which repairs
+		// in-history rows and updates the App snapshot on the UI
+		// goroutine.
 		// Subsequent resolveUserCached misses fall back to the DB
 		// row we just upserted, so we don't re-fetch on every miss
 		// in the small window before UserResolvedMsg lands.
@@ -322,6 +357,12 @@ func (r *userResolver) Request(userID string) {
 			IsBot:       isBot,
 			IsExternal:  isExternal,
 		})
+		if r.names != nil {
+			r.names.Set(userID, name)
+		}
+		if r.external != nil {
+			r.external.Set(userID, isExternal)
+		}
 		if r.send != nil {
 			r.send(ui.UserResolvedMsg{
 				TeamID:      r.teamID,
@@ -379,6 +420,9 @@ func (r *userResolver) RequestBot(botID, username string) {
 			Presence:    "away",
 			IsBot:       true,
 		})
+		if r.names != nil {
+			r.names.Set(botID, name)
+		}
 		if r.send != nil {
 			r.send(ui.UserResolvedMsg{
 				TeamID:      r.teamID,
@@ -1000,6 +1044,28 @@ func run() error {
 			return ids
 		})
 
+		app.SetWorkspaceMetadataReader(func(teamID string) ([]sidebar.ChannelItem, []channelfinder.Item) {
+			if teamID == "" {
+				return nil, nil
+			}
+			wctx := router.ByID(teamID)
+			if wctx == nil {
+				return nil, nil
+			}
+			return wctx.ChannelsSnapshot(), wctx.FinderItemsSnapshot()
+		})
+
+		app.SetWorkspaceUserStateReader(func(teamID string) (map[string]string, map[string]bool) {
+			if teamID == "" {
+				return nil, nil
+			}
+			wctx := router.ByID(teamID)
+			if wctx == nil {
+				return nil, nil
+			}
+			return wctx.UserNames.Snapshot(), wctx.ExternalUsers.Snapshot()
+		})
+
 		app.SetChannelService(ui.NewChannelService(ui.ChannelServiceFuncs{
 			RecordVisit: func(channelID ids.ChannelID) {
 				chIDStr := string(channelID)
@@ -1007,7 +1073,7 @@ func run() error {
 				if wctx == nil {
 					return
 				}
-				wctx.LastVisitedByChannel[chIDStr] = time.Now().Unix()
+				wctx.LastVisitedByChannel.Set(chIDStr, time.Now().Unix())
 				teamID := wctx.TeamID
 				go func() {
 					if err := db.RecordChannelVisit(teamID, chIDStr); err != nil {
@@ -1021,28 +1087,14 @@ func run() error {
 				if wctx == nil {
 					return "", "", false
 				}
-				// Sidebar (joined channels + Slack-native sections).
-				for _, ch := range wctx.Channels {
-					if ch.ID == chIDStr {
-						return ch.Name, ch.Type, true
-					}
-				}
-				// Finder items (joined + browseable). Covers DMs/group DMs
-				// that aren't in the sidebar pre-conversation, and any
-				// browseable public channels.
-				for _, it := range wctx.FinderItems {
-					if it.ID == chIDStr {
-						return it.Name, it.Type, true
-					}
-				}
-				return "", "", false
+				return wctx.ChannelLookup(chIDStr)
 			},
 			ReadCache: func(channelID ids.ChannelID) []messages.MessageItem {
 				wctx := router.Active()
 				if wctx == nil {
 					return nil
 				}
-				return loadCachedMessages(db, wctx.Client.UserID(), string(channelID), wctx.UserNames, tsFormat, router)
+				return loadCachedMessages(db, wctx.Client.UserID(), string(channelID), wctx.UserNames.Snapshot(), tsFormat, router)
 			},
 			SyncedAt: func(channelID ids.ChannelID) int64 {
 				return db.GetChannelSyncedAt(string(channelID))
@@ -1095,7 +1147,7 @@ func run() error {
 				if wctx == nil {
 					return nil
 				}
-				msgItems := fetchChannelMessages(wctx.Client, chIDStr, db, wctx.UserNames, tsFormat, avatarCache, router)
+				msgItems := fetchChannelMessages(wctx.Client, chIDStr, db, wctx.UserNames.Snapshot(), tsFormat, avatarCache, router)
 
 				state, _ := db.GetChannelReadState(chIDStr)
 				lastReadTS := state.LastReadTS
@@ -1123,7 +1175,7 @@ func run() error {
 				if wctx == nil {
 					return nil
 				}
-				msgItems := fetchOlderMessages(wctx.Client, chIDStr, string(oldestTS), db, wctx.UserNames, tsFormat, router)
+				msgItems := fetchOlderMessages(wctx.Client, chIDStr, string(oldestTS), db, wctx.UserNames.Snapshot(), tsFormat, router)
 				return ui.OlderMessagesLoadedMsg{
 					ChannelID: chIDStr,
 					AnchorTS:  string(oldestTS),
@@ -1136,7 +1188,7 @@ func run() error {
 				if wctx == nil {
 					return nil
 				}
-				msgItems := fetchMessagesAround(wctx.Client, chIDStr, string(ts), db, wctx.UserNames, tsFormat, router)
+				msgItems := fetchMessagesAround(wctx.Client, chIDStr, string(ts), db, wctx.UserNames.Snapshot(), tsFormat, router)
 				if msgItems == nil {
 					return ui.MessagesAroundLoadedMsg{ChannelID: chIDStr, TargetTS: string(ts), Err: errors.New("history fetch failed")}
 				}
@@ -1189,7 +1241,6 @@ func run() error {
 					return ui.MessageSendFailedMsg{ChannelID: chIDStr, Reason: "no active workspace"}
 				}
 				client := wctx.Client
-				userNames := wctx.UserNames
 				ctx := context.Background()
 				ts, sentMrkdwn, err := client.SendMessage(ctx, chIDStr, text)
 				if err != nil {
@@ -1197,7 +1248,7 @@ func run() error {
 					return ui.MessageSendFailedMsg{ChannelID: chIDStr, Reason: err.Error()}
 				}
 				userName := "you"
-				if resolved, ok := userNames[client.UserID()]; ok {
+				if resolved, ok := wctx.UserNames.Get(client.UserID()); ok {
 					userName = resolved
 				}
 				return ui.MessageSentMsg{
@@ -1341,7 +1392,7 @@ func run() error {
 				if wctx == nil {
 					return nil
 				}
-				replies := fetchThreadReplies(wctx.Client, chIDStr, threadTSStr, db, wctx.UserNames, tsFormat, avatarCache, router)
+				replies := fetchThreadReplies(wctx.Client, chIDStr, threadTSStr, db, wctx.UserNames.Snapshot(), tsFormat, avatarCache, router)
 				return ui.ThreadRepliesLoadedMsg{
 					ThreadTS: threadTSStr,
 					Replies:  replies,
@@ -1352,7 +1403,7 @@ func run() error {
 				if wctx == nil {
 					return nil
 				}
-				return loadCachedThreadReplies(db, wctx.Client.UserID(), string(channelID), string(threadTS), wctx.UserNames, tsFormat, router)
+				return loadCachedThreadReplies(db, wctx.Client.UserID(), string(channelID), string(threadTS), wctx.UserNames.Snapshot(), tsFormat, router)
 			},
 			Mark: func(channelID ids.ChannelID, threadTS ids.ThreadTS, ts ids.MessageTS) {
 				chIDStr, threadTSStr, tsStr := string(channelID), string(threadTS), string(ts)
@@ -1376,7 +1427,6 @@ func run() error {
 					return ui.ThreadReplySendFailedMsg{ChannelID: chIDStr, ThreadTS: threadTSStr, Reason: "no active workspace"}
 				}
 				client := wctx.Client
-				userNames := wctx.UserNames
 				ctx := context.Background()
 				ts, sentMrkdwn, err := client.SendReply(ctx, chIDStr, threadTSStr, text)
 				if err != nil {
@@ -1384,7 +1434,7 @@ func run() error {
 					return ui.ThreadReplySendFailedMsg{ChannelID: chIDStr, ThreadTS: threadTSStr, Reason: err.Error()}
 				}
 				userName := "you"
-				if resolved, ok := userNames[client.UserID()]; ok {
+				if resolved, ok := wctx.UserNames.Get(client.UserID()); ok {
 					userName = resolved
 				}
 				return ui.ThreadReplySentMsg{
@@ -1503,18 +1553,7 @@ func run() error {
 		activeTeamID = teamID
 		router.Set(wctx)
 
-		// Build external-user set from cached records so the mention
-		// picker reflects Slack Connect / shared-channel guest status
-		// for the workspace we're switching into. Best-effort: empty
-		// map on error.
-		external := map[string]bool{}
-		if users, err := db.ListUsers(wctx.TeamID); err == nil {
-			for _, u := range users {
-				if u.IsExternal {
-					external[u.ID] = true
-				}
-			}
-		}
+		external := wctx.ExternalUsers.Snapshot()
 
 		return ui.WorkspaceSwitchedMsg{
 			TeamID:           wctx.TeamID,
@@ -1522,9 +1561,9 @@ func run() error {
 			Domain:           wctx.Client.TeamSubdomain(),
 			Theme:            cfg.ResolveTheme(teamID),
 			SidebarWidth:     cfg.ResolveWidth(teamID),
-			Channels:         wctx.Channels,
-			FinderItems:      wctx.FinderItems,
-			UserNames:        wctx.UserNames,
+			Channels:         wctx.ChannelsSnapshot(),
+			FinderItems:      wctx.FinderItemsSnapshot(),
+			UserNames:        wctx.UserNames.Snapshot(),
 			ExternalUsers:    external,
 			UserID:           wctx.UserID,
 			CustomEmoji:      wctx.CustomEmoji,
@@ -1600,7 +1639,7 @@ func run() error {
 			}
 
 			workspaces[wctx.TeamID] = wctx
-			router.all[wctx.TeamID] = wctx
+			router.Add(wctx.TeamID, wctx)
 			wsMgr.AddWorkspace(wctx.TeamID, wctx.TeamName, "")
 
 			// Decide whether this workspace becomes the active one.
@@ -1623,14 +1662,6 @@ func run() error {
 				})
 			}
 
-			// Build channel lookup maps for notifications
-			channelNames := make(map[string]string, len(wctx.Channels))
-			channelTypes := make(map[string]string, len(wctx.Channels))
-			for _, ch := range wctx.Channels {
-				channelNames[ch.ID] = ch.Name
-				channelTypes[ch.ID] = ch.Type
-			}
-
 			// Start WebSocket for this workspace
 			teamID := wctx.TeamID
 			handler := &rtmEventHandler{
@@ -1643,8 +1674,6 @@ func run() error {
 				notifier:        notifier,
 				notifyCfg:       cfg.Notifications,
 				currentUserID:   wctx.UserID,
-				channelNames:    channelNames,
-				channelTypes:    channelTypes,
 				workspaceName:   wctx.TeamName,
 				activeChannelID: func() string { return app.ActiveChannelID() },
 				cfg:             cfg,
@@ -1655,20 +1684,7 @@ func run() error {
 			wctx.ConnMgr = slackclient.NewConnectionManager(wctx.Client, handler)
 			go wctx.ConnMgr.Run(ctx)
 
-			// Build external-user set from cached records so the
-			// mention picker can flag Slack Connect / shared-channel
-			// guests on first render, without waiting for fresh
-			// userResolver lookups. Best-effort: empty map on error
-			// (the picker just won't flag anyone until live resolution
-			// fires).
-			external := map[string]bool{}
-			if users, err := db.ListUsers(wctx.TeamID); err == nil {
-				for _, u := range users {
-					if u.IsExternal {
-						external[u.ID] = true
-					}
-				}
-			}
+			external := wctx.ExternalUsers.Snapshot()
 
 			p.Send(ui.WorkspaceReadyMsg{
 				TeamID:           wctx.TeamID,
@@ -1676,15 +1692,15 @@ func run() error {
 				Domain:           wctx.Client.TeamSubdomain(),
 				Theme:            cfg.ResolveTheme(wctx.TeamID),
 				SidebarWidth:     cfg.ResolveWidth(wctx.TeamID),
-				Channels:         wctx.Channels,
-				FinderItems:      wctx.FinderItems,
-				UserNames:        wctx.UserNames,
+				Channels:         wctx.ChannelsSnapshot(),
+				FinderItems:      wctx.FinderItemsSnapshot(),
+				UserNames:        wctx.UserNames.Snapshot(),
 				ExternalUsers:    external,
 				UserID:           wctx.UserID,
 				CustomEmoji:      wctx.CustomEmoji, // empty at this point; filled by the goroutine below
 				SectionsProvider: sectionsProviderAdapter{store: wctx.SectionStore},
 				InitialActive:    isInitial,
-				LastChannelID:    mostRecentlyVisitedChannel(wctx.LastVisitedByChannel),
+				LastChannelID:    mostRecentlyVisitedChannel(wctx.LastVisitedByChannel.Snapshot()),
 			})
 
 			// Fetch workspace custom emojis in the background. When done,
@@ -1711,19 +1727,19 @@ func run() error {
 			// Resolve unknown DM user names in background
 			if len(wctx.UnresolvedDMs) > 0 {
 				go func() {
-					for _, dm := range wctx.UnresolvedDMs {
-						resolved, isBot := resolveUser(wctx.Client, dm.UserID, wctx.UserNames, db, avatarCache)
-						if isBot {
-							wctx.BotUserIDs[dm.UserID] = true
-						}
-						if resolved != dm.UserID {
-							p.Send(ui.DMNameResolvedMsg{
-								ChannelID:   dm.ChannelID,
-								DisplayName: resolved,
-								IsBot:       isBot,
-							})
-						}
-					}
+					resolveUnresolvedDMs(
+						wctx.UnresolvedDMs,
+						func(userID string) (string, bool) {
+							return resolveUser(wctx.Client, userID, wctx.UserNames, db, avatarCache)
+						},
+						func(userID string) { wctx.BotUserIDs.Set(userID) },
+						func(msg tea.Msg) {
+							if p != nil {
+								p.Send(msg)
+							}
+						},
+						wctx.TeamID,
+					)
 				}()
 			}
 		}(ot.Token)
@@ -1738,7 +1754,7 @@ func run() error {
 	defer wakeCancel()
 	go wake.New(10*time.Second, 5*time.Second, func(elapsed time.Duration) {
 		debuglog.Backfill("wake detected: elapsed=%v — triggering catch-up across all workspaces", elapsed)
-		for _, wctx := range router.all {
+		for _, wctx := range router.Snapshot() {
 			if wctx == nil || wctx.RTMHandler == nil {
 				continue
 			}
@@ -1769,12 +1785,13 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		TeamID:               client.TeamID(),
 		TeamName:             token.TeamName,
 		UserID:               client.UserID(),
-		UserNames:            make(map[string]string),
+		UserNames:            newUserNameStore(nil),
 		AvatarURLs:           &sync.Map{},
-		UserNamesByHandle:    make(map[string]string),
-		BotUserIDs:           make(map[string]bool),
+		UserNamesByHandle:    newHandleNameStore(nil),
+		BotUserIDs:           newBotUserIDStore(nil),
+		ExternalUsers:        newExternalUserStore(nil),
 		CustomEmoji:          make(map[string]string),
-		LastVisitedByChannel: make(map[string]int64),
+		LastVisitedByChannel: newLastVisitedStore(nil),
 	}
 	wctx.SubscriptionsAvailable = true
 
@@ -1787,13 +1804,14 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		if name == "" {
 			name = u.Name
 		}
-		wctx.UserNames[u.ID] = name
+		wctx.UserNames.Set(u.ID, name)
 		if u.Name != "" {
-			wctx.UserNamesByHandle[u.Name] = name
+			wctx.UserNamesByHandle.Set(u.Name, name)
 		}
 		if u.IsBot {
-			wctx.BotUserIDs[u.ID] = true
+			wctx.BotUserIDs.Set(u.ID)
 		}
+		wctx.ExternalUsers.Set(u.ID, u.IsExternal)
 		// Record the avatar URL for lazy fetch on first render.
 		//
 		// We intentionally do NOT bulk-Preload every cached user here.
@@ -1816,15 +1834,16 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 	// Construct the per-workspace async user resolver. It writes
 	// resolved display names to the cache DB and emits
 	// UserResolvedMsg back into the bubbletea program; the UI's
-	// Update handler patches the in-memory userNames map on the
-	// UI goroutine via Model.PatchUserName (the single safe writer
-	// for that shared map). p may be nil in tests, in which case
+	// Update handler refreshes the App snapshot and repairs rendered
+	// rows on the UI goroutine. p may be nil in tests, in which case
 	// the resolver's send callback is a no-op.
 	wctx.UserResolver = newUserResolver(
 		wctx.TeamID,
 		wctx.Client,
 		db,
 		avatarCache,
+		wctx.UserNames,
+		wctx.ExternalUsers,
 		func(msg tea.Msg) {
 			if p != nil {
 				p.Send(msg)
@@ -1856,7 +1875,7 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 	if visits, err := db.GetChannelVisits(client.TeamID()); err != nil {
 		log.Printf("warning: loading channel visits for %s: %v", token.TeamName, err)
 	} else {
-		wctx.LastVisitedByChannel = visits
+		wctx.LastVisitedByChannel.Replace(visits)
 	}
 
 	// Initialize Slack-native section store if enabled. Bootstrap is
@@ -1907,6 +1926,12 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		if err != nil {
 			return
 		}
+		baselineNames := wctx.UserNames.Snapshot()
+		baselineExternal := wctx.ExternalUsers.Snapshot()
+		nameUpdates := make(map[string]string, len(users))
+		handleUpdates := make(map[string]string, len(users))
+		botUpdates := make(map[string]bool)
+		externalUsers := make(map[string]bool)
 		for _, u := range users {
 			name := u.Profile.DisplayName
 			if name == "" {
@@ -1915,19 +1940,22 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 			if name == "" {
 				name = u.Name
 			}
-			wctx.UserNames[u.ID] = name
+			nameUpdates[u.ID] = name
 			if u.Name != "" {
-				wctx.UserNamesByHandle[u.Name] = name
+				handleUpdates[u.Name] = name
 			}
 			isBot := u.IsBot || u.IsAppUser
 			if isBot {
-				wctx.BotUserIDs[u.ID] = true
+				botUpdates[u.ID] = true
 			}
 			// Slack Connect / shared-channel guests have a TeamID
 			// that differs from this workspace's home TeamID. Empty
 			// TeamID is treated as internal (under-detect rather than
 			// falsely flag). Mirrors userResolver.Request semantics.
 			isExternal := u.TeamID != "" && u.TeamID != client.TeamID()
+			if isExternal {
+				externalUsers[u.ID] = true
+			}
 			db.UpsertUser(cache.User{
 				ID:          u.ID,
 				WorkspaceID: client.TeamID(),
@@ -1947,6 +1975,17 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 				wctx.AvatarURLs.Store(u.ID, u.Profile.Image32)
 			}
 		}
+		wctx.UserNames.MergeIfUnchanged(nameUpdates, baselineNames)
+		wctx.UserNamesByHandle.Merge(handleUpdates)
+		wctx.BotUserIDs.Merge(botUpdates)
+		wctx.ExternalUsers.ReplaceIfUnchanged(externalUsers, baselineExternal)
+		joinedChannels, joinedFinderItems := rebuildWorkspaceUserMetadata(db, wctx, cfg)
+		wctx.ReplaceJoinedMetadata(joinedChannels, joinedFinderItems)
+		sendWorkspaceUserMetadataUpdated(func(msg tea.Msg) {
+			if p != nil {
+				p.Send(msg)
+			}
+		}, wctx)
 	}()
 
 	// Fetch channels
@@ -1955,12 +1994,14 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		return nil, fmt.Errorf("fetching channels for %s: %w", token.TeamName, err)
 	}
 
+	joinedChannels := make([]sidebar.ChannelItem, 0, len(channels))
+	joinedFinderItems := make([]channelfinder.Item, 0, len(channels))
 	for _, ch := range channels {
 		item, finderItem := buildChannelItem(ch, wctx, cfg, client.TeamID())
 		upsertChannelInDB(db, ch, item.Type, client.TeamID())
 
 		if ch.IsIM {
-			if _, ok := wctx.UserNames[ch.User]; !ok {
+			if _, ok := wctx.UserNames.Get(ch.User); !ok {
 				wctx.UnresolvedDMs = append(wctx.UnresolvedDMs, UnresolvedDM{
 					ChannelID: ch.ID,
 					UserID:    ch.User,
@@ -1971,10 +2012,13 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 				finderItem.Presence = cachedUser.Presence
 			}
 		}
-		wctx.Channels = append(wctx.Channels, item)
-		finderItem.LastVisited = wctx.LastVisitedByChannel[ch.ID]
-		wctx.FinderItems = append(wctx.FinderItems, finderItem)
+		joinedChannels = append(joinedChannels, item)
+		if lastVisited, ok := wctx.LastVisitedByChannel.Get(ch.ID); ok {
+			finderItem.LastVisited = lastVisited
+		}
+		joinedFinderItems = append(joinedFinderItems, finderItem)
 	}
+	wctx.ReplaceJoinedMetadata(joinedChannels, joinedFinderItems)
 
 	// Fetch unread counts
 	unreadCounts, threadsAgg, ucErr := client.GetUnreadCounts()
@@ -1996,12 +2040,13 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		}
 	}
 	mutedItemCount := 0
-	for _, c := range wctx.Channels {
+	for _, c := range wctx.ChannelsSnapshot() {
 		if c.IsMuted {
 			mutedItemCount++
 		}
 	}
-	log.Printf("workspace %s: %d/%d channel items marked IsMuted after build", token.TeamName, mutedItemCount, len(wctx.Channels))
+	channelsSnapshot := wctx.ChannelsSnapshot()
+	log.Printf("workspace %s: %d/%d channel items marked IsMuted after build", token.TeamName, mutedItemCount, len(channelsSnapshot))
 
 	// Bootstrap-time mute summary so a user can grep
 	// `[cache] workspace_unread_bootstrap` after launch and see how
@@ -2013,13 +2058,13 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 	// alongside the DB write path in updateReadStateFromCounts.
 	if debuglog.Enabled() {
 		var mutedChans int
-		for _, ch := range wctx.Channels {
+		for _, ch := range channelsSnapshot {
 			if ch.IsMuted {
 				mutedChans++
 			}
 		}
 		debuglog.Cache("workspace_unread_bootstrap: team=%s total=%d muted=%d threads_has_unreads=%v threads_unread=%d",
-			token.TeamName, len(wctx.Channels), mutedChans, threadsAgg.HasUnreads, threadsAgg.UnreadCount)
+			token.TeamName, len(channelsSnapshot), mutedChans, threadsAgg.HasUnreads, threadsAgg.UnreadCount)
 	}
 
 	// Finder items are built alongside the sidebar items in the loop above
@@ -2045,8 +2090,9 @@ func fetchBrowseableChannels(ctx context.Context, wctx *WorkspaceContext, p *tea
 	}
 
 	// Build set of joined IDs so we can skip them.
-	joined := make(map[string]struct{}, len(wctx.Channels))
-	for _, ch := range wctx.Channels {
+	joinedChannels := wctx.ChannelsSnapshot()
+	joined := make(map[string]struct{}, len(joinedChannels))
+	for _, ch := range joinedChannels {
 		joined[ch.ID] = struct{}{}
 	}
 
@@ -2056,17 +2102,19 @@ func fetchBrowseableChannels(ctx context.Context, wctx *WorkspaceContext, p *tea
 			continue
 		}
 		browseable = append(browseable, channelfinder.Item{
-			ID:          ch.ID,
-			Name:        ch.Name,
-			Type:        "channel",
-			Joined:      false,
-			LastVisited: wctx.LastVisitedByChannel[ch.ID],
+			ID:     ch.ID,
+			Name:   ch.Name,
+			Type:   "channel",
+			Joined: false,
 		})
+		if lastVisited, ok := wctx.LastVisitedByChannel.Get(ch.ID); ok {
+			browseable[len(browseable)-1].LastVisited = lastVisited
+		}
 	}
 
 	// Persist on the workspace context so future workspace switches preserve
 	// the merged list.
-	wctx.FinderItems = append(wctx.FinderItems, browseable...)
+	wctx.MergeBrowseableFinderItems(browseable)
 
 	if p != nil {
 		p.Send(ui.BrowseableChannelsLoadedMsg{
@@ -2171,12 +2219,27 @@ func pickAttachmentURL(f slack.File, kind string) string {
 	return f.URLPrivate
 }
 
+func cachedUserNameFromDB(userID string, db *cache.DB) (string, bool) {
+	if db == nil || userID == "" {
+		return "", false
+	}
+	u, err := db.GetUser(userID)
+	if err != nil {
+		return "", false
+	}
+	name := u.DisplayName
+	if name == "" {
+		name = u.Name
+	}
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
 // lookupUserCached returns the display name for userID using only
-// local sources: the in-memory userNames map and the cached users
-// table. Never hits the network and NEVER writes to userNames — safe
-// to call from goroutines off the UI loop (e.g. the search cmd),
-// where a map write would race the UI goroutine (see the
-// concurrent-map-writes note on userResolver.Request). Returns
+// local sources: the immutable userNames snapshot and the cached users
+// table. Never hits the network and never mutates userNames. Returns
 // ("", false) when the user is unknown.
 func lookupUserCached(userID string, userNames map[string]string, db *cache.DB) (string, bool) {
 	if userID == "" {
@@ -2185,30 +2248,26 @@ func lookupUserCached(userID string, userNames map[string]string, db *cache.DB) 
 	if name, ok := userNames[userID]; ok && name != "" {
 		return name, true
 	}
-	if db != nil {
-		if u, err := db.GetUser(userID); err == nil {
-			name := u.DisplayName
-			if name == "" {
-				name = u.Name
-			}
-			if name != "" {
-				return name, true
-			}
-		}
-	}
-	return "", false
+	return cachedUserNameFromDB(userID, db)
 }
 
-// resolveUserCached is lookupUserCached plus map memoization: a DB hit
-// is written back to userNames so subsequent lookups skip SQLite.
-// UI-goroutine callers only — the map write is what lookupUserCached
-// exists to avoid. Returns ("", false) when the user is unknown —
-// caller is expected to fall back to userID-as-name and enqueue an
-// async lookup via wctx.UserResolver.Request.
+// resolveUserCached is a read-only username lookup against an immutable
+// snapshot. Returns ("", false) when the user is unknown — caller is
+// expected to fall back to userID-as-name and enqueue an async lookup.
 func resolveUserCached(userID string, userNames map[string]string, db *cache.DB) (string, bool) {
-	name, ok := lookupUserCached(userID, userNames, db)
+	return lookupUserCached(userID, userNames, db)
+}
+
+func resolveUserCachedStore(userID string, userNames *userNameStore, db *cache.DB) (string, bool) {
+	if userID == "" {
+		return "", false
+	}
+	if name, ok := userNames.Get(userID); ok && name != "" {
+		return name, true
+	}
+	name, ok := cachedUserNameFromDB(userID, db)
 	if ok {
-		userNames[userID] = name
+		userNames.Set(userID, name)
 	}
 	return name, ok
 }
@@ -2222,8 +2281,8 @@ func resolveUserCached(userID string, userNames map[string]string, db *cache.DB)
 // and return false. Callers that care (the unresolved-DM goroutine)
 // only invoke resolveUser for users not yet in the cache, so the
 // fast-path miss is irrelevant for them.
-func resolveUser(client *slackclient.Client, userID string, userNames map[string]string, db *cache.DB, avatarCache *avatar.Cache) (string, bool) {
-	if name, ok := userNames[userID]; ok {
+func resolveUser(client *slackclient.Client, userID string, userNames *userNameStore, db *cache.DB, avatarCache *avatar.Cache) (string, bool) {
+	if name, ok := userNames.Get(userID); ok {
 		// Check if avatar is also cached
 		if avatarCache.Get(userID) == "" {
 			// Have name but no avatar — try to fetch profile for avatar URL
@@ -2257,7 +2316,7 @@ func resolveUser(client *slackclient.Client, userID string, userNames map[string
 		}
 		isBot := u.IsBot || u.IsAppUser
 		isExternal := u.TeamID != "" && u.TeamID != client.TeamID()
-		userNames[userID] = name
+		userNames.Set(userID, name)
 		avatarCache.Preload(userID, u.Profile.Image32)
 		db.UpsertUser(cache.User{
 			ID:          userID,
@@ -2272,6 +2331,126 @@ func resolveUser(client *slackclient.Client, userID string, userNames map[string
 		return name, isBot
 	}
 	return userID, false
+}
+
+func rebuildChannelItemFromWorkspace(
+	wctx *WorkspaceContext,
+	raw cache.Channel,
+	prev sidebar.ChannelItem,
+	cfg config.Config,
+) (sidebar.ChannelItem, channelfinder.Item) {
+	ch := slack.Channel{
+		GroupConversation: slack.GroupConversation{
+			Conversation: slack.Conversation{ID: prev.ID},
+			Name:         raw.Name,
+		},
+	}
+	if ch.Name == "" {
+		ch.Name = prev.Name
+	}
+	switch prev.Type {
+	case "dm", "app":
+		ch.IsIM = true
+		ch.User = prev.DMUserID
+	case "group_dm":
+		ch.IsMpIM = true
+	case "private":
+		ch.IsPrivate = true
+	}
+	item, finder := buildChannelItem(ch, wctx, cfg, wctx.TeamID)
+	item.Presence = prev.Presence
+	item.IsStarred = prev.IsStarred
+	finder.Presence = prev.Presence
+	return item, finder
+}
+
+func rebuildWorkspaceUserMetadata(db *cache.DB, wctx *WorkspaceContext, cfg config.Config) ([]sidebar.ChannelItem, []channelfinder.Item) {
+	joinedChannels, finderItems := wctx.JoinedMetadataSnapshot()
+	rawByID := make(map[string]cache.Channel)
+	if db != nil {
+		if channels, err := db.ListChannels(wctx.TeamID, false); err == nil {
+			for _, ch := range channels {
+				rawByID[ch.ID] = ch
+			}
+		}
+	}
+
+	rebuiltChannels := make([]sidebar.ChannelItem, 0, len(joinedChannels))
+	rebuiltJoinedFinder := make(map[string]channelfinder.Item, len(joinedChannels))
+	for _, prev := range joinedChannels {
+		item, finder := rebuildChannelItemFromWorkspace(wctx, rawByID[prev.ID], prev, cfg)
+		rebuiltChannels = append(rebuiltChannels, item)
+		if lastVisited, ok := wctx.LastVisitedByChannel.Get(item.ID); ok {
+			finder.LastVisited = lastVisited
+		}
+		rebuiltJoinedFinder[item.ID] = finder
+	}
+
+	rebuiltFinder := make([]channelfinder.Item, 0, len(finderItems))
+	seenJoined := make(map[string]struct{}, len(rebuiltJoinedFinder))
+	for _, prev := range finderItems {
+		if !prev.Joined {
+			rebuiltFinder = append(rebuiltFinder, prev)
+			continue
+		}
+		if finder, ok := rebuiltJoinedFinder[prev.ID]; ok {
+			finder.Presence = prev.Presence
+			if finder.LastVisited == 0 {
+				finder.LastVisited = prev.LastVisited
+			}
+			rebuiltFinder = append(rebuiltFinder, finder)
+			seenJoined[prev.ID] = struct{}{}
+			continue
+		}
+		rebuiltFinder = append(rebuiltFinder, prev)
+	}
+	for _, item := range rebuiltChannels {
+		if _, ok := seenJoined[item.ID]; ok {
+			continue
+		}
+		finder := rebuiltJoinedFinder[item.ID]
+		rebuiltFinder = append(rebuiltFinder, finder)
+	}
+
+	return rebuiltChannels, rebuiltFinder
+}
+
+func sendWorkspaceUserMetadataUpdated(send func(tea.Msg), wctx *WorkspaceContext) {
+	if send == nil || wctx == nil {
+		return
+	}
+	send(ui.WorkspaceUserMetadataUpdatedMsg{TeamID: wctx.TeamID})
+}
+
+func resolveUnresolvedDMs(
+	unresolved []UnresolvedDM,
+	resolve func(userID string) (string, bool),
+	markBot func(userID string),
+	send func(tea.Msg),
+	teamID string,
+) {
+	for _, dm := range unresolved {
+		resolved, isBot := resolve(dm.UserID)
+		if isBot && markBot != nil {
+			markBot(dm.UserID)
+		}
+		if resolved == dm.UserID {
+			continue
+		}
+		if send != nil {
+			send(ui.UserResolvedMsg{
+				TeamID:      teamID,
+				UserID:      dm.UserID,
+				DisplayName: resolved,
+				IsBot:       isBot,
+			})
+			send(ui.DMNameResolvedMsg{
+				ChannelID:   dm.ChannelID,
+				DisplayName: resolved,
+				IsBot:       isBot,
+			})
+		}
+	}
 }
 
 // messageAuthor resolves the display identity for a fetched message.
@@ -2630,9 +2809,6 @@ func enrichCachedRow(
 			} else if u.Name != "" {
 				userName = u.Name
 			}
-			if userName != "" && userNames != nil {
-				userNames[effUserID] = userName
-			}
 		}
 	}
 	if userName == "" {
@@ -2963,10 +3139,11 @@ func searchWorkspaceFunc(router *workspaceRouter, db *cache.DB, tsFormat string)
 			return ui.WorkspaceSearchResultsMsg{Query: query, Err: err}
 		}
 		// Read-only lookup: this closure runs in a bubbletea cmd
-		// goroutine, so it must not write wctx.UserNames (shared with
-		// the UI goroutine; see userResolver.Request).
+		// goroutine, so it snapshots once and never mutates the
+		// workspace's canonical store.
+		userNames := wctx.UserNames.Snapshot()
 		resolveUser := func(id string) (string, bool) {
-			return lookupUserCached(id, wctx.UserNames, db)
+			return lookupUserCached(id, userNames, db)
 		}
 		resolveChannel := func(id string) (string, bool) {
 			if db == nil {
@@ -3170,7 +3347,7 @@ func mostRecentlyVisitedChannel(visits map[string]int64) string {
 // and caches all incoming messages to the SQLite database.
 type rtmEventHandler struct {
 	program     *tea.Program
-	userNames   map[string]string
+	userNames   *userNameStore
 	tsFormat    string
 	db          *cache.DB
 	workspaceID string
@@ -3197,6 +3374,21 @@ type rtmEventHandler struct {
 	// backfill passes. Per-handler so each workspace has its own gate.
 	// Initialized at construction with window = 30 * time.Second.
 	backfillGate dedupeGate
+}
+
+func (h *rtmEventHandler) currentChannelMeta(channelID string) (name string, channelType string) {
+	if h.wsCtx != nil {
+		if name, channelType, ok := h.wsCtx.ChannelLookup(channelID); ok {
+			return name, channelType
+		}
+	}
+	if h.channelNames != nil {
+		name = h.channelNames[channelID]
+	}
+	if h.channelTypes != nil {
+		channelType = h.channelTypes[channelID]
+	}
+	return name, channelType
 }
 
 func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subtype string, edited bool, files []slack.File, blocks slack.Blocks, attachments []slack.Attachment, botID, username string) {
@@ -3270,24 +3462,23 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 			OnKeyword:       h.notifyCfg.OnKeyword,
 			IsDND:           h.wsCtx != nil && h.wsCtx.DNDEnabled && (h.wsCtx.DNDEndTS.IsZero() || time.Now().Before(h.wsCtx.DNDEndTS)),
 		}
-		chType := h.channelTypes[channelID]
+		chName, chType := h.currentChannelMeta(channelID)
 		// Pass the raw userID (not authorID): ShouldNotify's self-message
 		// suppression keys on the human sender, and a bot message
 		// (userID == "", authorID == botID) can never be "you" — so the
 		// empty userID is intentional, not a bug to "fix" later.
 		if notify.ShouldNotify(ctx, channelID, userID, text, chType) {
 			senderName := authorID
-			if resolved, ok := h.userNames[authorID]; ok {
+			if resolved, ok := h.userNames.Get(authorID); ok {
 				senderName = resolved
 			} else if username != "" {
 				senderName = username
 			}
-			chName := h.channelNames[channelID]
 			title := h.workspaceName + ": #" + chName
 			if chType == "dm" || chType == "group_dm" {
 				title = h.workspaceName + ": " + senderName
 			}
-			body := senderName + ": " + notify.StripSlackMarkup(text, h.userNames)
+			body := senderName + ": " + notify.StripSlackMarkup(text, h.userNames.Snapshot())
 			go h.notifier.Notify(title, body)
 		}
 	}
@@ -3339,7 +3530,7 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 		return
 	}
 
-	userName, ok := resolveUserCached(authorID, h.userNames, h.db)
+	userName, ok := resolveUserCachedStore(authorID, h.userNames, h.db)
 	if !ok {
 		userName = authorID
 		if userID != "" {
@@ -3726,27 +3917,13 @@ func (h *rtmEventHandler) OnConversationOpened(ch slack.Channel) {
 	// No read-state preservation is needed: those fields no longer
 	// live on ChannelItem; the read-state DB (per workspace) is the
 	// single source of truth and is unaffected by this in-memory upsert.
-	replaced := false
-	for i := range h.wsCtx.Channels {
-		if h.wsCtx.Channels[i].ID == item.ID {
-			h.wsCtx.Channels[i] = item
-			replaced = true
-			break
-		}
+	if lastVisited, ok := h.wsCtx.LastVisitedByChannel.Get(ch.ID); ok {
+		finderItem.LastVisited = lastVisited
 	}
-	if !replaced {
-		h.wsCtx.Channels = append(h.wsCtx.Channels, item)
-		// FinderItems is intentionally only appended on the new-channel
-		// path. On dedupe, the existing finder entry was added at
-		// bootstrap (or a prior open) and carries no unread state to
-		// refresh, so re-appending would double-list the channel in
-		// Ctrl+T.
-		finderItem.LastVisited = h.wsCtx.LastVisitedByChannel[ch.ID]
-		h.wsCtx.FinderItems = append(h.wsCtx.FinderItems, finderItem)
-	}
+	h.wsCtx.UpsertJoinedMetadata(item, finderItem)
 
-	// Mirror channelTypes / channelNames maps used by the notifier so
-	// follow-up messages on this channel get notified correctly.
+	// Keep the fallback maps roughly current for tests and any future
+	// caller that uses them without going through wsCtx.ChannelLookup.
 	if h.channelNames != nil {
 		h.channelNames[ch.ID] = item.Name
 	}
@@ -3789,27 +3966,25 @@ func (h *rtmEventHandler) refreshSectionsForActive() {
 	// section have Section reset to "" — letting the sidebar's Slack
 	// mode bucket them via type-default fallback (Task 8) or the
 	// config-glob path if Slack mode isn't active.
-	for i := range h.wsCtx.Channels {
-		item := &h.wsCtx.Channels[i]
-		if id, ok := store.SectionForChannel(item.ID); ok {
-			item.Section = id
-		} else {
-			item.Section = ""
+	channelsCopy := h.wsCtx.MutateChannels(func(items []sidebar.ChannelItem) {
+		for i := range items {
+			item := &items[i]
+			if id, ok := store.SectionForChannel(item.ID); ok {
+				item.Section = id
+			} else {
+				item.Section = ""
+			}
+			// SectionOrder is unused in Slack mode (linked-list order
+			// comes from the provider); reset to 0 for consistency.
+			item.SectionOrder = 0
 		}
-		// SectionOrder is unused in Slack mode (linked-list order
-		// comes from the provider); reset to 0 for consistency.
-		item.SectionOrder = 0
-	}
+	})
 	if h.program == nil {
 		return
 	}
 	if h.isActive != nil && !h.isActive() {
 		return
 	}
-	// Send a copy so the App can mutate without racing the workspace's
-	// mutator path.
-	channelsCopy := make([]sidebar.ChannelItem, len(h.wsCtx.Channels))
-	copy(channelsCopy, h.wsCtx.Channels)
 	h.program.Send(ui.SectionsRefreshedMsg{
 		TeamID:   h.workspaceID,
 		Channels: channelsCopy,
@@ -3913,24 +4088,24 @@ func (h *rtmEventHandler) refreshMutedForActive() {
 		return
 	}
 	store := h.wsCtx.MuteStore
-	for i := range h.wsCtx.Channels {
-		chID := h.wsCtx.Channels[i].ID
-		before := h.wsCtx.Channels[i].IsMuted
-		after := store.IsMuted(chID)
-		if before != after {
-			debuglog.Cache("refreshMutedForActive: channel=%s name=%q muted_before=%v muted_after=%v",
-				chID, h.wsCtx.Channels[i].Name, before, after)
+	channelsCopy := h.wsCtx.MutateChannels(func(items []sidebar.ChannelItem) {
+		for i := range items {
+			chID := items[i].ID
+			before := items[i].IsMuted
+			after := store.IsMuted(chID)
+			if before != after {
+				debuglog.Cache("refreshMutedForActive: channel=%s name=%q muted_before=%v muted_after=%v",
+					chID, items[i].Name, before, after)
+			}
+			items[i].IsMuted = after
 		}
-		h.wsCtx.Channels[i].IsMuted = after
-	}
+	})
 	if h.program == nil {
 		return
 	}
 	if h.isActive != nil && !h.isActive() {
 		return
 	}
-	channelsCopy := make([]sidebar.ChannelItem, len(h.wsCtx.Channels))
-	copy(channelsCopy, h.wsCtx.Channels)
 	h.program.Send(ui.SectionsRefreshedMsg{
 		TeamID:   h.workspaceID,
 		Channels: channelsCopy,

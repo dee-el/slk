@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
+    # Darwin clipboard support requires CGO and Apple's SDK. An Intel runner
+    # can build both x86_64 and arm64 with the architecture-specific clang
+    # wrappers used by GoReleaser.
+    runs-on: macos-15-intel
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,6 +25,20 @@ jobs:
         with:
           go-version: stable
           cache: true
+
+      - name: Add Darwin compiler wrappers to PATH
+        run: echo "$GITHUB_WORKSPACE/scripts" >> "$GITHUB_PATH"
+
+      - name: Verify Darwin CGO builds
+        run: |
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC=clang-darwin-amd64 \
+            go build -trimpath -o /tmp/slk-darwin-amd64 ./cmd/slk
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC=clang-darwin-arm64 \
+            go build -trimpath -o /tmp/slk-darwin-arm64 ./cmd/slk
+          file /tmp/slk-darwin-amd64 | grep 'x86_64'
+          file /tmp/slk-darwin-arm64 | grep 'arm64'
+          otool -L /tmp/slk-darwin-amd64 | grep 'AppKit.framework'
+          otool -L /tmp/slk-darwin-arm64 | grep 'AppKit.framework'
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6

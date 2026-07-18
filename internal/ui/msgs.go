@@ -220,6 +220,13 @@ type (
 		DisplayName string
 		IsBot       bool
 	}
+	// WorkspaceUserMetadataUpdatedMsg carries one team-scoped immutable refresh
+	// signal for background user crawl state. Reducer pulls current synchronized
+	// workspace user/external/channel metadata at apply time so older async
+	// signals cannot overwrite newer scalar updates.
+	WorkspaceUserMetadataUpdatedMsg struct {
+		TeamID string
+	}
 	// UserExternalMsg flags a single user as external (Slack Connect /
 	// shared-channel guest). Emitted by the user-resolution path when a
 	// users.info response shows team_id != workspace TeamID. The App

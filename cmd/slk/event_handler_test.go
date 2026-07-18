@@ -16,9 +16,9 @@ import (
 // nil — the handler must guard all three.
 func TestOnConversationOpened_AppendsAndSends(t *testing.T) {
 	wctx := &WorkspaceContext{
-		BotUserIDs:        map[string]bool{},
-		UserNames:         map[string]string{},
-		UserNamesByHandle: map[string]string{},
+		BotUserIDs:        newBotUserIDStore(nil),
+		UserNames:         newUserNameStore(nil),
+		UserNamesByHandle: newHandleNameStore(nil),
 		Channels:          []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
 		FinderItems:       []channelfinder.Item{{ID: "C1", Name: "general", Type: "channel", Joined: true}},
 	}
@@ -61,9 +61,9 @@ func TestOnConversationOpened_AppendsAndSends(t *testing.T) {
 // overwrite and FinderItems dedupe are the only behaviors that remain.
 func TestOnConversationOpened_DedupesByID(t *testing.T) {
 	wctx := &WorkspaceContext{
-		BotUserIDs:        map[string]bool{},
-		UserNames:         map[string]string{},
-		UserNamesByHandle: map[string]string{"alice": "Alice", "bob": "Bob"},
+		BotUserIDs:        newBotUserIDStore(nil),
+		UserNames:         newUserNameStore(nil),
+		UserNamesByHandle: newHandleNameStore(map[string]string{"alice": "Alice", "bob": "Bob"}),
 		Channels: []sidebar.ChannelItem{
 			{ID: "G1", Name: "old", Type: "group_dm"},
 		},
@@ -107,9 +107,9 @@ func TestOnConversationOpened_DedupesByID(t *testing.T) {
 // beyond the scope of this task.
 func TestOnConversationOpened_InactiveWorkspace_PersistsContext(t *testing.T) {
 	wctx := &WorkspaceContext{
-		BotUserIDs:        map[string]bool{},
-		UserNames:         map[string]string{},
-		UserNamesByHandle: map[string]string{},
+		BotUserIDs:        newBotUserIDStore(nil),
+		UserNames:         newUserNameStore(nil),
+		UserNamesByHandle: newHandleNameStore(nil),
 	}
 	h := &rtmEventHandler{
 		wsCtx:        wctx,

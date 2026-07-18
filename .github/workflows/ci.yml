@@ -62,3 +62,22 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
+
+  macos-clipboard-build:
+    name: macos clipboard build
+    runs-on: macos-15-intel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Build with CGO
+        run: CGO_ENABLED=1 go build -ldflags="-s -w" -trimpath -o /tmp/slk ./cmd/slk
+
+      - name: Verify native clipboard linkage
+        run: otool -L /tmp/slk | grep 'AppKit.framework'
