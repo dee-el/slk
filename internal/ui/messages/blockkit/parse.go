@@ -44,6 +44,8 @@ func parseOne(b slack.Block) Block {
 		}
 	case *slack.ActionBlock:
 		return parseActions(v)
+	case *slack.TableBlock:
+		return parseTable(v)
 	case *slack.RichTextBlock:
 		return RichTextBlock{Elements: v.Elements}
 	default:
@@ -91,6 +93,84 @@ func parseActions(a *slack.ActionBlock) ActionsBlock {
 		out.Elements = append(out.Elements, actionElementOf(e))
 	}
 	return out
+}
+
+func parseTable(t *slack.TableBlock) TableBlock {
+	out := TableBlock{
+		SourceRows: len(t.Rows),
+	}
+
+	sourceCols := len(t.ColumnSettings)
+	for _, row := range t.Rows {
+		if len(row) > sourceCols {
+			sourceCols = len(row)
+		}
+	}
+	out.SourceCols = sourceCols
+	out.RowsTruncated = out.SourceRows > tableMaxRows
+	out.ColsTruncated = out.SourceCols > tableMaxCols
+
+	visibleCols := out.SourceCols
+	if visibleCols > tableMaxCols {
+		visibleCols = tableMaxCols
+	}
+	if visibleCols > 0 {
+		out.Columns = make([]TableColumn, visibleCols)
+		for i := range out.Columns {
+			out.Columns[i] = defaultTableColumn()
+			if i < len(t.ColumnSettings) {
+				out.Columns[i] = parseTableColumn(t.ColumnSettings[i])
+			}
+		}
+	}
+
+	visibleRows := len(t.Rows)
+	if visibleRows > tableMaxRows {
+		visibleRows = tableMaxRows
+	}
+	if visibleRows == 0 {
+		return out
+	}
+
+	out.Rows = make([][]TableCell, 0, visibleRows)
+	for _, row := range t.Rows[:visibleRows] {
+		visibleCells := len(row)
+		if visibleCells > visibleCols {
+			visibleCells = visibleCols
+		}
+		cells := make([]TableCell, 0, visibleCells)
+		for _, cell := range row[:visibleCells] {
+			cells = append(cells, parseTableCell(cell))
+		}
+		out.Rows = append(out.Rows, cells)
+	}
+
+	return out
+}
+
+func parseTableCell(cell *slack.RichTextBlock) TableCell {
+	if cell == nil {
+		return TableCell{}
+	}
+	return TableCell{Text: RichTextToMrkdwn(RichTextBlock{Elements: cell.Elements})}
+}
+
+func parseTableColumn(setting slack.ColumnSetting) TableColumn {
+	col := defaultTableColumn()
+	col.Wrapped = setting.IsWrapped
+	switch setting.Align {
+	case slack.ColumnAlignmentCenter:
+		col.Align = TableAlignCenter
+	case slack.ColumnAlignmentRight:
+		col.Align = TableAlignRight
+	default:
+		col.Align = TableAlignLeft
+	}
+	return col
+}
+
+func defaultTableColumn() TableColumn {
+	return TableColumn{Align: TableAlignLeft}
 }
 
 func parseAccessory(a *slack.Accessory) AccessoryElement {

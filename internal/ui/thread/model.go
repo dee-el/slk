@@ -1805,6 +1805,10 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 	line := styles.Username.Render(msg.UserName) + lipgloss.NewStyle().Background(styles.Background).Render("  ") + styles.Timestamp.Render(msg.Timestamp)
 
 	contentWidth := width - 4
+	blockWidth := contentWidth
+	if blockWidth < 1 {
+		blockWidth = 1
+	}
 	if contentWidth < 20 {
 		contentWidth = 20
 	}
@@ -1833,19 +1837,20 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 	var bkLines []string
 	bkInteractive := false
 	if len(msg.Blocks) > 0 {
-		res := blockkit.Render(msg.Blocks, bkCtx, contentWidth)
+		res := blockkit.Render(msg.Blocks, bkCtx, blockWidth)
 		bkLines = append(bkLines, res.Lines...)
 		flushes = append(flushes, res.Flushes...)
 		bkInteractive = bkInteractive || res.Interactive
 	}
 	if len(msg.LegacyAttachments) > 0 {
-		res := blockkit.RenderLegacy(msg.LegacyAttachments, bkCtx, contentWidth)
+		res := blockkit.RenderLegacy(msg.LegacyAttachments, bkCtx, blockWidth)
 		bkLines = append(bkLines, res.Lines...)
 		flushes = append(flushes, res.Flushes...)
 		bkInteractive = bkInteractive || res.Interactive
 	}
 	if bkInteractive {
-		bkLines = append(bkLines, styles.Timestamp.Render("↗ open in Slack to interact"))
+		hint := messages.WordWrap(styles.Timestamp.Render("↗ open in Slack to interact"), blockWidth)
+		bkLines = append(bkLines, strings.Split(hint, "\n")...)
 	}
 	bkBlock := ""
 	bkLineCount := len(bkLines)

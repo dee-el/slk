@@ -6,6 +6,16 @@ import (
 	"github.com/slack-go/slack"
 )
 
+func testTableTextCell(text string, style *slack.RichTextSectionTextStyle) *slack.RichTextBlock {
+	return slack.NewRichTextBlock("", slack.NewRichTextSection(
+		slack.NewRichTextSectionTextElement(text, style),
+	))
+}
+
+func testTableCell(elements ...slack.RichTextSectionElement) *slack.RichTextBlock {
+	return slack.NewRichTextBlock("", slack.NewRichTextSection(elements...))
+}
+
 func TestParseEmptyBlocksReturnsNil(t *testing.T) {
 	got := Parse(slack.Blocks{})
 	if got != nil {
@@ -208,6 +218,129 @@ func TestParseRichTextProducesRichTextBlock(t *testing.T) {
 	}
 	if len(rt.Elements) != 1 {
 		t.Fatalf("RichTextBlock.Elements len = %d, want 1", len(rt.Elements))
+	}
+}
+
+func TestParseTableBlockRichCellsAndSettings(t *testing.T) {
+	tbl := slack.NewTableBlock("tbl").
+		WithColumnSettings(
+			slack.ColumnSetting{Align: slack.ColumnAlignmentCenter, IsWrapped: true},
+			slack.ColumnSetting{Align: slack.ColumnAlignmentRight},
+		).
+		AddRow(
+			testTableCell(
+				slack.NewRichTextSectionTextElement("Build", &slack.RichTextSectionTextStyle{Bold: true}),
+				slack.NewRichTextSectionTextElement("\n", nil),
+				slack.NewRichTextSectionUserElement("U123", nil),
+			),
+			testTableCell(
+				slack.NewRichTextSectionLinkElement("https://example.com/run/1", "details", nil),
+				slack.NewRichTextSectionTextElement(" ", nil),
+				slack.NewRichTextSectionEmojiElement("rocket", 0, nil),
+			),
+		)
+
+	got := Parse(slack.Blocks{BlockSet: []slack.Block{tbl}})
+	if len(got) != 1 {
+		t.Fatalf("got %d blocks, want 1", len(got))
+	}
+	table, ok := got[0].(TableBlock)
+	if !ok {
+		t.Fatalf("got %T, want TableBlock", got[0])
+	}
+	if len(table.Rows) != 1 || len(table.Rows[0]) != 2 {
+		t.Fatalf("rows = %#v, want one row with two cells", table.Rows)
+	}
+	if got := table.Rows[0][0].Text; got != "*Build*\n<@U123>" {
+		t.Fatalf("cell[0][0] = %q", got)
+	}
+	if got := table.Rows[0][1].Text; got != "<https://example.com/run/1|details> :rocket:" {
+		t.Fatalf("cell[0][1] = %q", got)
+	}
+	if got := table.Columns[0]; got.Align != TableAlignCenter || !got.Wrapped {
+		t.Fatalf("column[0] = %+v", got)
+	}
+	if got := table.Columns[1]; got.Align != TableAlignRight || got.Wrapped {
+		t.Fatalf("column[1] = %+v", got)
+	}
+}
+
+func TestParseTableBlockDefaultsNilAndRaggedRows(t *testing.T) {
+	tbl := &slack.TableBlock{
+		Type: slack.MBTTable,
+		Rows: [][]*slack.RichTextBlock{
+			{testTableTextCell("alpha", nil), nil, testTableTextCell("gamma", nil)},
+			{testTableTextCell("beta", nil)},
+		},
+		ColumnSettings: []slack.ColumnSetting{{Align: slack.ColumnAlignment("sideways")}},
+	}
+
+	table := Parse(slack.Blocks{BlockSet: []slack.Block{tbl}})[0].(TableBlock)
+	if len(table.Columns) != 3 {
+		t.Fatalf("len(columns) = %d, want 3", len(table.Columns))
+	}
+	for i, col := range table.Columns {
+		if col.Align != TableAlignLeft {
+			t.Fatalf("column[%d].Align = %v, want left default", i, col.Align)
+		}
+		if col.Wrapped {
+			t.Fatalf("column[%d].Wrapped = true, want false default", i)
+		}
+	}
+	if got := table.Rows[0][1].Text; got != "" {
+		t.Fatalf("nil cell text = %q, want empty", got)
+	}
+	if len(table.Rows[1]) != 1 {
+		t.Fatalf("ragged second row len = %d, want 1", len(table.Rows[1]))
+	}
+	if table.SourceCols != 3 {
+		t.Fatalf("SourceCols = %d, want 3", table.SourceCols)
+	}
+}
+
+func TestParseTableBlockEmpty(t *testing.T) {
+	table := Parse(slack.Blocks{BlockSet: []slack.Block{slack.NewTableBlock("tbl")}})[0].(TableBlock)
+	if len(table.Rows) != 0 {
+		t.Fatalf("rows len = %d, want 0", len(table.Rows))
+	}
+	if len(table.Columns) != 0 {
+		t.Fatalf("columns len = %d, want 0", len(table.Columns))
+	}
+	if got := Render([]Block{table}, Context{}, 40); got.Height != 0 || len(got.Lines) != 0 {
+		t.Fatalf("empty table rendered %+v, want no lines", got)
+	}
+}
+
+func TestParseTableBlockCapsRowsAndColumns(t *testing.T) {
+	tbl := slack.NewTableBlock("tbl")
+	for row := 0; row < tableMaxRows+1; row++ {
+		cells := make([]*slack.RichTextBlock, 0, tableMaxCols+1)
+		for col := 0; col < tableMaxCols+1; col++ {
+			cells = append(cells, testTableTextCell("r", nil))
+		}
+		tbl.AddRow(cells...)
+	}
+	settings := make([]slack.ColumnSetting, 0, tableMaxCols+1)
+	for i := 0; i < tableMaxCols+1; i++ {
+		settings = append(settings, slack.ColumnSetting{Align: slack.ColumnAlignmentRight})
+	}
+	tbl.WithColumnSettings(settings...)
+
+	table := Parse(slack.Blocks{BlockSet: []slack.Block{tbl}})[0].(TableBlock)
+	if len(table.Rows) != tableMaxRows {
+		t.Fatalf("rows len = %d, want %d", len(table.Rows), tableMaxRows)
+	}
+	if len(table.Columns) != tableMaxCols {
+		t.Fatalf("columns len = %d, want %d", len(table.Columns), tableMaxCols)
+	}
+	if !table.RowsTruncated || !table.ColsTruncated {
+		t.Fatalf("truncation flags = rows:%v cols:%v, want both true", table.RowsTruncated, table.ColsTruncated)
+	}
+	if table.SourceRows != tableMaxRows+1 || table.SourceCols != tableMaxCols+1 {
+		t.Fatalf("source dims = %dx%d, want %dx%d", table.SourceRows, table.SourceCols, tableMaxRows+1, tableMaxCols+1)
+	}
+	if len(table.Rows[tableMaxRows-1]) != tableMaxCols {
+		t.Fatalf("visible row width = %d, want %d", len(table.Rows[tableMaxRows-1]), tableMaxCols)
 	}
 }
 

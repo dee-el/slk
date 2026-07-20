@@ -49,6 +49,8 @@ func appendBlock(out *RenderResult, b Block, ctx Context, width int) {
 		appendActions(out, v, width)
 	case ImageBlock:
 		appendImageBlock(out, v, ctx, width)
+	case TableBlock:
+		appendTable(out, v, ctx, width)
 	case RichTextBlock:
 		// rich_text content is rendered through Message.Text by the
 		// host (after RichTextToMrkdwn reconstructs the newline
@@ -59,9 +61,8 @@ func appendBlock(out *RenderResult, b Block, ctx Context, width int) {
 	case UnknownBlock:
 		out.Lines = append(out.Lines, renderUnsupported(v.Type, width))
 	default:
-		// Other block types (Context, Image, Actions) are added by
-		// later tasks; for now, render them as unsupported so the
-		// package is total even mid-implementation.
+		// Keep the renderer total even if a new local Block variant is
+		// added before appendBlock learns about it.
 		out.Lines = append(out.Lines, renderUnsupported(v.blockType(), width))
 	}
 }

@@ -129,3 +129,36 @@ func TestFixture_HeaderDividerSection(t *testing.T) {
 		}
 	}
 }
+
+func TestFixture_TableBlock(t *testing.T) {
+	p := loadFixture(t, "table_block.json")
+	blocks := Parse(p.Blocks)
+	ctx := Context{
+		UserNames: map[string]string{"U123": "alice"},
+		RenderText: func(s string, userNames map[string]string) string {
+			for id, name := range userNames {
+				s = strings.ReplaceAll(s, "<@"+id+">", "@"+name)
+			}
+			return s
+		},
+		WrapText: func(s string, width int) string { return ansi.Wrap(s, width, "") },
+	}
+	for _, tc := range []struct {
+		width int
+		wants []string
+	}{
+		{width: 12, wants: []string{"Row 1", "C1:", "C2:", "C3:", "Healthy", "@alice"}},
+		{width: 42, wants: []string{"Service", "Status", "Owner", "API", "Healthy", "@alice", "runbook"}},
+	} {
+		r := Render(blocks, ctx, tc.width)
+		plain := ansi.Strip(strings.Join(r.Lines, "\n"))
+		for _, want := range tc.wants {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("width=%d missing %q in %q", tc.width, want, plain)
+			}
+		}
+		if strings.Contains(plain, "[unsupported block: table]") {
+			t.Fatalf("width=%d still rendered unsupported marker: %q", tc.width, plain)
+		}
+	}
+}

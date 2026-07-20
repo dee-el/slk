@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/slack-go/slack"
 
@@ -32,6 +33,19 @@ func renderedFor(t *testing.T, msg MessageItem, width int) string {
 		t.Fatal("no entry with msgIdx 0 in cache")
 	}
 	return ansi.Strip(strings.Join(lines, "\n"))
+}
+
+func renderedLinesFor(t *testing.T, msg MessageItem, width int) []string {
+	t.Helper()
+	m := New([]MessageItem{msg}, "general")
+	m.buildCache(width)
+	for _, e := range m.cache {
+		if e.msgIdx == 0 {
+			return append([]string(nil), e.linesNormal...)
+		}
+	}
+	t.Fatal("no entry with msgIdx 0 in cache")
+	return nil
 }
 
 func TestRenderMessagePlainEmitsBlockKitContent(t *testing.T) {
@@ -126,6 +140,60 @@ func TestRenderMessagePlainOmitsHintWhenNotInteractive(t *testing.T) {
 	plain := renderedFor(t, msg, 100)
 	if strings.Contains(plain, "↗ open in Slack to interact") {
 		t.Errorf("hint should not appear for non-interactive message: %q", plain)
+	}
+}
+
+func TestRenderMessagePlainEmitsTableBlock(t *testing.T) {
+	msg := MessageItem{
+		TS:        "1700000000.000111",
+		UserName:  "deploybot",
+		UserID:    "U-BOT",
+		Timestamp: "1:24 PM",
+		Blocks: []blockkit.Block{blockkit.TableBlock{
+			Rows: [][]blockkit.TableCell{
+				{{Text: "Service"}, {Text: "Status"}},
+				{{Text: "API"}, {Text: "Healthy"}},
+			},
+			Columns: []blockkit.TableColumn{{}, {}},
+		}},
+	}
+	plain := renderedFor(t, msg, 30)
+	for _, want := range []string{"Service", "Status", "API", "Healthy"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("missing %q in %q", want, plain)
+		}
+	}
+	if strings.Contains(plain, "[unsupported block: table]") {
+		t.Fatalf("table block still rendered as unsupported marker: %q", plain)
+	}
+}
+
+func TestRenderMessagePlainNarrowTableUsesActualBlockWidth(t *testing.T) {
+	msg := MessageItem{
+		TS:        "1700000000.000222",
+		UserName:  "a",
+		Timestamp: "1",
+		Blocks: []blockkit.Block{blockkit.TableBlock{
+			Rows: [][]blockkit.TableCell{
+				{{Text: "service"}, {Text: "status"}},
+				{{Text: "api"}, {Text: "healthy"}},
+			},
+			Columns: []blockkit.TableColumn{{}, {}},
+		}},
+	}
+	const width = 12
+	lines := renderedLinesFor(t, msg, width)
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got > width {
+			t.Fatalf("cache line %d width = %d, want <= %d: %q", i, got, width, ansi.Strip(line))
+		}
+	}
+	plain := ansi.Strip(strings.Join(lines, "\n"))
+	if strings.Contains(plain, "[unsupported block: table]") {
+		t.Fatalf("table block still rendered as unsupported marker: %q", plain)
+	}
+	if !strings.Contains(plain, "Row 1") || !strings.Contains(plain, "C1:") {
+		t.Fatalf("expected narrow stacked table in cache output, got %q", plain)
 	}
 }
 

@@ -11,12 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/gammons/slk/internal/config"
 	emojiutil "github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/messages"
+	"github.com/gammons/slk/internal/ui/messages/blockkit"
 	"github.com/gammons/slk/internal/ui/styles"
 )
 
@@ -157,6 +159,71 @@ func TestViewRendersContent(t *testing.T) {
 	}
 	if !strings.Contains(view, "bob") {
 		t.Error("expected view to contain reply username 'bob'")
+	}
+}
+
+func TestViewRendersTableBlocksInThread(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{
+		TS:        "1700000001.000000",
+		UserName:  "alice",
+		Timestamp: "10:30 AM",
+		Blocks: []blockkit.Block{blockkit.TableBlock{
+			Rows:    [][]blockkit.TableCell{{{Text: "ParentCell"}}},
+			Columns: []blockkit.TableColumn{{}},
+		}},
+	}
+	replies := []messages.MessageItem{{
+		TS:        "1700000002.000000",
+		UserName:  "bob",
+		Timestamp: "10:31 AM",
+		Blocks: []blockkit.Block{blockkit.TableBlock{
+			Rows:    [][]blockkit.TableCell{{{Text: "ReplyCell"}, {Text: "Owner"}}},
+			Columns: []blockkit.TableColumn{{}, {}},
+		}},
+	}}
+	m.SetThread(parent, replies, "C123", "1700000001.000000")
+
+	plain := ansi.Strip(m.View(20, 24))
+	for _, want := range []string{"ParentCell", "ReplyCell", "Owner"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("missing %q in thread view:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "[unsupported block: table]") {
+		t.Fatalf("thread view still rendered unsupported table marker:\n%s", plain)
+	}
+}
+
+func TestViewRendersNarrowTableWithinActualThreadWidth(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{
+		TS:        "1700000001.000010",
+		UserName:  "a",
+		Timestamp: "1",
+		Blocks: []blockkit.Block{blockkit.TableBlock{
+			Rows: [][]blockkit.TableCell{
+				{{Text: "service"}, {Text: "status"}},
+				{{Text: "api"}, {Text: "healthy"}},
+			},
+			Columns: []blockkit.TableColumn{{}, {}},
+		}},
+	}
+	m.SetThread(parent, nil, "C123", "1700000001.000010")
+
+	const width = 12
+	view := m.View(12, width)
+	for i, line := range strings.Split(view, "\n") {
+		if got := lipgloss.Width(line); got > width {
+			t.Fatalf("view line %d width = %d, want <= %d: %q", i, got, width, ansi.Strip(line))
+		}
+	}
+	plain := ansi.Strip(view)
+	if strings.Contains(plain, "[unsupported block: table]") {
+		t.Fatalf("thread view still rendered unsupported table marker:\n%s", plain)
+	}
+	if !strings.Contains(plain, "Row 1") || !strings.Contains(plain, "C1:") {
+		t.Fatalf("expected narrow stacked table in thread view, got:\n%s", plain)
 	}
 }
 

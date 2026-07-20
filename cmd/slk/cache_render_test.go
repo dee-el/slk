@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gammons/slk/internal/cache"
+	"github.com/gammons/slk/internal/ui/messages/blockkit"
 	"github.com/slack-go/slack"
 )
 
@@ -218,5 +219,66 @@ func TestLoadCachedThreadRepliesEnrichesFromCache(t *testing.T) {
 	}
 	if items[0].Text != "parent" || items[2].Text != "reply 2" {
 		t.Errorf("unexpected ordering: %+v", items)
+	}
+}
+
+func TestLoadCachedMessagesRestoresTableBlocks(t *testing.T) {
+	db := newCacheForTest(t)
+
+	const (
+		channelID = "C3"
+		msgTS     = "1700000100.000000"
+	)
+	upstream := slack.Message{
+		Msg: slack.Msg{
+			Timestamp: msgTS,
+			User:      "UAUTHOR",
+			Text:      "table payload",
+			Blocks: slack.Blocks{BlockSet: []slack.Block{slack.NewTableBlock("tbl").
+				WithColumnSettings(
+					slack.ColumnSetting{Align: slack.ColumnAlignmentRight},
+					slack.ColumnSetting{Align: slack.ColumnAlignmentCenter, IsWrapped: true},
+				).
+				AddRow(
+					slack.NewRichTextBlock("", slack.NewRichTextSection(slack.NewRichTextSectionTextElement("Service", nil))),
+					slack.NewRichTextBlock("", slack.NewRichTextSection(slack.NewRichTextSectionTextElement("owner", nil))),
+				)}},
+		},
+	}
+	rawBytes, err := json.Marshal(upstream)
+	if err != nil {
+		t.Fatalf("marshal upstream: %v", err)
+	}
+	if err := db.UpsertMessage(cache.Message{
+		TS:          msgTS,
+		ChannelID:   channelID,
+		WorkspaceID: "T1",
+		UserID:      "UAUTHOR",
+		Text:        "table payload",
+		RawJSON:     string(rawBytes),
+		CreatedAt:   1700000100,
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+
+	got := loadCachedMessages(db, "USELF", channelID, map[string]string{"UAUTHOR": "alice"}, "3:04 PM", nil)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(got))
+	}
+	table, ok := got[0].Blocks[0].(blockkit.TableBlock)
+	if !ok {
+		t.Fatalf("block type = %T, want blockkit.TableBlock", got[0].Blocks[0])
+	}
+	if len(table.Rows) != 1 || len(table.Rows[0]) != 2 {
+		t.Fatalf("rows = %#v", table.Rows)
+	}
+	if table.Rows[0][0].Text != "Service" || table.Rows[0][1].Text != "owner" {
+		t.Fatalf("table rows = %#v", table.Rows)
+	}
+	if table.Columns[0].Align != blockkit.TableAlignRight || table.Columns[0].Wrapped {
+		t.Fatalf("column[0] = %+v", table.Columns[0])
+	}
+	if table.Columns[1].Align != blockkit.TableAlignCenter || !table.Columns[1].Wrapped {
+		t.Fatalf("column[1] = %+v", table.Columns[1])
 	}
 }

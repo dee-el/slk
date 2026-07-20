@@ -123,6 +123,40 @@ type RichTextBlock struct {
 
 func (RichTextBlock) blockType() string { return "rich_text" }
 
+// TableBlock is the Slack `table` block rendered as an immutable,
+// slack-go-free model. Each cell stores reconstructed mrkdwn so the
+// renderer can reuse the host's existing RenderText pipeline.
+type TableBlock struct {
+	Rows          [][]TableCell
+	Columns       []TableColumn
+	RowsTruncated bool
+	ColsTruncated bool
+	SourceRows    int
+	SourceCols    int
+}
+
+func (TableBlock) blockType() string { return "table" }
+
+// TableCell is one table cell's reconstructed Slack mrkdwn.
+type TableCell struct {
+	Text string
+}
+
+// TableColumn stores rendering hints for one visible column.
+type TableColumn struct {
+	Align   TableAlignment
+	Wrapped bool
+}
+
+// TableAlignment mirrors Slack's table-column alignment settings.
+type TableAlignment int
+
+const (
+	TableAlignLeft TableAlignment = iota
+	TableAlignCenter
+	TableAlignRight
+)
+
 // AccessoryElement is one of the supported section-accessory element
 // kinds. The set is intentionally narrow: image accessories render via
 // the image pipeline, all other element kinds render as muted labels.

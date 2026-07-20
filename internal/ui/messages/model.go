@@ -1949,6 +1949,10 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 	if avatarStr != "" {
 		contentWidth = width - 7 // 4 cols avatar + 1 space + 2 padding
 	}
+	blockWidth := contentWidth
+	if blockWidth < 1 {
+		blockWidth = 1
+	}
 	if contentWidth < 20 {
 		contentWidth = 20
 	}
@@ -2199,7 +2203,7 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 			bkT0 = time.Now()
 		}
 		startInBk := len(bkLines)
-		res := blockkit.Render(msg.Blocks, bkCtx, contentWidth)
+		res := blockkit.Render(msg.Blocks, bkCtx, blockWidth)
 		if stats != nil {
 			stats.blockKitTotal += time.Since(bkT0)
 			stats.blockKitCount++
@@ -2229,7 +2233,7 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 			legacyCtx.Perf = lgPerf
 		}
 		startInBk := len(bkLines)
-		res := blockkit.RenderLegacy(msg.LegacyAttachments, legacyCtx, contentWidth)
+		res := blockkit.RenderLegacy(msg.LegacyAttachments, legacyCtx, blockWidth)
 		if stats != nil {
 			stats.legacyTotal += time.Since(lgT0)
 			stats.legacyCount++
@@ -2266,8 +2270,8 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 		bkInteractive = bkInteractive || res.Interactive
 	}
 	if bkInteractive {
-		hint := styles.Timestamp.Render("↗ open in Slack to interact")
-		bkLines = append(bkLines, hint)
+		hint := WordWrap(styles.Timestamp.Render("↗ open in Slack to interact"), blockWidth)
+		bkLines = append(bkLines, strings.Split(hint, "\n")...)
 	}
 	preAttachmentRows += len(bkLines)
 

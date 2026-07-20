@@ -1,0 +1,87 @@
+{
+  "blocks": [
+    {
+      "type": "table",
+      "block_id": "tbl1",
+      "column_settings": [
+        { "align": "left", "is_wrapped": false },
+        { "align": "center", "is_wrapped": false },
+        { "align": "right", "is_wrapped": true }
+      ],
+      "rows": [
+        [
+          {
+            "type": "rich_text",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  { "type": "text", "text": "Service", "style": { "bold": true } }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "rich_text",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  { "type": "text", "text": "Status", "style": { "bold": true } }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "rich_text",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  { "type": "text", "text": "Owner", "style": { "bold": true } }
+                ]
+              }
+            ]
+          }
+        ],
+        [
+          {
+            "type": "rich_text",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  { "type": "text", "text": "API" }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "rich_text",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  { "type": "text", "text": "Healthy" }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "rich_text",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  { "type": "user", "user_id": "U123" },
+                  { "type": "text", "text": "\n" },
+                  { "type": "link", "url": "https://example.com/runbook" }
+                ]
+              }
+            ]
+          }
+        ]
+      ]
+    }
+  ]
+}
