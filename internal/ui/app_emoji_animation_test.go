@@ -5,6 +5,7 @@ import (
 	"image"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,7 +31,19 @@ func (f animatedEmojiFetcher) Prerendered(key string, target image.Point, proto 
 	return imgpkg.Render{}, false
 }
 
-func newAnimatedEmojiApp(t *testing.T) (*App, *int, *int) {
+func waitForAsyncCount(t *testing.T, ch <-chan struct{}, count *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for count.Load() < want {
+		select {
+		case <-ch:
+		case <-deadline:
+			t.Fatalf("count = %d, want %d", count.Load(), want)
+		}
+	}
+}
+
+func newAnimatedEmojiApp(t *testing.T) (*App, *atomic.Int32, *atomic.Int32, <-chan struct{}) {
 	t.Helper()
 	emojiutil.ResetAnimationClockForTest()
 	emojiutil.SetAnimationBlocked(false)
@@ -46,8 +59,9 @@ func newAnimatedEmojiApp(t *testing.T) (*App, *int, *int) {
 	a.height = 30
 	a.imgProtocol = imgpkg.ProtoKitty
 	url := emojiutil.CDNBaseURL + "1f44d.png"
-	flushCount := 0
-	startCount := 0
+	flushCount := &atomic.Int32{}
+	startCount := &atomic.Int32{}
+	startCh := make(chan struct{}, 8)
 	a.SetEmojiContext(messages.EmojiContext{
 		PlaceCtx: emojiutil.PlaceContext{
 			Fetcher: animatedEmojiFetcher{
@@ -58,7 +72,7 @@ func newAnimatedEmojiApp(t *testing.T) (*App, *int, *int) {
 					Lines:    []string{"\U0010EEEE\U0010EEEE"},
 					Animated: true,
 					OnFlush: func(io.Writer) error {
-						flushCount++
+						flushCount.Add(1)
 						return nil
 					},
 				},
@@ -66,7 +80,11 @@ func newAnimatedEmojiApp(t *testing.T) (*App, *int, *int) {
 			AnimationEnabled: true,
 			SendMsg: func(msg any) {
 				if _, ok := msg.(emojiutil.EmojiAnimationStartMsg); ok {
-					startCount++
+					startCount.Add(1)
+					select {
+					case startCh <- struct{}{}:
+					default:
+					}
 				}
 			},
 		},
@@ -79,7 +97,7 @@ func newAnimatedEmojiApp(t *testing.T) (*App, *int, *int) {
 		Text:      "hi :thumbsup:",
 		Timestamp: "1:00 PM",
 	}})
-	return a, &flushCount, &startCount
+	return a, flushCount, startCount, startCh
 }
 
 func newAnimationEnabledPlainApp(t *testing.T) *App {
@@ -155,16 +173,14 @@ func TestEmojiAnimationEnabledIdle_ReusesThreadTopCache(t *testing.T) {
 }
 
 func TestEmojiAnimationTickChain_StartStopRestart(t *testing.T) {
-	a, flushCount, startCount := newAnimatedEmojiApp(t)
+	a, flushCount, startCount, startCh := newAnimatedEmojiApp(t)
 	version := a.messagepane.Version()
 
 	_ = a.View()
-	if *flushCount != 1 {
-		t.Fatalf("initial View flush count = %d, want 1", *flushCount)
+	if flushCount.Load() != 1 {
+		t.Fatalf("initial View flush count = %d, want 1", flushCount.Load())
 	}
-	if *startCount != 1 {
-		t.Fatalf("initial start count = %d, want 1", *startCount)
-	}
+	waitForAsyncCount(t, startCh, startCount, 1)
 
 	_, cmd := a.Update(EmojiAnimationStartMsg{})
 	if cmd == nil {
@@ -180,11 +196,11 @@ func TestEmojiAnimationTickChain_StartStopRestart(t *testing.T) {
 	if !strings.Contains(second, "CACHED!") {
 		t.Fatalf("expected active animation frame to reuse cached msgTop output\n%s", second)
 	}
-	if *flushCount != 2 {
-		t.Fatalf("second View flush count = %d, want 2", *flushCount)
+	if flushCount.Load() != 2 {
+		t.Fatalf("second View flush count = %d, want 2", flushCount.Load())
 	}
-	if *startCount != 1 {
-		t.Fatalf("start count while chain active = %d, want 1", *startCount)
+	if startCount.Load() != 1 {
+		t.Fatalf("start count while chain active = %d, want 1", startCount.Load())
 	}
 
 	_, cmd = a.Update(emojiAnimationTickMsg{now: time.Now().Add(50 * time.Millisecond)})
@@ -209,25 +225,24 @@ func TestEmojiAnimationTickChain_StartStopRestart(t *testing.T) {
 	if !strings.Contains(restart, "RESTART") {
 		t.Fatalf("expected restart frame to reuse cached msgTop output\n%s", restart)
 	}
-	if *startCount != 2 {
-		t.Fatalf("restart start count = %d, want 2", *startCount)
-	}
-	if *flushCount != 3 {
-		t.Fatalf("restart View flush count = %d, want 3", *flushCount)
+	waitForAsyncCount(t, startCh, startCount, 2)
+	if flushCount.Load() != 3 {
+		t.Fatalf("restart View flush count = %d, want 3", flushCount.Load())
 	}
 }
 
 func TestEmojiAnimationStopsUnderModal(t *testing.T) {
-	a, flushCount, startCount := newAnimatedEmojiApp(t)
+	a, flushCount, startCount, startCh := newAnimatedEmojiApp(t)
 
 	_ = a.View()
+	waitForAsyncCount(t, startCh, startCount, 1)
 	_, _ = a.Update(EmojiAnimationStartMsg{})
 	a.confirmPrompt.Open("Quit?", "Body", nil)
 	a.SetMode(ModeConfirm)
 
 	_ = a.View()
-	if *flushCount != 1 {
-		t.Fatalf("modal View should block background animated flushes, got %d", *flushCount)
+	if flushCount.Load() != 1 {
+		t.Fatalf("modal View should block background animated flushes, got %d", flushCount.Load())
 	}
 
 	_, cmd := a.Update(emojiAnimationTickMsg{now: time.Now().Add(50 * time.Millisecond)})
@@ -246,10 +261,8 @@ func TestEmojiAnimationStopsUnderModal(t *testing.T) {
 	if !strings.Contains(resumed, "UNBLOCK!") {
 		t.Fatalf("expected modal-close frame to reuse cached msgTop output\n%s", resumed)
 	}
-	if *startCount != 2 {
-		t.Fatalf("closing modal should let visible animation restart, got %d starts", *startCount)
-	}
-	if *flushCount != 2 {
-		t.Fatalf("closing modal should resume animated flushes, got %d", *flushCount)
+	waitForAsyncCount(t, startCh, startCount, 2)
+	if flushCount.Load() != 2 {
+		t.Fatalf("closing modal should resume animated flushes, got %d", flushCount.Load())
 	}
 }

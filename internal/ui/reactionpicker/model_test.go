@@ -7,7 +7,9 @@ import (
 	goimage "image"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	slkemoji "github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
@@ -251,6 +253,18 @@ func (f *fakePickerFetcher) Fetch(_ context.Context, _ imgpkg.FetchRequest) (img
 	return imgpkg.FetchResult{}, nil
 }
 
+func waitForPickerCount(t *testing.T, ch <-chan struct{}, count *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for count.Load() < want {
+		select {
+		case <-ch:
+		case <-deadline:
+			t.Fatalf("count = %d, want %d", count.Load(), want)
+		}
+	}
+}
+
 func TestPicker_View_ImageMode_UsesPlacement(t *testing.T) {
 	slkemoji.SetImageMode(true, 2)
 	t.Cleanup(func() { slkemoji.SetImageMode(false, 2) })
@@ -292,15 +306,16 @@ func TestPicker_View_AnimatedPlacementStartsTicker(t *testing.T) {
 	})
 
 	thumbURL := slkemoji.CDNBaseURL + "1f44d.png"
-	flushCalls := 0
-	startCount := 0
+	var flushCalls atomic.Int32
+	var startCount atomic.Int32
+	startCh := make(chan struct{}, 2)
 	ff := newFakePickerFetcher()
 	ff.setPrerendered(slkemoji.EmojiCacheKey(thumbURL), goimage.Pt(2, 1), imgpkg.Render{
 		Cells:    goimage.Pt(2, 1),
 		Lines:    []string{"\U0010EEEE\U0010EEEE"},
 		Animated: true,
 		OnFlush: func(w io.Writer) error {
-			flushCalls++
+			flushCalls.Add(1)
 			_, err := io.WriteString(w, "frame")
 			return err
 		},
@@ -319,7 +334,11 @@ func TestPicker_View_AnimatedPlacementStartsTicker(t *testing.T) {
 			AnimationEnabled: true,
 			SendMsg: func(msg any) {
 				if _, ok := msg.(slkemoji.EmojiAnimationStartMsg); ok {
-					startCount++
+					startCount.Add(1)
+					select {
+					case startCh <- struct{}{}:
+					default:
+					}
 				}
 			},
 		},
@@ -329,12 +348,10 @@ func TestPicker_View_AnimatedPlacementStartsTicker(t *testing.T) {
 		m.HandleKey(string(ch))
 	}
 	_ = m.View(80)
-	if flushCalls != 1 {
-		t.Fatalf("flush calls = %d, want 1", flushCalls)
+	if flushCalls.Load() != 1 {
+		t.Fatalf("flush calls = %d, want 1", flushCalls.Load())
 	}
-	if startCount != 1 {
-		t.Fatalf("start count = %d, want 1", startCount)
-	}
+	waitForPickerCount(t, startCh, &startCount, 1)
 	if buf.Len() == 0 {
 		t.Fatal("animated picker render should write kitty bytes")
 	}
@@ -357,7 +374,8 @@ func TestPicker_View_AnimationDisabledOrImageOffStaysStatic(t *testing.T) {
 		defer slkemoji.ResetAnimationClockForTest()
 		defer slkemoji.SetImageMode(false, 2)
 
-		startCount := 0
+		var startCount atomic.Int32
+		startCh := make(chan struct{}, 1)
 		m := New()
 		m.Open("C123", "1234.5678", nil)
 		m.SetEmojiContext(EmojiContext{
@@ -365,7 +383,11 @@ func TestPicker_View_AnimationDisabledOrImageOffStaysStatic(t *testing.T) {
 				Fetcher: ff,
 				SendMsg: func(msg any) {
 					if _, ok := msg.(slkemoji.EmojiAnimationStartMsg); ok {
-						startCount++
+						startCount.Add(1)
+						select {
+						case startCh <- struct{}{}:
+						default:
+						}
 					}
 				},
 				AnimationEnabled: false,
@@ -379,8 +401,10 @@ func TestPicker_View_AnimationDisabledOrImageOffStaysStatic(t *testing.T) {
 		if !strings.Contains(out, "\U0010EEEE") {
 			t.Fatalf("animation-disabled picker should still render static placement\noutput=%q", out)
 		}
-		if startCount != 0 {
-			t.Fatalf("start count = %d, want 0 when animation disabled", startCount)
+		select {
+		case <-startCh:
+			t.Fatalf("unexpected start count = %d", startCount.Load())
+		case <-time.After(50 * time.Millisecond):
 		}
 	})
 

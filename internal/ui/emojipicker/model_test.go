@@ -6,7 +6,9 @@ import (
 	goimage "image"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
@@ -170,6 +172,18 @@ func (f *fakeDropdownFetcher) Fetch(_ context.Context, _ imgpkg.FetchRequest) (i
 	return imgpkg.FetchResult{}, nil
 }
 
+func waitForDropdownCount(t *testing.T, ch <-chan struct{}, count *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for count.Load() < want {
+		select {
+		case <-ch:
+		case <-deadline:
+			t.Fatalf("count = %d, want %d", count.Load(), want)
+		}
+	}
+}
+
 func TestDropdown_View_ImageMode_UsesPlacement(t *testing.T) {
 	emoji.SetImageMode(true, 2)
 	t.Cleanup(func() { emoji.SetImageMode(false, 2) })
@@ -212,8 +226,9 @@ func TestDropdown_View_AnimatedPlacementStartsTicker(t *testing.T) {
 	})
 
 	thumbURL := emoji.CDNBaseURL + "1f44d.png"
-	flushCalls := 0
-	startCount := 0
+	var flushCalls atomic.Int32
+	var startCount atomic.Int32
+	startCh := make(chan struct{}, 2)
 	ff := &fakeDropdownFetcher{
 		prerender: map[string]imgpkg.Render{
 			emoji.EmojiCacheKey(thumbURL): {
@@ -221,7 +236,7 @@ func TestDropdown_View_AnimatedPlacementStartsTicker(t *testing.T) {
 				Lines:    []string{"\U0010EEEE\U0010EEEE"},
 				Animated: true,
 				OnFlush: func(w io.Writer) error {
-					flushCalls++
+					flushCalls.Add(1)
 					_, err := io.WriteString(w, "frame")
 					return err
 				},
@@ -242,7 +257,11 @@ func TestDropdown_View_AnimatedPlacementStartsTicker(t *testing.T) {
 			AnimationEnabled: true,
 			SendMsg: func(msg any) {
 				if _, ok := msg.(emoji.EmojiAnimationStartMsg); ok {
-					startCount++
+					startCount.Add(1)
+					select {
+					case startCh <- struct{}{}:
+					default:
+					}
 				}
 			},
 		},
@@ -250,12 +269,10 @@ func TestDropdown_View_AnimatedPlacementStartsTicker(t *testing.T) {
 	})
 	m.Open("thumb")
 	_ = m.View(40)
-	if flushCalls != 1 {
-		t.Fatalf("flush calls = %d, want 1", flushCalls)
+	if flushCalls.Load() != 1 {
+		t.Fatalf("flush calls = %d, want 1", flushCalls.Load())
 	}
-	if startCount != 1 {
-		t.Fatalf("start count = %d, want 1", startCount)
-	}
+	waitForDropdownCount(t, startCh, &startCount, 1)
 	if buf.Len() == 0 {
 		t.Fatal("animated dropdown render should write kitty bytes")
 	}
@@ -281,7 +298,8 @@ func TestDropdown_View_AnimationDisabledOrImageOffStaysStatic(t *testing.T) {
 		defer emoji.ResetAnimationClockForTest()
 		defer emoji.SetImageMode(false, 2)
 
-		startCount := 0
+		var startCount atomic.Int32
+		startCh := make(chan struct{}, 1)
 		var m Model
 		m.SetEntries([]emoji.EmojiEntry{{Name: "thumbsup", Display: "\U0001F44D"}})
 		m.SetEmojiContext(EmojiContext{
@@ -289,7 +307,11 @@ func TestDropdown_View_AnimationDisabledOrImageOffStaysStatic(t *testing.T) {
 				Fetcher: ff,
 				SendMsg: func(msg any) {
 					if _, ok := msg.(emoji.EmojiAnimationStartMsg); ok {
-						startCount++
+						startCount.Add(1)
+						select {
+						case startCh <- struct{}{}:
+						default:
+						}
 					}
 				},
 				AnimationEnabled: false,
@@ -301,8 +323,10 @@ func TestDropdown_View_AnimationDisabledOrImageOffStaysStatic(t *testing.T) {
 		if !strings.Contains(out, "\U0010EEEE") {
 			t.Fatalf("animation-disabled dropdown should still render static placement\noutput=%q", out)
 		}
-		if startCount != 0 {
-			t.Fatalf("start count = %d, want 0 when animation disabled", startCount)
+		select {
+		case <-startCh:
+			t.Fatalf("unexpected start count = %d", startCount.Load())
+		case <-time.After(50 * time.Millisecond):
 		}
 	})
 

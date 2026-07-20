@@ -7,7 +7,9 @@ import (
 	stdimage "image"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/gammons/slk/internal/config"
@@ -871,15 +873,16 @@ func TestThreadModel_AnimatedEmojiInParentFlushes(t *testing.T) {
 	})
 
 	gifURL := "https://example.com/party_parrot.gif"
-	flushCalls := 0
-	startCount := 0
+	var flushCalls atomic.Int32
+	var startCount atomic.Int32
+	startCh := make(chan struct{}, 2)
 	ff := newFakePlaceFetcher()
 	ff.setPrerendered(emojiutil.EmojiCacheKey(gifURL), stdimage.Pt(2, 1), imgpkg.Render{
 		Cells:    stdimage.Pt(2, 1),
 		Lines:    []string{"\U0010EEEE\U0010EEEE"},
 		Animated: true,
 		OnFlush: func(w io.Writer) error {
-			flushCalls++
+			flushCalls.Add(1)
 			_, err := io.WriteString(w, "frame")
 			return err
 		},
@@ -897,7 +900,11 @@ func TestThreadModel_AnimatedEmojiInParentFlushes(t *testing.T) {
 			AnimationEnabled: true,
 			SendMsg: func(msg any) {
 				if _, ok := msg.(emojiutil.EmojiAnimationStartMsg); ok {
-					startCount++
+					startCount.Add(1)
+					select {
+					case startCh <- struct{}{}:
+					default:
+					}
 				}
 			},
 		},
@@ -914,11 +921,16 @@ func TestThreadModel_AnimatedEmojiInParentFlushes(t *testing.T) {
 	if !strings.Contains(out, "\U0010EEEE") {
 		t.Fatalf("thread parent should render kitty placeholders for animated custom emoji\noutput=%q", out)
 	}
-	if flushCalls != 1 {
-		t.Fatalf("parent animated flush calls = %d, want 1", flushCalls)
+	if flushCalls.Load() != 1 {
+		t.Fatalf("parent animated flush calls = %d, want 1", flushCalls.Load())
 	}
-	if startCount != 1 {
-		t.Fatalf("parent animated emoji should request ticker start once, got %d", startCount)
+	deadline := time.After(time.Second)
+	for startCount.Load() < 1 {
+		select {
+		case <-startCh:
+		case <-deadline:
+			t.Fatalf("parent animated emoji should request ticker start once, got %d", startCount.Load())
+		}
 	}
 	if buf.Len() == 0 {
 		t.Fatal("parent animated emoji should write kitty bytes on first visible frame")

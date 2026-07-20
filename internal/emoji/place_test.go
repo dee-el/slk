@@ -6,6 +6,7 @@ import (
 	goimage "image"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -171,6 +172,27 @@ type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
+func waitForStartCount(t *testing.T, ch <-chan struct{}, count *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for count.Load() < want {
+		select {
+		case <-ch:
+		case <-deadline:
+			t.Fatalf("start count = %d, want %d", count.Load(), want)
+		}
+	}
+}
+
+func assertNoStartSignal(t *testing.T, ch <-chan struct{}, count *atomic.Int32, wait time.Duration) {
+	t.Helper()
+	select {
+	case <-ch:
+		t.Fatalf("unexpected start signal; count=%d", count.Load())
+	case <-time.After(wait):
+	}
+}
+
 func TestPlace_ColdPath_SpawnsFetch(t *testing.T) {
 	ff := newFakeFetcher()
 	url := "https://a.slack-edge.com/...1f44d.png"
@@ -333,23 +355,28 @@ func TestPlace_WarmPath_AnimatedFlushStartsClockAndRespectsBlock(t *testing.T) {
 	url := "https://x/animated.gif"
 	key := EmojiCacheKey(url)
 	target := goimage.Pt(2, 1)
-	innerCalls := 0
+	var innerCalls atomic.Int32
 	ff.setPrerendered(key, target, imgpkg.Render{
 		Cells:    target,
 		Lines:    []string{"\U0010EEEE\U0010EEEE"},
 		Animated: true,
 		OnFlush: func(_ io.Writer) error {
-			innerCalls++
+			innerCalls.Add(1)
 			return nil
 		},
 	})
-	startCount := 0
+	var startCount atomic.Int32
+	startCh := make(chan struct{}, 4)
 	ctx := PlaceContext{
 		Fetcher:          ff,
 		AnimationEnabled: true,
 		SendMsg: func(m any) {
 			if _, ok := m.(EmojiAnimationStartMsg); ok {
-				startCount++
+				startCount.Add(1)
+				select {
+				case startCh <- struct{}{}:
+				default:
+				}
 			}
 		},
 	}
@@ -364,19 +391,17 @@ func TestPlace_WarmPath_AnimatedFlushStartsClockAndRespectsBlock(t *testing.T) {
 	if err := flush(discardWriter{}); err != nil {
 		t.Fatal(err)
 	}
-	if innerCalls != 2 {
-		t.Fatalf("inner animated flush calls = %d, want 2", innerCalls)
+	if innerCalls.Load() != 2 {
+		t.Fatalf("inner animated flush calls = %d, want 2", innerCalls.Load())
 	}
-	if startCount != 1 {
-		t.Fatalf("start messages = %d, want 1 while ticker active", startCount)
-	}
+	waitForStartCount(t, startCh, &startCount, 1)
 
 	SetAnimationBlocked(true)
 	if err := flush(discardWriter{}); err != nil {
 		t.Fatal(err)
 	}
-	if innerCalls != 2 {
-		t.Fatalf("blocked animated flush should not reach inner callback, got %d calls", innerCalls)
+	if innerCalls.Load() != 2 {
+		t.Fatalf("blocked animated flush should not reach inner callback, got %d calls", innerCalls.Load())
 	}
 
 	SetAnimationBlocked(false)
@@ -384,12 +409,10 @@ func TestPlace_WarmPath_AnimatedFlushStartsClockAndRespectsBlock(t *testing.T) {
 	if err := flush(discardWriter{}); err != nil {
 		t.Fatal(err)
 	}
-	if innerCalls != 3 {
-		t.Fatalf("post-restart inner calls = %d, want 3", innerCalls)
+	if innerCalls.Load() != 3 {
+		t.Fatalf("post-restart inner calls = %d, want 3", innerCalls.Load())
 	}
-	if startCount != 2 {
-		t.Fatalf("start messages after restart = %d, want 2", startCount)
-	}
+	waitForStartCount(t, startCh, &startCount, 2)
 }
 
 func TestPlace_WarmPath_AnimationDisabledDoesNotStartTicker(t *testing.T) {
@@ -400,22 +423,27 @@ func TestPlace_WarmPath_AnimationDisabledDoesNotStartTicker(t *testing.T) {
 	url := "https://x/animated.gif"
 	key := EmojiCacheKey(url)
 	target := goimage.Pt(2, 1)
-	innerCalls := 0
+	var innerCalls atomic.Int32
 	ff.setPrerendered(key, target, imgpkg.Render{
 		Cells:    target,
 		Lines:    []string{"\U0010EEEE\U0010EEEE"},
 		Animated: true,
 		OnFlush: func(_ io.Writer) error {
-			innerCalls++
+			innerCalls.Add(1)
 			return nil
 		},
 	})
-	startCount := 0
+	var startCount atomic.Int32
+	startCh := make(chan struct{}, 1)
 	_, flush, ok := Place(PlaceContext{
 		Fetcher: ff,
 		SendMsg: func(m any) {
 			if _, ok := m.(EmojiAnimationStartMsg); ok {
-				startCount++
+				startCount.Add(1)
+				select {
+				case startCh <- struct{}{}:
+				default:
+				}
 			}
 		},
 		AnimationEnabled: false,
@@ -426,11 +454,70 @@ func TestPlace_WarmPath_AnimationDisabledDoesNotStartTicker(t *testing.T) {
 	if err := flush(discardWriter{}); err != nil {
 		t.Fatal(err)
 	}
-	if innerCalls != 1 {
-		t.Fatalf("inner calls = %d, want 1", innerCalls)
+	if innerCalls.Load() != 1 {
+		t.Fatalf("inner calls = %d, want 1", innerCalls.Load())
 	}
-	if startCount != 0 {
-		t.Fatalf("ticker start messages = %d, want 0 when animation disabled", startCount)
+	assertNoStartSignal(t, startCh, &startCount, 50*time.Millisecond)
+}
+
+func TestPlace_WarmPath_AnimatedFlushDoesNotBlockOnBlockingSend(t *testing.T) {
+	ResetAnimationClockForTest()
+	SetAnimationBlocked(false)
+	t.Cleanup(ResetAnimationClockForTest)
+	t.Cleanup(func() { SetAnimationBlocked(false) })
+
+	ff := newFakeFetcher()
+	url := "https://x/animated.gif"
+	key := EmojiCacheKey(url)
+	target := goimage.Pt(2, 1)
+	ff.setPrerendered(key, target, imgpkg.Render{
+		Cells:    target,
+		Lines:    []string{"\U0010EEEE\U0010EEEE"},
+		Animated: true,
+		OnFlush:  func(_ io.Writer) error { return nil },
+	})
+	var launches atomic.Int32
+	blocked := make(chan any)
+	_, flush, ok := Place(PlaceContext{
+		Fetcher:          ff,
+		AnimationEnabled: true,
+		SendMsg: func(m any) {
+			launches.Add(1)
+			blocked <- m
+		},
+	}, url, 2)
+	if !ok || flush == nil {
+		t.Fatal("expected warm animated flush")
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- flush(discardWriter{})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("flush returned err = %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("animated flush blocked on SendMsg")
+	}
+	if err := flush(discardWriter{}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for launches.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if launches.Load() != 1 {
+		t.Fatalf("dispatch goroutines launched = %d, want 1", launches.Load())
+	}
+	select {
+	case msg := <-blocked:
+		if _, ok := msg.(EmojiAnimationStartMsg); !ok {
+			t.Fatalf("blocked send msg type = %T, want EmojiAnimationStartMsg", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected one blocked start dispatch to be releasable")
 	}
 }
 

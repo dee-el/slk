@@ -17,6 +17,10 @@ type AnimationClock struct {
 	lastVisible time.Time
 }
 
+var animationStartDispatch = func(send func(any), msg any) {
+	go send(msg)
+}
+
 func (c *AnimationClock) MarkVisible(send func(any)) {
 	now := time.Now()
 	start := false
@@ -28,7 +32,7 @@ func (c *AnimationClock) MarkVisible(send func(any)) {
 	}
 	c.mu.Unlock()
 	if start {
-		send(EmojiAnimationStartMsg{})
+		animationStartDispatch(send, EmojiAnimationStartMsg{})
 	}
 }
 
@@ -82,4 +86,7 @@ func animationIsBlocked() bool {
 func ResetAnimationClockForTest() {
 	emojiAnimationClock.resetForTest()
 	animationBlocked.Store(false)
+	animationStartDispatch = func(send func(any), msg any) {
+		go send(msg)
+	}
 }
