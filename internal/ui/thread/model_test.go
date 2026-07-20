@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	stdimage "image"
@@ -856,6 +857,71 @@ func TestThreadModel_RenderReplyWithImageEmoji_WarmCache(t *testing.T) {
 	}
 	if strings.Contains(out, ":thumbsup:") {
 		t.Errorf("thread view contains literal :thumbsup: text; image mode did not replace it\noutput=%q", out)
+	}
+}
+
+func TestThreadModel_AnimatedEmojiInParentFlushes(t *testing.T) {
+	emojiutil.ResetAnimationClockForTest()
+	emojiutil.SetAnimationBlocked(false)
+	emojiutil.SetImageMode(true, 2)
+	t.Cleanup(emojiutil.ResetAnimationClockForTest)
+	t.Cleanup(func() {
+		emojiutil.SetAnimationBlocked(false)
+		emojiutil.SetImageMode(false, 2)
+	})
+
+	gifURL := "https://example.com/party_parrot.gif"
+	flushCalls := 0
+	startCount := 0
+	ff := newFakePlaceFetcher()
+	ff.setPrerendered(emojiutil.EmojiCacheKey(gifURL), stdimage.Pt(2, 1), imgpkg.Render{
+		Cells:    stdimage.Pt(2, 1),
+		Lines:    []string{"\U0010EEEE\U0010EEEE"},
+		Animated: true,
+		OnFlush: func(w io.Writer) error {
+			flushCalls++
+			_, err := io.WriteString(w, "frame")
+			return err
+		},
+	})
+
+	saved := imgpkg.KittyOutput
+	defer func() { imgpkg.KittyOutput = saved }()
+	var buf bytes.Buffer
+	imgpkg.KittyOutput = &buf
+
+	m := New()
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emojiutil.PlaceContext{
+			Fetcher:          ff,
+			AnimationEnabled: true,
+			SendMsg: func(msg any) {
+				if _, ok := msg.(emojiutil.EmojiAnimationStartMsg); ok {
+					startCount++
+				}
+			},
+		},
+		Cells:   2,
+		Customs: map[string]string{"party_parrot": gifURL},
+	})
+	m.SetThread(
+		messages.MessageItem{TS: "1.0", UserName: "alice", Text: "parent :party_parrot:"},
+		[]messages.MessageItem{{TS: "1.1", UserName: "bob", Text: "reply"}},
+		"C1", "1.0",
+	)
+
+	out := m.View(80, 24)
+	if !strings.Contains(out, "\U0010EEEE") {
+		t.Fatalf("thread parent should render kitty placeholders for animated custom emoji\noutput=%q", out)
+	}
+	if flushCalls != 1 {
+		t.Fatalf("parent animated flush calls = %d, want 1", flushCalls)
+	}
+	if startCount != 1 {
+		t.Fatalf("parent animated emoji should request ticker start once, got %d", startCount)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("parent animated emoji should write kitty bytes on first visible frame")
 	}
 }
 

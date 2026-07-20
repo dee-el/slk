@@ -223,6 +223,9 @@ func (a *App) renderChannelMessagesPanel(msgWidth, msgBorder, contentHeight int,
 func (a *App) renderMessagesTop(msgWidth, msgBorder, topHeight, msgContentHeight int, topPanelVersion, topLayoutKey int64, msgFocused bool) string {
 	c := &a.renderCache.msgTop
 	if c.hit(topPanelVersion, msgWidth, topHeight, topLayoutKey) {
+		if a.emojiCtx.PlaceCtx.AnimationEnabled {
+			a.messagepane.FlushVisibleKitty(msgContentHeight)
+		}
 		return c.output
 	}
 	// ViewBare (not View) so the cached output is selection-free; the

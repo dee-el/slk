@@ -1,9 +1,11 @@
 package reactionpicker
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	goimage "image"
+	"io"
 	"strings"
 	"testing"
 
@@ -277,4 +279,122 @@ func TestPicker_View_ImageMode_UsesPlacement(t *testing.T) {
 	if !strings.Contains(out, "\U0010EEEE") {
 		t.Errorf("picker View does not contain kitty placeholder runes\noutput=%q", out)
 	}
+}
+
+func TestPicker_View_AnimatedPlacementStartsTicker(t *testing.T) {
+	slkemoji.ResetAnimationClockForTest()
+	slkemoji.SetAnimationBlocked(false)
+	slkemoji.SetImageMode(true, 2)
+	t.Cleanup(slkemoji.ResetAnimationClockForTest)
+	t.Cleanup(func() {
+		slkemoji.SetAnimationBlocked(false)
+		slkemoji.SetImageMode(false, 2)
+	})
+
+	thumbURL := slkemoji.CDNBaseURL + "1f44d.png"
+	flushCalls := 0
+	startCount := 0
+	ff := newFakePickerFetcher()
+	ff.setPrerendered(slkemoji.EmojiCacheKey(thumbURL), goimage.Pt(2, 1), imgpkg.Render{
+		Cells:    goimage.Pt(2, 1),
+		Lines:    []string{"\U0010EEEE\U0010EEEE"},
+		Animated: true,
+		OnFlush: func(w io.Writer) error {
+			flushCalls++
+			_, err := io.WriteString(w, "frame")
+			return err
+		},
+	})
+
+	saved := imgpkg.KittyOutput
+	defer func() { imgpkg.KittyOutput = saved }()
+	var buf bytes.Buffer
+	imgpkg.KittyOutput = &buf
+
+	m := New()
+	m.Open("C123", "1234.5678", nil)
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: slkemoji.PlaceContext{
+			Fetcher:          ff,
+			AnimationEnabled: true,
+			SendMsg: func(msg any) {
+				if _, ok := msg.(slkemoji.EmojiAnimationStartMsg); ok {
+					startCount++
+				}
+			},
+		},
+		Cells: 2,
+	})
+	for _, ch := range "thumbsup" {
+		m.HandleKey(string(ch))
+	}
+	_ = m.View(80)
+	if flushCalls != 1 {
+		t.Fatalf("flush calls = %d, want 1", flushCalls)
+	}
+	if startCount != 1 {
+		t.Fatalf("start count = %d, want 1", startCount)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("animated picker render should write kitty bytes")
+	}
+}
+
+func TestPicker_View_AnimationDisabledOrImageOffStaysStatic(t *testing.T) {
+	thumbURL := slkemoji.CDNBaseURL + "1f44d.png"
+	ff := newFakePickerFetcher()
+	ff.setPrerendered(slkemoji.EmojiCacheKey(thumbURL), goimage.Pt(2, 1), imgpkg.Render{
+		Cells:    goimage.Pt(2, 1),
+		Lines:    []string{"\U0010EEEE\U0010EEEE"},
+		Animated: true,
+		OnFlush:  func(io.Writer) error { return nil },
+	})
+
+	t.Run("animation disabled", func(t *testing.T) {
+		slkemoji.ResetAnimationClockForTest()
+		slkemoji.SetAnimationBlocked(false)
+		slkemoji.SetImageMode(true, 2)
+		defer slkemoji.ResetAnimationClockForTest()
+		defer slkemoji.SetImageMode(false, 2)
+
+		startCount := 0
+		m := New()
+		m.Open("C123", "1234.5678", nil)
+		m.SetEmojiContext(EmojiContext{
+			PlaceCtx: slkemoji.PlaceContext{
+				Fetcher: ff,
+				SendMsg: func(msg any) {
+					if _, ok := msg.(slkemoji.EmojiAnimationStartMsg); ok {
+						startCount++
+					}
+				},
+				AnimationEnabled: false,
+			},
+			Cells: 2,
+		})
+		for _, ch := range "thumbsup" {
+			m.HandleKey(string(ch))
+		}
+		out := m.View(80)
+		if !strings.Contains(out, "\U0010EEEE") {
+			t.Fatalf("animation-disabled picker should still render static placement\noutput=%q", out)
+		}
+		if startCount != 0 {
+			t.Fatalf("start count = %d, want 0 when animation disabled", startCount)
+		}
+	})
+
+	t.Run("image mode off", func(t *testing.T) {
+		slkemoji.SetImageMode(false, 2)
+		m := New()
+		m.Open("C123", "1234.5678", nil)
+		m.SetEmojiContext(EmojiContext{PlaceCtx: slkemoji.PlaceContext{Fetcher: ff}, Cells: 2})
+		for _, ch := range "thumbsup" {
+			m.HandleKey(string(ch))
+		}
+		out := m.View(80)
+		if strings.Contains(out, "\U0010EEEE") {
+			t.Fatalf("image-mode-off picker should fall back from placement\noutput=%q", out)
+		}
+	})
 }

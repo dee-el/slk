@@ -95,6 +95,9 @@ func (a *App) renderThreadRegion(frame panelLayoutFrame, themeVer int64) string 
 func (a *App) renderThreadTop(threadWidth, threadBorder, threadTopHeight, threadContentHeight int, threadTopVersion, threadTopLayoutKey int64, threadFocused bool) string {
 	c := &a.renderCache.thread
 	if c.hit(threadTopVersion, threadWidth, threadTopHeight, threadTopLayoutKey) {
+		if a.emojiCtx.PlaceCtx.AnimationEnabled {
+			a.threadPanel.FlushVisibleKitty(threadContentHeight)
+		}
 		return c.output
 	}
 	topBorderStyle := styles.UnfocusedBorder.Width(threadWidth).

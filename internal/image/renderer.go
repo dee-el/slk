@@ -58,12 +58,17 @@ type Render struct {
 	Fallback []string
 
 	// OnFlush is an optional pre-frame side effect (kitty image upload).
-	// Called at most once per frame across all rendered images. Idempotent.
+	// Static renders are one-shot/idempotent; animated kitty emoji may reuse it
+	// to replace pixels for a stable image ID.
 	OnFlush func(io.Writer) error
 
 	// ID is a protocol-specific image ID. Zero when the protocol has no
 	// notion of a stable image identifier.
 	ID uint32
+
+	// Animated reports that OnFlush is reusable and may replace pixels for a
+	// stable kitty image ID over time.
+	Animated bool
 }
 
 // Renderer encodes an in-memory image into a Render at a target cell footprint.

@@ -31,6 +31,10 @@ type PlaceContext struct {
 	// completes. Typically wraps bubbletea Program.Send. If nil, the
 	// fetch still runs but no re-render is signaled — useful in tests.
 	SendMsg func(msg any)
+
+	// AnimationEnabled gates GIF animation for emoji fetches and warm-path
+	// flush callbacks. Static emoji rendering is unaffected.
+	AnimationEnabled bool
 }
 
 // EmojiImageReadyMsg is dispatched via PlaceContext.SendMsg when a
@@ -149,7 +153,11 @@ func Place(ctx PlaceContext, url string, cells int) (string, func(io.Writer) err
 	// off the UI thread when the fetch completed.
 	if r, ok := ctx.Fetcher.Prerendered(key, target, imgpkg.ProtoKitty); ok {
 		if len(r.Lines) > 0 {
-			return r.Lines[0], r.OnFlush, true
+			flush := r.OnFlush
+			if r.Animated && flush != nil && ctx.AnimationEnabled {
+				flush = wrapAnimatedFlush(ctx, flush)
+			}
+			return r.Lines[0], flush, true
 		}
 	}
 
@@ -190,6 +198,7 @@ func spawnEmojiFetch(ctx PlaceContext, key, url string, target goimage.Point) {
 		_, err := fetcher.Fetch(context.Background(), imgpkg.FetchRequest{
 			Key:        key,
 			URL:        url,
+			Animate:    ctx.AnimationEnabled,
 			CellTarget: target, // triggers prerender into the kitty pipeline
 			// Target left zero: Slack emoji PNGs are already ~64px;
 			// the kitty prerender downscales to the cell-pixel target
@@ -216,4 +225,14 @@ func spawnEmojiFetch(ctx PlaceContext, key, url string, target goimage.Point) {
 			send(EmojiImageReadyMsg{URL: url})
 		}
 	}()
+}
+
+func wrapAnimatedFlush(ctx PlaceContext, flush func(io.Writer) error) func(io.Writer) error {
+	return func(w io.Writer) error {
+		if animationIsBlocked() {
+			return nil
+		}
+		emojiAnimationClock.MarkVisible(ctx.SendMsg)
+		return flush(w)
+	}
 }

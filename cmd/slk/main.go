@@ -791,7 +791,8 @@ func run() error {
 	// bubbletea so reducers can invalidate per-surface caches.
 	buildPlaceCtx := func(send func(tea.Msg)) emojiwidth.PlaceContext {
 		return emojiwidth.PlaceContext{
-			Fetcher: imageFetcher,
+			Fetcher:          imageFetcher,
+			AnimationEnabled: cfg.Animations.Enabled && proto == imgpkg.ProtoKitty,
 			SendMsg: func(v any) {
 				if send != nil {
 					if msg, ok := v.(tea.Msg); ok {

@@ -82,6 +82,36 @@ func TestRegistry_MarkUploadedUnknownIDIsNoOp(t *testing.T) {
 	}
 }
 
+func TestRegistry_InvalidateUploadedByKeyKeepsStableIDsFreshAgain(t *testing.T) {
+	r := NewRegistry()
+	targetA := image.Pt(4, 2)
+	targetB := image.Pt(8, 4)
+	idA, _ := r.Lookup("gif", targetA)
+	idB, _ := r.Lookup("gif", targetB)
+	r.MarkUploaded(idA)
+	r.MarkUploaded(idB)
+
+	ids := r.InvalidateUploadedByKey("gif")
+	if len(ids) != 2 {
+		t.Fatalf("invalidated ids = %d, want 2", len(ids))
+	}
+	if _, fresh := r.Lookup("gif", targetA); !fresh {
+		t.Fatal("targetA should become fresh again after invalidation")
+	}
+	if _, fresh := r.Lookup("gif", targetB); !fresh {
+		t.Fatal("targetB should become fresh again after invalidation")
+	}
+	if idAgain, _ := r.Lookup("gif", targetA); idAgain != idA {
+		t.Fatalf("stable id changed after invalidation: got %d want %d", idAgain, idA)
+	}
+	if idAgain, _ := r.Lookup("gif", targetB); idAgain != idB {
+		t.Fatalf("stable id changed after invalidation: got %d want %d", idAgain, idB)
+	}
+	if _, fresh := r.Lookup("other", targetA); !fresh {
+		t.Fatal("other key should remain unaffected")
+	}
+}
+
 func TestRegistry_DifferentSizesDifferentIDs(t *testing.T) {
 	r := NewRegistry()
 	a, _ := r.Lookup("file", image.Pt(40, 20))

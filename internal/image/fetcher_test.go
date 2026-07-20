@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"image"
 	imgcolor "image/color"
+	"image/gif"
 	imgpng "image/png"
 	"net/http"
 	"net/http/httptest"
@@ -453,5 +454,233 @@ func TestFetcher_HTTPErrorPropagates(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestFetcher_GIFAnimationOptInAndCacheHit(t *testing.T) {
+	gifBytes := twoFrameGIF(t, 5, 5, 0)
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "image/gif")
+		w.Write(gifBytes)
+	}))
+	defer srv.Close()
+
+	cache, _ := NewCache(t.TempDir(), 10)
+	f := NewFetcher(cache, http.DefaultClient)
+
+	staticRes, err := f.Fetch(context.Background(), FetchRequest{Key: "gif", URL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rgbaAtTest(staticRes.Img, 0, 0); got != (imgcolor.RGBA{255, 0, 0, 255}) {
+		t.Fatalf("static decode pixel = %#v, want first-frame red", got)
+	}
+	if _, ok := f.animations.Load("gif"); ok {
+		t.Fatal("static GIF fetch should not populate animation memo")
+	}
+
+	animatedRes, err := f.Fetch(context.Background(), FetchRequest{Key: "gif", URL: srv.URL, Animate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits != 1 {
+		t.Fatalf("second fetch should hit disk cache, got %d HTTP hits", hits)
+	}
+	if got := rgbaAtTest(animatedRes.Img, 0, 0); got != (imgcolor.RGBA{255, 0, 0, 255}) {
+		t.Fatalf("animated fetch frame0 pixel = %#v, want red", got)
+	}
+	v, ok := f.animations.Load("gif")
+	if !ok {
+		t.Fatal("animated GIF fetch should populate animation memo")
+	}
+	anim := v.(*Animation)
+	if len(anim.Frames) != 2 {
+		t.Fatalf("animation frames = %d, want 2", len(anim.Frames))
+	}
+}
+
+func TestFetcher_GIFAnimationPrerendersKitty(t *testing.T) {
+	gifBytes := twoFrameGIF(t, 5, 5, 0)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/gif")
+		w.Write(gifBytes)
+	}))
+	defer srv.Close()
+
+	cache, _ := NewCache(t.TempDir(), 10)
+	f := NewFetcher(cache, http.DefaultClient)
+	kr := NewKittyRenderer(NewRegistry())
+	f.ConfigurePrerender(ProtoKitty)
+	f.ConfigurePrerenderKitty(kr)
+
+	cellTarget := image.Pt(2, 1)
+	if _, err := f.Fetch(context.Background(), FetchRequest{
+		Key: "gif", URL: srv.URL, Animate: true, CellTarget: cellTarget,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r, ok := f.Prerendered("gif", cellTarget, ProtoKitty)
+	if !ok {
+		t.Fatal("expected kitty prerender for animated GIF")
+	}
+	if !r.Animated {
+		t.Fatal("expected prerendered kitty render to be marked animated")
+	}
+	if r.OnFlush == nil {
+		t.Fatal("expected animated kitty prerender to carry a reusable flush callback")
+	}
+}
+
+func TestFetcher_GIFAnimationMemoReusedAcrossRefetch(t *testing.T) {
+	gifBytes := twoFrameGIF(t, 5, 5, 0)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/gif")
+		w.Write(gifBytes)
+	}))
+	defer srv.Close()
+
+	cache, _ := NewCache(t.TempDir(), 10)
+	f := NewFetcher(cache, http.DefaultClient)
+	if _, err := f.Fetch(context.Background(), FetchRequest{Key: "gif", URL: srv.URL, Animate: true}); err != nil {
+		t.Fatal(err)
+	}
+	v1, ok := f.animations.Load("gif")
+	if !ok {
+		t.Fatal("expected animation memo after first animated fetch")
+	}
+	anim1 := v1.(*Animation)
+
+	kr := NewKittyRenderer(NewRegistry())
+	f.ConfigurePrerender(ProtoKitty)
+	f.ConfigurePrerenderKitty(kr)
+	cellTarget := image.Pt(2, 1)
+	if _, err := f.Fetch(context.Background(), FetchRequest{
+		Key: "gif", URL: srv.URL, Animate: true, CellTarget: cellTarget,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v2, ok := f.animations.Load("gif")
+	if !ok {
+		t.Fatal("expected animation memo after refetch")
+	}
+	anim2 := v2.(*Animation)
+	if anim2 != anim1 {
+		t.Fatal("expected second animated fetch to reuse cached animation memo")
+	}
+	r, ok := f.Prerendered("gif", cellTarget, ProtoKitty)
+	if !ok || !r.Animated {
+		t.Fatal("refetch after prerender reset should reinstall animated kitty prerender")
+	}
+}
+
+func TestFetcher_GIFAnimationMissRedownloadInvalidatesOldMemo(t *testing.T) {
+	gifBytes := twoFrameGIF(t, 5, 5, 0)
+	updated := encodeGIF(t, &gif.GIF{
+		Image: []*image.Paletted{
+			func() *image.Paletted {
+				f := image.NewPaletted(image.Rect(0, 0, 1, 1), colorPaletteForGIF())
+				fillPaletted(f, 2)
+				return f
+			}(),
+			func() *image.Paletted {
+				f := image.NewPaletted(image.Rect(0, 0, 1, 1), colorPaletteForGIF())
+				fillPaletted(f, 1)
+				return f
+			}(),
+		},
+		Delay:     []int{5, 5},
+		LoopCount: 0,
+		Config:    image.Config{Width: 1, Height: 1},
+	})
+
+	body := gifBytes
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "image/gif")
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	cache, _ := NewCache(t.TempDir(), 10)
+	f := NewFetcher(cache, http.DefaultClient)
+	if _, err := f.Fetch(context.Background(), FetchRequest{Key: "gif", URL: srv.URL, Animate: true}); err != nil {
+		t.Fatal(err)
+	}
+	v1, ok := f.animations.Load("gif")
+	if !ok {
+		t.Fatal("expected first animation memo")
+	}
+	anim1 := v1.(*Animation)
+	if got := rgbaAtTest(anim1.Frames[0], 0, 0); got != (imgcolor.RGBA{255, 0, 0, 255}) {
+		t.Fatalf("initial frame0 = %#v, want red", got)
+	}
+
+	body = updated
+	cache.Delete("gif")
+	res, err := f.Fetch(context.Background(), FetchRequest{Key: "gif", URL: srv.URL, Animate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits != 2 {
+		t.Fatalf("expected redownload after disk-cache miss, got %d HTTP hits", hits)
+	}
+	if got := rgbaAtTest(res.Img, 0, 0); got != (imgcolor.RGBA{0, 0, 255, 255}) {
+		t.Fatalf("redownloaded frame0 = %#v, want blue from new gif", got)
+	}
+	v2, ok := f.animations.Load("gif")
+	if !ok {
+		t.Fatal("expected replacement animation memo after redownload")
+	}
+	anim2 := v2.(*Animation)
+	if anim2 == anim1 {
+		t.Fatal("redownload should replace stale animation memo, not reuse pointer")
+	}
+}
+
+func TestFetcher_GIFAnimationLimitFallsBackStatic(t *testing.T) {
+	gifBytes := tooManyFramesGIF(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/gif")
+		w.Write(gifBytes)
+	}))
+	defer srv.Close()
+
+	cache, _ := NewCache(t.TempDir(), 10)
+	f := NewFetcher(cache, http.DefaultClient)
+
+	res, err := f.Fetch(context.Background(), FetchRequest{Key: "gif-limit", URL: srv.URL, Animate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rgbaAtTest(res.Img, 0, 0); got != (imgcolor.RGBA{255, 0, 0, 255}) {
+		t.Fatalf("static fallback pixel = %#v, want first-frame red", got)
+	}
+	if _, ok := f.animations.Load("gif-limit"); ok {
+		t.Fatal("limit-rejected GIF should fall back to static decode only")
+	}
+}
+
+func tooManyFramesGIF(t testing.TB) []byte {
+	t.Helper()
+	pal := colorPaletteForGIF()
+	g := &gif.GIF{Config: image.Config{Width: 1, Height: 1}}
+	for i := 0; i < animationMaxFrames+1; i++ {
+		f := image.NewPaletted(image.Rect(0, 0, 1, 1), pal)
+		fillPaletted(f, 1)
+		g.Image = append(g.Image, f)
+		g.Delay = append(g.Delay, 5)
+	}
+	return encodeGIF(t, g)
+}
+
+func colorPaletteForGIF() imgcolor.Palette {
+	return imgcolor.Palette{
+		imgcolor.RGBA{0, 0, 0, 0},
+		imgcolor.RGBA{255, 0, 0, 255},
+		imgcolor.RGBA{0, 0, 255, 255},
 	}
 }

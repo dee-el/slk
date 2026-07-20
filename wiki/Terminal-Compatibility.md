@@ -16,6 +16,8 @@ something from the top of the list for the richest experience.
 | **mlterm**            | sixel                | half-block         | partial     | partial          |                                                             |
 | **screen**            | half-block           | half-block         | no          | no               | No working OSC 52 path; consider switching to tmux.         |
 
+Animated custom GIF emoji use the kitty graphics path too: kitty, Ghostty, and recent WezTerm animate them when `[animations].enabled = true` and emoji images are on. Half-block, sixel, tmux fallback, and image-off mode stay static/text-only.
+
 ## Inside tmux
 
 slk forces half-block for inline images regardless of the
@@ -31,4 +33,4 @@ config key (`auto` / `kitty` / `sixel` / `halfblock` / `off`). See
 ## Related
 
 - [[Clipboard and OSC 52|Clipboard-and-OSC-52]] — getting copy/paste to land
-- [[Tradeoffs and Non-Goals|Tradeoffs-and-Non-Goals]] — image rendering caveats (animated GIFs, unfurls, threads pane sixel)
+- [[Tradeoffs and Non-Goals|Tradeoffs-and-Non-Goals]] — image rendering caveats (GIF attachments, unfurls, threads pane sixel)

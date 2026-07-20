@@ -162,6 +162,12 @@ type Model struct {
 	// rest of the model operates in.
 	chromeHeight int
 
+	// Parent-message animation state. The thread parent is rendered outside the
+	// per-reply cache, so its kitty flush callbacks and block height need their
+	// own memo for cache-hit frames and viewport-scoped animation restarts.
+	parentFlushes     []func(io.Writer) error
+	parentBlockHeight int
+
 	// lastReactionHits holds the reaction-pill hit rects captured
 	// during the most recent View() call, in pane-local coordinates
 	// (rowStart is measured from the panel top, AFTER chromeHeight
@@ -208,6 +214,40 @@ type EmojiContext struct {
 	PlaceCtx emojiutil.PlaceContext
 	Cells    int               // 1 or 2; 0 falls back to 2
 	Customs  map[string]string // workspace custom emoji map; nil = empty
+}
+
+// FlushVisibleKitty replays kitty upload callbacks for the thread parent and
+// any visible replies intersecting the current viewport. Used when the app
+// reuses a cached bordered top pane but animated emoji still need visibility
+// marks and frame replacement.
+func (m *Model) FlushVisibleKitty(replyAreaHeight int) {
+	if replyAreaHeight <= 0 {
+		return
+	}
+	var kittyFlushBuf bytes.Buffer
+	yOff := m.vp.YOffset()
+	if m.parentBlockHeight > 0 && yOff < m.parentBlockHeight && yOff+replyAreaHeight > 0 {
+		for _, fl := range m.parentFlushes {
+			if fl != nil {
+				_ = fl(&kittyFlushBuf)
+			}
+		}
+	}
+	for i, e := range m.cache {
+		entryStart := m.entryOffsets[i]
+		entryEnd := entryStart + e.height
+		if entryEnd <= yOff || entryStart >= yOff+replyAreaHeight {
+			continue
+		}
+		for _, fl := range e.flushes {
+			if fl != nil {
+				_ = fl(&kittyFlushBuf)
+			}
+		}
+	}
+	if kittyFlushBuf.Len() > 0 {
+		_, _ = imgpkg.KittyOutput.Write(kittyFlushBuf.Bytes())
+	}
 }
 
 // New creates an empty thread panel.
@@ -1310,11 +1350,7 @@ func (m *Model) View(height, width int) string {
 
 	// Render the parent message once -- it now lives at the top of the
 	// scrollable viewContent (chrome only carries the header + separator).
-	// We discard the parent's image flushes and reaction-hit rects in v1:
-	// parent attachments are rare and threading flushes through the cache
-	// lifecycle adds complexity; reply flushes and hit rects ARE captured
-	// in the per-reply loop below.
-	parentContent, _, _ := m.renderThreadMessage(m.parent, width, m.userNames, m.channelNames, false)
+	parentContent, parentFlushes, _ := m.renderThreadMessage(m.parent, width, m.userNames, m.channelNames, false)
 	parentSeparator := lipgloss.NewStyle().
 		Width(width).
 		Background(styles.Background).
@@ -1322,6 +1358,8 @@ func (m *Model) View(height, width int) string {
 		Render(strings.Repeat("─", width))
 	parentBlock := parentContent + "\n" + parentSeparator
 	parentBlockHeight := lipgloss.Height(parentBlock)
+	m.parentFlushes = parentFlushes
+	m.parentBlockHeight = parentBlockHeight
 
 	if len(m.replies) == 0 {
 		emptyHeight := replyAreaHeight - parentBlockHeight
@@ -1349,6 +1387,7 @@ func (m *Model) View(height, width int) string {
 			emptyTotalLines, m.vp.YOffset(), replyAreaHeight,
 			styles.Background, styles.Border, styles.Primary,
 		)
+		m.FlushVisibleKitty(replyAreaHeight)
 		result := chrome + "\n" + strings.Join(visibleLines, "\n")
 		return lipgloss.NewStyle().Width(width).Height(height).MaxHeight(height).Background(styles.Background).Render(result)
 	}
@@ -1531,16 +1570,6 @@ func (m *Model) View(height, width int) string {
 		startLine := 0
 		endLine := 0
 		currentLine := parentBlockHeight
-		// kittyFlushBuf collects per-image kitty APC upload bytes for
-		// every cached entry (the thread cache holds only the open
-		// thread's replies — typically a handful — so we don't bother
-		// with viewport-visibility scoping). Written directly to
-		// imgpkg.KittyOutput AFTER the loop, before viewContent is
-		// assembled. Mirrors internal/ui/messages/model.go's
-		// kittyFlushBuf handling; APC sequences embedded in line
-		// content are known to get mangled by the bubbletea/lipgloss
-		// renderer, so we bypass the frame buffer.
-		var kittyFlushBuf bytes.Buffer
 
 		// entryOffsets / totalLines mirror the BORDERED viewContent. Each
 		// reply takes lipgloss.Height(borderedReply) lines (== e.height,
@@ -1595,17 +1624,6 @@ func (m *Model) View(height, width int) string {
 			allRows = append(allRows, content)
 			currentLine += h
 
-			// Collect kitty per-image upload escapes for this entry.
-			// We invoke flushes for every cached entry rather than only
-			// viewport-visible ones; the thread cache is small and
-			// scoping adds complexity. A future optimization can clip
-			// to visible entries.
-			for _, fl := range e.flushes {
-				if fl != nil {
-					_ = fl(&kittyFlushBuf)
-				}
-			}
-
 			// Separator between replies (not after the last). Separator
 			// lines are NOT inside any cache entry — selection overlay /
 			// extraction skip them naturally because no entry covers
@@ -1614,13 +1632,6 @@ func (m *Model) View(height, width int) string {
 				allRows = append(allRows, replySeparator)
 				currentLine++
 			}
-		}
-
-		// Write kitty upload escapes directly to the terminal output,
-		// bypassing bubbletea's frame buffer. Same rationale as
-		// internal/ui/messages/model.go's kittyFlushBuf write.
-		if kittyFlushBuf.Len() > 0 {
-			_, _ = imgpkg.KittyOutput.Write(kittyFlushBuf.Bytes())
 		}
 
 		m.viewContent = strings.Join(allRows, "\n")
@@ -1658,6 +1669,11 @@ func (m *Model) View(height, width int) string {
 		m.snappedSelection = m.selected
 		m.hasSnapped = true
 	}
+
+	// Collect kitty uploads only for the parent/replies intersecting the visible
+	// viewport. This keeps animated emoji dormant while scrolled out of view
+	// without forcing a thread view-content rebuild every tick.
+	m.FlushVisibleKitty(replyAreaHeight)
 
 	// Populate the per-frame reaction-hit slice in pane-local
 	// coordinates so the app-level mouse handler can route clicks to

@@ -1,8 +1,10 @@
 package emojipicker
 
 import (
+	"bytes"
 	"context"
 	goimage "image"
+	"io"
 	"strings"
 	"testing"
 
@@ -197,6 +199,124 @@ func TestDropdown_View_ImageMode_UsesPlacement(t *testing.T) {
 	if !strings.Contains(out, "\U0010EEEE") {
 		t.Errorf("autocomplete View does not contain kitty placeholder runes\noutput=%q", out)
 	}
+}
+
+func TestDropdown_View_AnimatedPlacementStartsTicker(t *testing.T) {
+	emoji.ResetAnimationClockForTest()
+	emoji.SetAnimationBlocked(false)
+	emoji.SetImageMode(true, 2)
+	t.Cleanup(emoji.ResetAnimationClockForTest)
+	t.Cleanup(func() {
+		emoji.SetAnimationBlocked(false)
+		emoji.SetImageMode(false, 2)
+	})
+
+	thumbURL := emoji.CDNBaseURL + "1f44d.png"
+	flushCalls := 0
+	startCount := 0
+	ff := &fakeDropdownFetcher{
+		prerender: map[string]imgpkg.Render{
+			emoji.EmojiCacheKey(thumbURL): {
+				Cells:    goimage.Pt(2, 1),
+				Lines:    []string{"\U0010EEEE\U0010EEEE"},
+				Animated: true,
+				OnFlush: func(w io.Writer) error {
+					flushCalls++
+					_, err := io.WriteString(w, "frame")
+					return err
+				},
+			},
+		},
+	}
+
+	saved := imgpkg.KittyOutput
+	defer func() { imgpkg.KittyOutput = saved }()
+	var buf bytes.Buffer
+	imgpkg.KittyOutput = &buf
+
+	var m Model
+	m.SetEntries([]emoji.EmojiEntry{{Name: "thumbsup", Display: "\U0001F44D"}})
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emoji.PlaceContext{
+			Fetcher:          ff,
+			AnimationEnabled: true,
+			SendMsg: func(msg any) {
+				if _, ok := msg.(emoji.EmojiAnimationStartMsg); ok {
+					startCount++
+				}
+			},
+		},
+		Cells: 2,
+	})
+	m.Open("thumb")
+	_ = m.View(40)
+	if flushCalls != 1 {
+		t.Fatalf("flush calls = %d, want 1", flushCalls)
+	}
+	if startCount != 1 {
+		t.Fatalf("start count = %d, want 1", startCount)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("animated dropdown render should write kitty bytes")
+	}
+}
+
+func TestDropdown_View_AnimationDisabledOrImageOffStaysStatic(t *testing.T) {
+	thumbURL := emoji.CDNBaseURL + "1f44d.png"
+	ff := &fakeDropdownFetcher{
+		prerender: map[string]imgpkg.Render{
+			emoji.EmojiCacheKey(thumbURL): {
+				Cells:    goimage.Pt(2, 1),
+				Lines:    []string{"\U0010EEEE\U0010EEEE"},
+				Animated: true,
+				OnFlush:  func(io.Writer) error { return nil },
+			},
+		},
+	}
+
+	t.Run("animation disabled", func(t *testing.T) {
+		emoji.ResetAnimationClockForTest()
+		emoji.SetAnimationBlocked(false)
+		emoji.SetImageMode(true, 2)
+		defer emoji.ResetAnimationClockForTest()
+		defer emoji.SetImageMode(false, 2)
+
+		startCount := 0
+		var m Model
+		m.SetEntries([]emoji.EmojiEntry{{Name: "thumbsup", Display: "\U0001F44D"}})
+		m.SetEmojiContext(EmojiContext{
+			PlaceCtx: emoji.PlaceContext{
+				Fetcher: ff,
+				SendMsg: func(msg any) {
+					if _, ok := msg.(emoji.EmojiAnimationStartMsg); ok {
+						startCount++
+					}
+				},
+				AnimationEnabled: false,
+			},
+			Cells: 2,
+		})
+		m.Open("thumb")
+		out := m.View(40)
+		if !strings.Contains(out, "\U0010EEEE") {
+			t.Fatalf("animation-disabled dropdown should still render static placement\noutput=%q", out)
+		}
+		if startCount != 0 {
+			t.Fatalf("start count = %d, want 0 when animation disabled", startCount)
+		}
+	})
+
+	t.Run("image mode off", func(t *testing.T) {
+		emoji.SetImageMode(false, 2)
+		var m Model
+		m.SetEntries([]emoji.EmojiEntry{{Name: "thumbsup", Display: "\U0001F44D"}})
+		m.SetEmojiContext(EmojiContext{PlaceCtx: emoji.PlaceContext{Fetcher: ff}, Cells: 2})
+		m.Open("thumb")
+		out := m.View(40)
+		if strings.Contains(out, "\U0010EEEE") {
+			t.Fatalf("image-mode-off dropdown should fall back from placement\noutput=%q", out)
+		}
+	})
 }
 
 // TestDropdown_ResolvesCustomEmojiURL_AfterSetEmojiCustoms guards the

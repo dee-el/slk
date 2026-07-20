@@ -223,6 +223,49 @@ func TestPlace_ColdPath_SpawnsFetch(t *testing.T) {
 	}
 }
 
+func TestPlace_ColdPath_AnimationRequestFollowsContext(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		url     string
+		animate bool
+	}{
+		{name: "disabled", url: "https://x/static.gif", animate: false},
+		{name: "enabled", url: "https://x/animated.gif", animate: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ff := newFakeFetcher()
+			ff.fetchFn = func(ctx context.Context, req imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+				return imgpkg.FetchResult{}, nil
+			}
+			done := make(chan struct{}, 1)
+			_, _, ok := Place(PlaceContext{
+				Fetcher:          ff,
+				AnimationEnabled: tc.animate,
+				SendMsg: func(m any) {
+					if _, ok := m.(EmojiImageReadyMsg); ok {
+						done <- struct{}{}
+					}
+				},
+			}, tc.url, 2)
+			if !ok {
+				t.Fatal("expected cold-path reservation")
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("fetch did not complete")
+			}
+			calls := ff.fetchCallsSnapshot()
+			if len(calls) != 1 {
+				t.Fatalf("fetch calls = %d, want 1", len(calls))
+			}
+			if calls[0].Animate != tc.animate {
+				t.Fatalf("FetchRequest.Animate = %v, want %v", calls[0].Animate, tc.animate)
+			}
+		})
+	}
+}
+
 func TestPlace_ColdPath_DedupsConcurrentCalls(t *testing.T) {
 	ff := newFakeFetcher()
 	url := "https://a.slack-edge.com/...1f44d.png"
@@ -277,6 +320,117 @@ func TestPlace_ColdPath_DedupsConcurrentCalls(t *testing.T) {
 	// only one Fetch should have actually been issued.
 	if got := len(ff.fetchCallsSnapshot()); got != 1 {
 		t.Errorf("concurrent Place calls produced %d Fetch invocations, want 1 (dedup failed)", got)
+	}
+}
+
+func TestPlace_WarmPath_AnimatedFlushStartsClockAndRespectsBlock(t *testing.T) {
+	ResetAnimationClockForTest()
+	SetAnimationBlocked(false)
+	t.Cleanup(ResetAnimationClockForTest)
+	t.Cleanup(func() { SetAnimationBlocked(false) })
+
+	ff := newFakeFetcher()
+	url := "https://x/animated.gif"
+	key := EmojiCacheKey(url)
+	target := goimage.Pt(2, 1)
+	innerCalls := 0
+	ff.setPrerendered(key, target, imgpkg.Render{
+		Cells:    target,
+		Lines:    []string{"\U0010EEEE\U0010EEEE"},
+		Animated: true,
+		OnFlush: func(_ io.Writer) error {
+			innerCalls++
+			return nil
+		},
+	})
+	startCount := 0
+	ctx := PlaceContext{
+		Fetcher:          ff,
+		AnimationEnabled: true,
+		SendMsg: func(m any) {
+			if _, ok := m.(EmojiAnimationStartMsg); ok {
+				startCount++
+			}
+		},
+	}
+
+	_, flush, ok := Place(ctx, url, 2)
+	if !ok || flush == nil {
+		t.Fatal("expected warm animated flush")
+	}
+	if err := flush(discardWriter{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := flush(discardWriter{}); err != nil {
+		t.Fatal(err)
+	}
+	if innerCalls != 2 {
+		t.Fatalf("inner animated flush calls = %d, want 2", innerCalls)
+	}
+	if startCount != 1 {
+		t.Fatalf("start messages = %d, want 1 while ticker active", startCount)
+	}
+
+	SetAnimationBlocked(true)
+	if err := flush(discardWriter{}); err != nil {
+		t.Fatal(err)
+	}
+	if innerCalls != 2 {
+		t.Fatalf("blocked animated flush should not reach inner callback, got %d calls", innerCalls)
+	}
+
+	SetAnimationBlocked(false)
+	StopAnimationClock()
+	if err := flush(discardWriter{}); err != nil {
+		t.Fatal(err)
+	}
+	if innerCalls != 3 {
+		t.Fatalf("post-restart inner calls = %d, want 3", innerCalls)
+	}
+	if startCount != 2 {
+		t.Fatalf("start messages after restart = %d, want 2", startCount)
+	}
+}
+
+func TestPlace_WarmPath_AnimationDisabledDoesNotStartTicker(t *testing.T) {
+	ResetAnimationClockForTest()
+	t.Cleanup(ResetAnimationClockForTest)
+
+	ff := newFakeFetcher()
+	url := "https://x/animated.gif"
+	key := EmojiCacheKey(url)
+	target := goimage.Pt(2, 1)
+	innerCalls := 0
+	ff.setPrerendered(key, target, imgpkg.Render{
+		Cells:    target,
+		Lines:    []string{"\U0010EEEE\U0010EEEE"},
+		Animated: true,
+		OnFlush: func(_ io.Writer) error {
+			innerCalls++
+			return nil
+		},
+	})
+	startCount := 0
+	_, flush, ok := Place(PlaceContext{
+		Fetcher: ff,
+		SendMsg: func(m any) {
+			if _, ok := m.(EmojiAnimationStartMsg); ok {
+				startCount++
+			}
+		},
+		AnimationEnabled: false,
+	}, url, 2)
+	if !ok || flush == nil {
+		t.Fatal("expected warm animated render even when animation is disabled")
+	}
+	if err := flush(discardWriter{}); err != nil {
+		t.Fatal(err)
+	}
+	if innerCalls != 1 {
+		t.Fatalf("inner calls = %d, want 1", innerCalls)
+	}
+	if startCount != 0 {
+		t.Fatalf("ticker start messages = %d, want 0 when animation disabled", startCount)
 	}
 }
 

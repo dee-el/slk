@@ -103,6 +103,20 @@ func (a *App) overlayActive() bool {
 		a.bootstrap.IsLoading()
 }
 
+// emojiAnimationBlocked reports whether the shared animation tick chain should
+// be paused. Reaction picker is the only full overlay that renders emoji via
+// emoji.Place itself, so it remains eligible to animate while the obscured
+// background stays blocked during the base-panel render pass.
+func (a *App) emojiAnimationBlocked() bool {
+	if a.preview.Active() || a.bootstrap.IsLoading() {
+		return true
+	}
+	if a.reactionPicker.IsVisible() {
+		return false
+	}
+	return a.overlayActive()
+}
+
 // maybeWrapFinalScreen wraps screen in a full-canvas
 // lipgloss style when an overlay is active (so the resulting
 // output is guaranteed exact-sized and themed). Returns screen

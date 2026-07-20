@@ -31,6 +31,7 @@
 
 - Inline image attachments render automatically in the messages pane: kitty graphics protocol on capable terminals (kitty, ghostty, recent WezTerm), sixel on foot/mlterm, half-block (`▀`) fallback everywhere else
 - User avatars use the same kitty graphics path on capable terminals for sharper pixels; sixel and other terminals fall back to half-block
+- Custom GIF emoji animate on kitty-graphics terminals when `[appearance].emoji_images = "on"` and `[animations].enabled = true`; static emoji stay unchanged and non-kitty terminals keep the static/text fallback
 - Click any inline image (or press `O` on the selected message) for a full-screen in-app preview
 - `Enter` from the preview launches the OS image viewer
 - Lazy-loaded: images download only as they scroll into view

@@ -56,6 +56,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gammons/slk/internal/debuglog"
+	emojiutil "github.com/gammons/slk/internal/emoji"
+	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/statusbar"
@@ -78,6 +80,20 @@ func copiedClearAfter(d time.Duration) tea.Cmd {
 // would not notice, while the savings from coalescing N rebuilds into
 // 1 are dramatic.
 const emojiInvalidateDebounce = 100 * time.Millisecond
+
+const emojiAnimationTickInterval = 50 * time.Millisecond
+
+func emojiAnimationTickCmd() tea.Cmd {
+	return tea.Tick(emojiAnimationTickInterval, func(now time.Time) tea.Msg {
+		return emojiAnimationTickMsg{now: now}
+	})
+}
+
+func emojiAnimationTickAllowed(a *App) bool {
+	return a.imgProtocol == imgpkg.ProtoKitty &&
+		a.emojiCtx.PlaceCtx.AnimationEnabled &&
+		!a.emojiAnimationBlocked()
+}
 
 // toastWithClear pushes text into the status bar's toast slot and
 // schedules the clear after `d`. Used by the fixed-text and
@@ -213,6 +229,35 @@ var reduceIO reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		return tea.Tick(emojiInvalidateDebounce, func(time.Time) tea.Msg {
 			return emojiInvalidateMsg{}
 		}), true
+
+	case EmojiAnimationStartMsg:
+		if !emojiAnimationTickAllowed(a) {
+			emojiutil.StopAnimationClock()
+			a.emojiAnimationTicking = false
+			return nil, true
+		}
+		if a.emojiAnimationTicking {
+			return nil, true
+		}
+		a.emojiAnimationTicking = true
+		return emojiAnimationTickCmd(), true
+
+	case emojiAnimationTickMsg:
+		now := m.now
+		if now.IsZero() {
+			now = time.Now()
+		}
+		if !emojiAnimationTickAllowed(a) {
+			emojiutil.StopAnimationClock()
+			a.emojiAnimationTicking = false
+			return nil, true
+		}
+		if !emojiutil.ContinueAnimationClock(now) {
+			a.emojiAnimationTicking = false
+			return nil, true
+		}
+		a.emojiAnimationTicking = true
+		return emojiAnimationTickCmd(), true
 
 	case emojiInvalidateMsg:
 		_ = m

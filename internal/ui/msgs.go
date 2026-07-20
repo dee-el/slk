@@ -31,6 +31,11 @@ import (
 // every UI surface that renders emoji.
 type EmojiImageReadyMsg = emojiutil.EmojiImageReadyMsg
 
+// EmojiAnimationStartMsg re-exports emoji.EmojiAnimationStartMsg so the
+// reducer can start the shared animation tick chain when a visible animated
+// emoji requests it.
+type EmojiAnimationStartMsg = emojiutil.EmojiAnimationStartMsg
+
 // emojiInvalidateMsg is dispatched by the debounce timer scheduled from
 // the EmojiImageReadyMsg reducer arm. When it lands, the App performs a
 // single wholesale cache invalidation across every emoji-rendering
@@ -43,6 +48,10 @@ type EmojiImageReadyMsg = emojiutil.EmojiImageReadyMsg
 // Lowercase (unexported) because no other package dispatches this — it
 // is purely an internal debounce signal.
 type emojiInvalidateMsg struct{}
+
+// emojiAnimationTickMsg drives the shared 50ms animated-emoji redraw loop.
+// `now` is injected by tea.Tick in production and by tests directly.
+type emojiAnimationTickMsg struct{ now time.Time }
 
 // Messages sent between components
 type (

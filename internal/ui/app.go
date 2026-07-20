@@ -246,6 +246,11 @@ type App struct {
 	// tick fires. See reducer_io.go's EmojiImageReadyMsg arm.
 	emojiInvalidatePending bool
 
+	// emojiAnimationTicking guards the shared 50ms animated-emoji tick
+	// chain. Visible animated emoji request starts via EmojiAnimationStartMsg;
+	// the reducer keeps exactly one chain alive at a time.
+	emojiAnimationTicking bool
+
 	// linkPicker is the open-link choice modal (issue #62).
 	linkPicker *linkpicker.Model
 
@@ -2580,6 +2585,7 @@ func (a *App) View() tea.View {
 	// spanning the combined width. Rail, sidebar, and status row
 	// still render normally so the user can see context.
 	previewActive := a.preview.Active()
+	emoji.SetAnimationBlocked(previewActive || a.overlayActive())
 
 	var panels []string
 	panels = append(panels, a.renderRail(frame.RailWidth, frame.ContentHeight, themeVer))
@@ -2605,7 +2611,7 @@ func (a *App) View() tea.View {
 	// Overlay/preview frames are never memoized: overlay content can
 	// change without bumping any base-panel version, and the preview
 	// panel is rendered fresh (uncached) each frame.
-	canMemo := !previewActive && !a.overlayActive()
+	canMemo := !previewActive && !a.overlayActive() && !a.emojiAnimationTicking
 	var screen string
 	memoHit := false
 	if canMemo && a.screenMemoMatches(panels, status, a.width, a.height) {
@@ -2627,7 +2633,11 @@ func (a *App) View() tea.View {
 		// of the composite cost). stackContentStatus reproduces lipgloss's
 		// left-align padding byte-for-byte; see its doc.
 		screen = stackContentStatus(content, status)
+		if a.reactionPicker.IsVisible() && !previewActive && !a.bootstrap.IsLoading() {
+			emoji.SetAnimationBlocked(false)
+		}
 		screen = a.applyOverlays(screen)
+		emoji.SetAnimationBlocked(a.emojiAnimationBlocked())
 		screen = a.maybeWrapFinalScreen(screen)
 		if canMemo {
 			a.storeScreenMemo(panels, status, a.width, a.height, screen)

@@ -6,6 +6,7 @@ import (
 	imgcolor "image/color"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestKitty_UploadEscapeFormat(t *testing.T) {
@@ -317,4 +318,262 @@ func TestKitty_PayloadCacheUploadIdentity(t *testing.T) {
 	if !bytes.Equal(aBuf.Bytes(), bBuf.Bytes()) {
 		t.Errorf("upload bytes differ between consecutive fresh=true calls\nlen a=%d b=%d", aBuf.Len(), bBuf.Len())
 	}
+}
+
+func TestKitty_AnimatedStableIDFrameReplacementAndDedup(t *testing.T) {
+	target := image.Pt(2, 1)
+	frame0 := makeSolid(16, 16, imgcolor.RGBA{255, 0, 0, 255}).(*image.RGBA)
+	frame1 := makeSolid(16, 16, imgcolor.RGBA{0, 0, 255, 255}).(*image.RGBA)
+	anim := &Animation{
+		Frames:    []*image.RGBA{frame0, frame1},
+		Delays:    []time.Duration{100 * time.Millisecond, 100 * time.Millisecond},
+		LoopCount: 0,
+		Duration:  200 * time.Millisecond,
+	}
+	r := NewKittyRenderer(NewRegistry())
+	r.SetSource("anim", frame0)
+	r.SetAnimation("anim", anim)
+	now := time.Unix(0, 0)
+	r.now = func() time.Time { return now }
+
+	out := r.RenderKey("anim", target)
+	if !out.Animated {
+		t.Fatal("expected animated render")
+	}
+	if out.OnFlush == nil {
+		t.Fatal("expected reusable animated OnFlush")
+	}
+	if out.ID == 0 {
+		t.Fatal("expected stable kitty image ID")
+	}
+
+	var first bytes.Buffer
+	if err := out.OnFlush(&first); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.String(), "i="+itoaInt(int(out.ID))) {
+		t.Fatalf("first animated upload missing stable image id %d", out.ID)
+	}
+
+	var sameFrame bytes.Buffer
+	if err := out.OnFlush(&sameFrame); err != nil {
+		t.Fatal(err)
+	}
+	if sameFrame.Len() != 0 {
+		t.Fatalf("same-frame animated flush should dedupe, wrote %d bytes", sameFrame.Len())
+	}
+
+	now = now.Add(150 * time.Millisecond)
+	var nextFrame bytes.Buffer
+	if err := out.OnFlush(&nextFrame); err != nil {
+		t.Fatal(err)
+	}
+	if nextFrame.Len() == 0 {
+		t.Fatal("next animated frame should replace pixels on same image ID")
+	}
+	if !strings.Contains(nextFrame.String(), "i="+itoaInt(int(out.ID))) {
+		t.Fatalf("next animated upload missing stable image id %d", out.ID)
+	}
+
+	second := r.RenderKey("anim", target)
+	if second.ID != out.ID {
+		t.Fatalf("stable ID changed across renders: %d vs %d", second.ID, out.ID)
+	}
+	if !second.Animated || second.OnFlush == nil {
+		t.Fatal("subsequent animated RenderKey should stay animated and reusable")
+	}
+}
+
+func TestKitty_AnimatedDuplicateOccurrencesDeduped(t *testing.T) {
+	target := image.Pt(2, 1)
+	frame0 := makeSolid(16, 16, imgcolor.RGBA{255, 0, 0, 255}).(*image.RGBA)
+	anim := &Animation{
+		Frames:    []*image.RGBA{frame0},
+		Delays:    []time.Duration{10 * time.Second},
+		LoopCount: 0,
+		Duration:  10 * time.Second,
+	}
+	r := NewKittyRenderer(NewRegistry())
+	r.SetSource("anim", frame0)
+	r.SetAnimation("anim", anim)
+	r.now = func() time.Time { return time.Unix(0, 0) }
+
+	a := r.RenderKey("anim", target)
+	b := r.RenderKey("anim", target)
+	if a.OnFlush == nil || b.OnFlush == nil {
+		t.Fatal("expected animated flush callbacks on duplicate occurrences")
+	}
+	var first, second bytes.Buffer
+	if err := a.OnFlush(&first); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.OnFlush(&second); err != nil {
+		t.Fatal(err)
+	}
+	if first.Len() == 0 {
+		t.Fatal("first occurrence should emit upload bytes")
+	}
+	if second.Len() != 0 {
+		t.Fatalf("duplicate occurrence should be deduped, wrote %d bytes", second.Len())
+	}
+}
+
+func TestKitty_AnimatedFiniteLoopFreezesLastFrame(t *testing.T) {
+	target := image.Pt(2, 1)
+	frame0 := makeSolid(16, 16, imgcolor.RGBA{255, 0, 0, 255}).(*image.RGBA)
+	frame1 := makeSolid(16, 16, imgcolor.RGBA{0, 255, 0, 255}).(*image.RGBA)
+	anim := &Animation{
+		Frames:    []*image.RGBA{frame0, frame1},
+		Delays:    []time.Duration{100 * time.Millisecond, 100 * time.Millisecond},
+		LoopCount: -1,
+		Duration:  200 * time.Millisecond,
+	}
+	r := NewKittyRenderer(NewRegistry())
+	r.SetSource("anim", frame0)
+	r.SetAnimation("anim", anim)
+	now := time.Unix(0, 0)
+	r.now = func() time.Time { return now }
+
+	out := r.RenderKey("anim", target)
+	if err := out.OnFlush(&bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(250 * time.Millisecond)
+	var last bytes.Buffer
+	if err := out.OnFlush(&last); err != nil {
+		t.Fatal(err)
+	}
+	if last.Len() == 0 {
+		t.Fatal("finite animation should emit final frame when loop completes")
+	}
+	now = now.Add(250 * time.Millisecond)
+	var frozen bytes.Buffer
+	if err := out.OnFlush(&frozen); err != nil {
+		t.Fatal(err)
+	}
+	if frozen.Len() != 0 {
+		t.Fatalf("final frame should stay frozen, wrote %d bytes", frozen.Len())
+	}
+}
+
+func TestKitty_AnimatedRefreshInvalidatesPayloadAndPlayback(t *testing.T) {
+	target := image.Pt(2, 1)
+	old0 := makeSolid(16, 16, imgcolor.RGBA{255, 0, 0, 255}).(*image.RGBA)
+	old1 := makeSolid(16, 16, imgcolor.RGBA{0, 0, 255, 255}).(*image.RGBA)
+	new0 := makeSolid(16, 16, imgcolor.RGBA{0, 255, 0, 255}).(*image.RGBA)
+	new1 := makeSolid(16, 16, imgcolor.RGBA{255, 255, 0, 255}).(*image.RGBA)
+
+	r := NewKittyRenderer(NewRegistry())
+	now := time.Unix(0, 0)
+	r.now = func() time.Time { return now }
+
+	r.SetSource("anim", old0)
+	r.SetAnimation("anim", &Animation{
+		Frames:    []*image.RGBA{old0, old1},
+		Delays:    []time.Duration{100 * time.Millisecond, 100 * time.Millisecond},
+		LoopCount: 0,
+		Duration:  200 * time.Millisecond,
+	})
+	first := r.RenderKey("anim", target)
+	var firstBuf bytes.Buffer
+	if err := first.OnFlush(&firstBuf); err != nil {
+		t.Fatal(err)
+	}
+	if firstBuf.Len() == 0 {
+		t.Fatal("first animation upload should emit bytes")
+	}
+
+	r.SetSource("anim", new0)
+	r.SetAnimation("anim", &Animation{
+		Frames:    []*image.RGBA{new0, new1},
+		Delays:    []time.Duration{100 * time.Millisecond, 100 * time.Millisecond},
+		LoopCount: 0,
+		Duration:  200 * time.Millisecond,
+	})
+	refreshed := r.RenderKey("anim", target)
+	if refreshed.ID != first.ID {
+		t.Fatalf("refresh should keep stable kitty image id: got %d want %d", refreshed.ID, first.ID)
+	}
+	var refreshedBuf bytes.Buffer
+	if err := refreshed.OnFlush(&refreshedBuf); err != nil {
+		t.Fatal(err)
+	}
+	if refreshedBuf.Len() == 0 {
+		t.Fatal("refreshed animation should emit first upload again")
+	}
+	if bytes.Equal(firstBuf.Bytes(), refreshedBuf.Bytes()) {
+		t.Fatal("refreshed animation upload bytes should differ after payload invalidation")
+	}
+}
+
+func TestKitty_SetSourceChangedSourceReuploadsSameID(t *testing.T) {
+	target := image.Pt(2, 1)
+	oldSrc := makeSolid(16, 16, imgcolor.RGBA{255, 0, 0, 255})
+	newSrc := makeSolid(16, 16, imgcolor.RGBA{0, 255, 0, 255})
+	r := NewKittyRenderer(NewRegistry())
+	r.SetSource("static", oldSrc)
+	first := r.RenderKey("static", target)
+	var firstBuf bytes.Buffer
+	if err := first.OnFlush(&firstBuf); err != nil {
+		t.Fatal(err)
+	}
+	if firstBuf.Len() == 0 {
+		t.Fatal("first static upload should emit bytes")
+	}
+
+	r.SetSource("static", newSrc)
+	refreshed := r.RenderKey("static", target)
+	if refreshed.ID != first.ID {
+		t.Fatalf("stable id changed across source refresh: got %d want %d", refreshed.ID, first.ID)
+	}
+	if refreshed.OnFlush == nil {
+		t.Fatal("changed source under same key should reupload on next RenderKey")
+	}
+	var refreshedBuf bytes.Buffer
+	if err := refreshed.OnFlush(&refreshedBuf); err != nil {
+		t.Fatal(err)
+	}
+	if refreshedBuf.Len() == 0 {
+		t.Fatal("refreshed static upload should emit replacement bytes")
+	}
+	if bytes.Equal(firstBuf.Bytes(), refreshedBuf.Bytes()) {
+		t.Fatal("replacement upload bytes should differ for changed source")
+	}
+}
+
+func TestKitty_SetSourceSameSourceRebindStaysWarm(t *testing.T) {
+	target := image.Pt(2, 1)
+	src := makeSolid(16, 16, imgcolor.RGBA{255, 0, 0, 255})
+	r := NewKittyRenderer(NewRegistry())
+	r.SetSource("static", src)
+	first := r.RenderKey("static", target)
+	if first.OnFlush == nil {
+		t.Fatal("first render should flush")
+	}
+	if err := first.OnFlush(&bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+
+	r.SetSource("static", src)
+	warm := r.RenderKey("static", target)
+	if warm.ID != first.ID {
+		t.Fatalf("stable id changed after same-source rebind: got %d want %d", warm.ID, first.ID)
+	}
+	if warm.OnFlush != nil {
+		t.Fatal("same in-memory source rebind should keep warm/static payload state")
+	}
+}
+
+func itoaInt(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }

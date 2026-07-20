@@ -1,10 +1,10 @@
 package image
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image"
-	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
@@ -33,6 +33,7 @@ import (
 type FetchRequest struct {
 	Key        string      // cache key (e.g. "F0123ABCD-720" or "avatar-U123")
 	URL        string      // remote URL
+	Animate    bool        // decode GIF animation when supported; static fallback on rejection
 	Target     image.Point // target downscale size in pixels (0 = no downscale)
 	CellTarget image.Point // optional target in terminal cells; when nonzero,
 	// the fetcher will pre-render the image into the
@@ -83,6 +84,10 @@ type Fetcher struct {
 	// = N² synchronous decode work on the UI thread, making the app
 	// appear hung for many seconds.
 	decoded sync.Map // string("<key>|<wxh>") -> image.Image
+
+	// animations holds fully-composited GIF animations for callers that opt
+	// into animated decode. Static callers never populate it.
+	animations sync.Map // string(key) -> *Animation
 
 	// prerendered caches the result of RenderImage(proto, decoded, cellTarget)
 	// per (key, cellTarget, proto). The fetch goroutine populates this so
@@ -274,6 +279,9 @@ func (f *Fetcher) fetchInner(ctx context.Context, req FetchRequest) (FetchResult
 			debuglog.ImgFetch("cache-put-err: key=%s req_id=%d err=%v", req.Key, req.ReqID, err)
 			return FetchResult{}, err
 		}
+		// A fresh download under an existing key may carry different GIF bytes.
+		// Drop any old animation memo so the new file is decoded from disk once.
+		f.animations.Delete(req.Key)
 	}
 
 	file, err := os.Open(path)
@@ -285,7 +293,50 @@ func (f *Fetcher) fetchInner(ctx context.Context, req FetchRequest) (FetchResult
 	defer file.Close()
 
 	decStart := time.Now()
-	img, _, err := image.Decode(file)
+	var (
+		img       image.Image
+		raw       []byte
+		usedRaw   bool
+		animation *Animation
+	)
+	if req.Animate && strings.EqualFold(filepath.Ext(path), ".gif") {
+		if cached, ok := f.animations.Load(req.Key); ok {
+			if anim, ok := cached.(*Animation); ok && anim != nil && len(anim.Frames) > 0 {
+				animation = anim
+				img = anim.Frames[0]
+			}
+		}
+		if animation == nil {
+			if info, statErr := file.Stat(); statErr == nil && info.Size() > animationMaxSourceBytes {
+				debuglog.ImgFetch("gif-animation-skip: key=%s req_id=%d reason=source_too_large bytes=%d",
+					req.Key, req.ReqID, info.Size())
+			} else {
+				raw, err = io.ReadAll(file)
+				if err != nil {
+					debuglog.ImgFetch("read-err: key=%s req_id=%d path=%s err=%v",
+						req.Key, req.ReqID, path, err)
+					return FetchResult{}, err
+				}
+				usedRaw = true
+				animation, err = decodeGIFAnimation(raw)
+				if err != nil {
+					debuglog.ImgFetch("gif-animation-fallback: key=%s req_id=%d err=%v", req.Key, req.ReqID, err)
+					animation = nil
+				} else if len(animation.Frames) > 0 {
+					img = animation.Frames[0]
+					f.animations.Store(req.Key, animation)
+				}
+			}
+		}
+	}
+	if img == nil {
+		f.animations.Delete(req.Key)
+		reader := io.Reader(file)
+		if usedRaw {
+			reader = bytes.NewReader(raw)
+		}
+		img, _, err = image.Decode(reader)
+	}
 	if err != nil {
 		// Cache poisoning recovery: a previously persisted file isn't
 		// decodable as an image (e.g., an HTML auth-failure response from
@@ -317,7 +368,7 @@ func (f *Fetcher) fetchInner(ctx context.Context, req FetchRequest) (FetchResult
 	// View() doesn't have to. Skipped when not configured or when
 	// CellTarget is zero (e.g., avatars and full-screen preview).
 	prStart := time.Now()
-	f.maybePrerender(req.Key, img, req.CellTarget)
+	f.maybePrerender(req.Key, img, animation, req.CellTarget)
 	debuglog.ImgFetch("prerender: key=%s req_id=%d cell_target=(%d,%d) dur_ms=%d",
 		req.Key, req.ReqID, req.CellTarget.X, req.CellTarget.Y,
 		time.Since(prStart).Milliseconds())
@@ -333,7 +384,7 @@ func (f *Fetcher) fetchInner(ctx context.Context, req FetchRequest) (FetchResult
 // Kitty is special: SetSource + RenderKey go through the package-level
 // KittyRenderer mutex which is also held briefly by the UI thread's
 // fallback path; both paths are mutually safe.
-func (f *Fetcher) maybePrerender(key string, img image.Image, cellT image.Point) {
+func (f *Fetcher) maybePrerender(key string, img image.Image, animation *Animation, cellT image.Point) {
 	f.prerenderMu.RLock()
 	proto := f.prerenderProto
 	kr := f.prerenderKitty
@@ -355,6 +406,11 @@ func (f *Fetcher) maybePrerender(key string, img image.Image, cellT image.Point)
 		}
 		ckey := "F-" + key // mirrors renderAttachmentBlock's stable kitty source key
 		kr.SetSource(ckey, img)
+		if animation != nil {
+			kr.SetAnimation(ckey, animation)
+		} else {
+			kr.ClearAnimation(ckey)
+		}
 		r = kr.RenderKey(ckey, cellT)
 	default:
 		r = RenderImage(proto, img, cellT)

@@ -144,6 +144,31 @@ type viewEntry struct {
 	reactionHits []reactionEntryHit
 }
 
+// FlushVisibleKitty replays kitty upload callbacks for the entries intersecting
+// the current viewport. Used when the app reuses a cached bordered top pane but
+// still needs animated emoji to mark visibility and replace frames.
+func (m *Model) FlushVisibleKitty(msgAreaHeight int) {
+	if msgAreaHeight <= 0 || len(m.cache) == 0 {
+		return
+	}
+	var kittyFlushBuf bytes.Buffer
+	for i, e := range m.cache {
+		entryStart := m.entryOffsets[i]
+		entryEnd := entryStart + e.height
+		if entryEnd <= m.yOffset || entryStart >= m.yOffset+msgAreaHeight {
+			continue
+		}
+		for _, fl := range e.flushes {
+			if fl != nil {
+				_ = fl(&kittyFlushBuf)
+			}
+		}
+	}
+	if kittyFlushBuf.Len() > 0 {
+		_, _ = imgpkg.KittyOutput.Write(kittyFlushBuf.Bytes())
+	}
+}
+
 // reactionEntryHit is one reaction-pill hit-rect, expressed in
 // coordinates relative to a single viewEntry's linesNormal. Identical
 // shape to entryHit but carries the emoji name (rather than a file
@@ -3028,19 +3053,6 @@ func (m *Model) viewInternal(height, width int, applySelection bool) string {
 
 	visible := make([]string, 0, msgAreaHeight)
 	want := msgAreaHeight
-	// kittyFlushBuf collects the APC upload bytes for any kitty images
-	// that need uploading this frame. Per spec, the upload escape and
-	// placeholder cells must reach the terminal in the same byte stream
-	// for kitty to associate the placement with the image. We write
-	// these bytes DIRECTLY to os.Stdout rather than embedding them in
-	// the View() return string — lipgloss / bubbletea v2's renderer is
-	// known to mangle APC sequences embedded in line content. Writing
-	// to os.Stdout from this goroutine (bubbletea's Update goroutine)
-	// is race-free wrt bubbletea's own writes, and the upload bytes
-	// land in stdout BEFORE bubbletea's frame buffer is flushed for
-	// this redraw — kitty parses APC sequences out of the stream
-	// regardless of position.
-	var kittyFlushBuf bytes.Buffer
 	// sixelEmissions records, per visible-window row, the action to take
 	// for sixel images intersecting that row. Populated below as we walk
 	// entries; consumed AFTER the visible slice is fully built so partial
@@ -3082,13 +3094,6 @@ func (m *Model) viewInternal(height, width int, applySelection bool) string {
 		windowRowBase := len(visible)
 		visible = append(visible, lines[from:to]...)
 		want = msgAreaHeight - len(visible)
-
-		// Collect kitty per-image upload escapes for this entry.
-		for _, fl := range e.flushes {
-			if fl != nil {
-				_ = fl(&kittyFlushBuf)
-			}
-		}
 
 		// Translate this entry's per-image hit rects into viewport-
 		// absolute coordinates and record them for HitTest. Rows
@@ -3199,14 +3204,9 @@ func (m *Model) viewInternal(height, width int, applySelection bool) string {
 		}
 	}
 
-	// Write kitty upload escapes DIRECTLY to the terminal output,
-	// bypassing bubbletea's frame buffer entirely. See the
-	// kittyFlushBuf declaration above for rationale. We do this
-	// before returning the View string so the upload reaches the
-	// terminal before the placeholder cells in the bubbletea frame.
-	if kittyFlushBuf.Len() > 0 {
-		_, _ = imgpkg.KittyOutput.Write(kittyFlushBuf.Bytes())
-	}
+	// Write kitty upload escapes directly to the terminal output before the
+	// frame string is returned so placeholder cells resolve in the same draw.
+	m.FlushVisibleKitty(msgAreaHeight)
 
 	// Pad vertically with the themed spacer if content is shorter than the pane.
 	for len(visible) < msgAreaHeight {

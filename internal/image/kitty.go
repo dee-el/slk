@@ -8,9 +8,11 @@ import (
 	imgpng "image/png"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gammons/slk/internal/debuglog"
 	"golang.org/x/image/draw"
@@ -82,8 +84,9 @@ func writeKittySequence(w io.Writer, seq string) error {
 type KittyRenderer struct {
 	registry *Registry
 
-	mu      sync.Mutex
-	sources map[string]image.Image
+	mu         sync.Mutex
+	sources    map[string]image.Image
+	animations map[string]*Animation
 	// placeholders memoizes buildPlaceholderLines results so warm
 	// RenderKey calls (fresh=false: image already uploaded) skip the
 	// cells.Y * cells.X strings.Builder cost on every render.
@@ -130,6 +133,12 @@ type KittyRenderer struct {
 	// Acceptable; if it ever becomes a concern, an LRU eviction can
 	// be added without changing the contract.
 	payloads map[placeholderKey]string
+
+	// animationPayloads memoizes the base64 PNG payload for each composited GIF
+	// frame at a specific kitty image ID + cell footprint.
+	animationPayloads map[animationPayloadKey][]string
+	animationState    map[uint32]animationPlayback
+	now               func() time.Time
 }
 
 // placeholderKey scopes the buildPlaceholderLines memo by the inputs
@@ -143,13 +152,32 @@ type placeholderKey struct {
 	cellsY int
 }
 
+type animationPayloadKey struct {
+	id     uint32
+	cellsX int
+	cellsY int
+}
+
+type animationPlayback struct {
+	startedAt    time.Time
+	lastFlushAt  time.Time
+	emittedFrame int
+	hasFrame     bool
+}
+
+const animationRestartGap = 250 * time.Millisecond
+
 // NewKittyRenderer constructs a kitty renderer backed by the given registry.
 func NewKittyRenderer(reg *Registry) *KittyRenderer {
 	return &KittyRenderer{
-		registry:     reg,
-		sources:      map[string]image.Image{},
-		placeholders: map[placeholderKey][]string{},
-		payloads:     map[placeholderKey]string{},
+		registry:          reg,
+		sources:           map[string]image.Image{},
+		animations:        map[string]*Animation{},
+		placeholders:      map[placeholderKey][]string{},
+		payloads:          map[placeholderKey]string{},
+		animationPayloads: map[animationPayloadKey][]string{},
+		animationState:    map[uint32]animationPlayback{},
+		now:               time.Now,
 	}
 }
 
@@ -165,16 +193,87 @@ func (k *KittyRenderer) Render(img image.Image, target image.Point) Render {
 // with the same key reuse the registered image for upload bytes.
 func (k *KittyRenderer) SetSource(key string, img image.Image) {
 	k.mu.Lock()
+	old, hadOld := k.sources[key]
 	k.sources[key] = img
+	k.mu.Unlock()
+	if hadOld && !sameSourceIdentity(old, img) {
+		ids := k.registry.InvalidateUploadedByKey(key)
+		k.invalidatePayloadsForIDs(ids)
+	}
+}
+
+// SetAnimation binds an already-composited GIF animation to key.
+func (k *KittyRenderer) SetAnimation(key string, animation *Animation) {
+	k.mu.Lock()
+	old := k.animations[key]
+	if animation == nil {
+		delete(k.animations, key)
+	} else {
+		k.animations[key] = animation
+	}
+	k.mu.Unlock()
+	if old != animation {
+		k.invalidateAnimationCaches(key)
+	}
+}
+
+// ClearAnimation removes any animation previously bound to key.
+func (k *KittyRenderer) ClearAnimation(key string) {
+	k.SetAnimation(key, nil)
+}
+
+func (k *KittyRenderer) invalidateAnimationCaches(key string) {
+	ids := k.registry.IDsForKey(key)
+	if len(ids) == 0 {
+		return
+	}
+	k.invalidatePayloadsForIDs(ids)
+}
+
+func (k *KittyRenderer) invalidatePayloadsForIDs(ids map[uint32]struct{}) {
+	if len(ids) == 0 {
+		return
+	}
+	k.mu.Lock()
+	for payloadKey := range k.animationPayloads {
+		if _, ok := ids[payloadKey.id]; ok {
+			delete(k.animationPayloads, payloadKey)
+		}
+	}
+	for payloadKey := range k.payloads {
+		if _, ok := ids[payloadKey.id]; ok {
+			delete(k.payloads, payloadKey)
+		}
+	}
+	for id := range ids {
+		delete(k.animationState, id)
+	}
 	k.mu.Unlock()
 }
 
-// RenderKey produces a Render for the given (key, target).
-// On the first call for a (key, target) pair, OnFlush is set to upload the
-// image bytes; subsequent calls return OnFlush=nil.
+func sameSourceIdentity(a, b image.Image) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	ta := reflect.TypeOf(a)
+	tb := reflect.TypeOf(b)
+	if ta != tb {
+		return false
+	}
+	if ta.Comparable() {
+		return a == b
+	}
+	return false
+}
+
+// RenderKey produces a Render for the given (key, target). Static renders use
+// a one-shot upload closure until the registry marks the image uploaded.
+// Animated renders always keep a reusable closure so visible callbacks can
+// replace pixels on the same kitty image ID over time.
 func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 	k.mu.Lock()
 	src, ok := k.sources[key]
+	animation := k.animations[key]
 	k.mu.Unlock()
 	if !ok || target.X <= 0 || target.Y <= 0 {
 		reason := "no_source"
@@ -211,6 +310,39 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 		Fallback: lines,
 		ID:       id,
 	}
+	if animation != nil {
+		payloadKey := animationPayloadKey{id: id, cellsX: target.X, cellsY: target.Y}
+		payloads, payloadHit, err := k.animationPayloadsFor(payloadKey, animation, target)
+		if err == nil && len(payloads) == len(animation.Frames) {
+			imgID := id
+			cellsCols := target.X
+			cellsRows := target.Y
+			reg := k.registry
+			r.Animated = true
+			r.OnFlush = func(w io.Writer) error {
+				now := k.nowFunc()
+				frameIdx, state, emit := k.selectAnimationFrame(imgID, animation, now)
+				if !emit {
+					return nil
+				}
+				if frameIdx < 0 || frameIdx >= len(payloads) {
+					return nil
+				}
+				payload := payloads[frameIdx]
+				debuglog.ImgRender("kitty.OnFlushAnimated: image_id=%d frame=%d cells=(%d,%d) payload_len=%d payload_cache=%v",
+					imgID, frameIdx, cellsCols, cellsRows, len(payload), payloadHit)
+				if err := emitKittyUpload(w, imgID, payload, cellsCols, cellsRows); err != nil {
+					return err
+				}
+				reg.MarkUploaded(imgID)
+				k.commitAnimationFrame(imgID, state, frameIdx)
+				return nil
+			}
+			return r
+		}
+		debuglog.ImgRender("kitty.RenderKey: key=%s target=(%d,%d) animation_fallback err=%v",
+			key, target.X, target.Y, err)
+	}
 	if fresh {
 		// Off-screen viewEntries never get their OnFlush fired, so
 		// Registry.Lookup keeps returning fresh=true for them on every
@@ -226,13 +358,8 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 		payload, payloadHit := k.payloads[payloadKey]
 		k.mu.Unlock()
 		if !payloadHit {
-			pxW := target.X * 8
-			pxH := target.Y * 16
-			resized := image.NewRGBA(image.Rect(0, 0, pxW, pxH))
-			draw.BiLinear.Scale(resized, resized.Bounds(), src, src.Bounds(), draw.Over, nil)
-			var pngBuf bytes.Buffer
-			if err := imgpng.Encode(&pngBuf, resized); err == nil {
-				payload = base64.StdEncoding.EncodeToString(pngBuf.Bytes())
+			if built, err := buildStaticPayload(src, target); err == nil {
+				payload = built
 				k.mu.Lock()
 				k.payloads[payloadKey] = payload
 				k.mu.Unlock()
@@ -271,6 +398,87 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 		}
 	}
 	return r
+}
+
+func (k *KittyRenderer) animationPayloadsFor(key animationPayloadKey, animation *Animation, target image.Point) ([]string, bool, error) {
+	k.mu.Lock()
+	payloads, ok := k.animationPayloads[key]
+	k.mu.Unlock()
+	if ok {
+		return payloads, true, nil
+	}
+	payloads, err := buildAnimationPayloads(animation, target)
+	if err != nil {
+		return nil, false, err
+	}
+	k.mu.Lock()
+	if existing, ok := k.animationPayloads[key]; ok {
+		k.mu.Unlock()
+		return existing, true, nil
+	}
+	k.animationPayloads[key] = payloads
+	k.mu.Unlock()
+	return payloads, false, nil
+}
+
+func (k *KittyRenderer) selectAnimationFrame(id uint32, animation *Animation, now time.Time) (int, animationPlayback, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	state := k.animationState[id]
+	if state.startedAt.IsZero() || now.Sub(state.lastFlushAt) > animationRestartGap {
+		state.startedAt = now
+		state.hasFrame = false
+	}
+	frameIdx := animation.FrameIndexAt(now.Sub(state.startedAt))
+	if state.hasFrame && state.emittedFrame == frameIdx {
+		state.lastFlushAt = now
+		k.animationState[id] = state
+		return frameIdx, state, false
+	}
+	state.lastFlushAt = now
+	return frameIdx, state, true
+}
+
+func (k *KittyRenderer) commitAnimationFrame(id uint32, state animationPlayback, frameIdx int) {
+	state.hasFrame = true
+	state.emittedFrame = frameIdx
+	k.mu.Lock()
+	k.animationState[id] = state
+	k.mu.Unlock()
+}
+
+func (k *KittyRenderer) nowFunc() time.Time {
+	if k.now != nil {
+		return k.now()
+	}
+	return time.Now()
+}
+
+func buildAnimationPayloads(animation *Animation, target image.Point) ([]string, error) {
+	if animation == nil || len(animation.Frames) == 0 {
+		return nil, fmt.Errorf("missing animation frames")
+	}
+	payloads := make([]string, 0, len(animation.Frames))
+	for _, frame := range animation.Frames {
+		payload, err := buildStaticPayload(frame, target)
+		if err != nil {
+			return nil, err
+		}
+		payloads = append(payloads, payload)
+	}
+	return payloads, nil
+}
+
+func buildStaticPayload(src image.Image, target image.Point) (string, error) {
+	pxW := target.X * 8
+	pxH := target.Y * 16
+	resized := image.NewRGBA(image.Rect(0, 0, pxW, pxH))
+	draw.BiLinear.Scale(resized, resized.Bounds(), src, src.Bounds(), draw.Over, nil)
+	var pngBuf bytes.Buffer
+	if err := imgpng.Encode(&pngBuf, resized); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(pngBuf.Bytes()), nil
 }
 
 // emitKittyUpload writes the kitty graphics protocol APC sequence to

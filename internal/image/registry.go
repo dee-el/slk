@@ -3,6 +3,7 @@ package image
 import (
 	"fmt"
 	"image"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -63,6 +64,37 @@ func (r *Registry) MarkUploaded(id uint32) {
 	r.mu.Lock()
 	r.uploaded[id] = true
 	r.mu.Unlock()
+}
+
+// IDsForKey returns every stable kitty image ID currently associated with key
+// across all target cell sizes.
+func (r *Registry) IDsForKey(key string) map[uint32]struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := map[uint32]struct{}{}
+	prefix := key + "|"
+	for regKey, id := range r.ids {
+		if strings.HasPrefix(regKey, prefix) {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids
+}
+
+// InvalidateUploadedByKey keeps stable IDs/placeholders intact but marks every
+// target for key as needing a fresh upload again.
+func (r *Registry) InvalidateUploadedByKey(key string) map[uint32]struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := map[uint32]struct{}{}
+	prefix := key + "|"
+	for regKey, id := range r.ids {
+		if strings.HasPrefix(regKey, prefix) {
+			ids[id] = struct{}{}
+			delete(r.uploaded, id)
+		}
+	}
+	return ids
 }
 
 func registryKey(key string, target image.Point) string {
