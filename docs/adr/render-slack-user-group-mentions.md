@@ -109,17 +109,20 @@ Add `UserGroupNames *userGroupNameStore` to `WorkspaceContext`.
 
 ### Bootstrap and refresh
 
-During workspace connection:
+Workspace startup must not wait for optional user-group metadata:
 
 1. Initialize an empty user-group store.
-2. Call `GetUserGroups` with a bounded context.
-3. Replace the store from returned group IDs and handles.
-4. Log failure and continue with an empty map.
-5. Include snapshot in workspace-ready/switch messages.
+2. Send workspace-ready state immediately with the current snapshot.
+3. On the first successful WebSocket connection, start `GetUserGroups` in a
+   background goroutine with a bounded context.
+4. Replace the store from returned group IDs and handles, then send
+   `WorkspaceUserGroupsUpdatedMsg` for the active workspace.
+5. Log failure and keep the previous snapshot; never fail or delay workspace
+   readiness.
 
-On reconnect, refresh the list to repair events missed while disconnected. A
-short dedupe gate prevents multiple reconnect signals from issuing duplicate
-requests. Keep the previous map when refresh fails.
+On every reconnect, run the same background refresh to repair events missed
+while disconnected. A short dedupe gate prevents duplicate connection signals
+from issuing concurrent requests. Keep the previous map when refresh fails.
 
 Required Slack scope is `usergroups:read`; browser-token restrictions may still
 deny it. Such denial is normal degraded operation, not fatal.
@@ -239,7 +242,7 @@ Reasons:
 - `cmd/slk/user_groups.go`, `user_groups_test.go`
   - Add synchronized normalized workspace store.
 - `cmd/slk/main.go`
-  - Initialize/fetch/refresh metadata, propagate snapshots, update event handler,
+  - Initialize and asynchronously refresh metadata, propagate snapshots, update event handler,
     search, notifications, and exports.
 - `cmd/slk/event_handler_test.go`, `cache_render_test.go`,
   `search_items_test.go`
@@ -284,7 +287,7 @@ Required assertions:
 - Workspace switch cannot leak group handles between workspaces.
 - Late split windows receive active snapshot.
 - Created/updated events update only correct workspace.
-- API rejection never prevents workspace startup.
+- API delay/rejection never delays or prevents workspace startup.
 - Cache round trip keeps ID and resolves with current metadata.
 - Outbound conversion emits a user-group rich-text element.
 
@@ -311,7 +314,7 @@ Manual smoke:
 
 1. Commit ADR convention and all existing ADRs.
 2. Implement directly on fork `main`.
-3. Keep API fetch best effort and preserve prior map on failure.
+3. Keep API fetch asynchronous/best effort and preserve prior map on failure.
 4. Run focused and full release gates.
 5. Complete independent review with no high/medium findings.
 6. Commit implementation separately from ADR history.
@@ -320,8 +323,8 @@ Manual smoke:
 
 ## Risks and Mitigations
 
-- Missing scope/token rejection: log and fall back to `@group`; never fail
-  workspace startup.
+- Missing scope/token rejection: log and fall back to `@group`; never delay or
+  fail workspace startup.
 - Slack Connect foreign group ID: embedded label wins; otherwise `@group`.
 - Group rename invalidates many rows: updates are rare and match existing
   user/channel metadata cache policy.
