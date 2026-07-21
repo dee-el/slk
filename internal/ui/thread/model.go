@@ -1,7 +1,6 @@
 package thread
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"strings"
@@ -43,8 +42,8 @@ type viewEntry struct {
 
 	// flushes are per-frame side effects (kitty image upload escapes)
 	// returned by imgrender.Renderer.RenderBlock for inline image
-	// attachments on this reply. Invoked during View() with a per-frame
-	// buffer that is then written directly to imgpkg.KittyOutput.
+	// attachments on this reply. Invoked during View() against
+	// imgpkg.KittyOutput so callback success tracks terminal-write success.
 	// Mirrors internal/ui/messages viewEntry.flushes. nil for entries
 	// with no inline image attachments.
 	//
@@ -239,12 +238,11 @@ func (m *Model) FlushVisibleKitty(replyAreaHeight int) {
 	if replyAreaHeight <= 0 {
 		return
 	}
-	var kittyFlushBuf bytes.Buffer
 	yOff := m.vp.YOffset()
 	if m.parentBlockHeight > 0 && yOff < m.parentBlockHeight && yOff+replyAreaHeight > 0 {
 		for _, fl := range m.parentFlushes {
 			if fl != nil {
-				_ = fl(&kittyFlushBuf)
+				_ = fl(imgpkg.KittyOutput)
 			}
 		}
 	}
@@ -256,12 +254,9 @@ func (m *Model) FlushVisibleKitty(replyAreaHeight int) {
 		}
 		for _, fl := range e.flushes {
 			if fl != nil {
-				_ = fl(&kittyFlushBuf)
+				_ = fl(imgpkg.KittyOutput)
 			}
 		}
-	}
-	if kittyFlushBuf.Len() > 0 {
-		_, _ = imgpkg.KittyOutput.Write(kittyFlushBuf.Bytes())
 	}
 }
 

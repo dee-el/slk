@@ -1,7 +1,6 @@
 package messages
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"slices"
@@ -156,7 +155,6 @@ func (m *Model) FlushVisibleKitty(msgAreaHeight int) {
 	if msgAreaHeight <= 0 || len(m.cache) == 0 {
 		return
 	}
-	var kittyFlushBuf bytes.Buffer
 	for i, e := range m.cache {
 		entryStart := m.entryOffsets[i]
 		entryEnd := entryStart + e.height
@@ -165,12 +163,9 @@ func (m *Model) FlushVisibleKitty(msgAreaHeight int) {
 		}
 		for _, fl := range e.flushes {
 			if fl != nil {
-				_ = fl(&kittyFlushBuf)
+				_ = fl(imgpkg.KittyOutput)
 			}
 		}
-	}
-	if kittyFlushBuf.Len() > 0 {
-		_, _ = imgpkg.KittyOutput.Write(kittyFlushBuf.Bytes())
 	}
 }
 

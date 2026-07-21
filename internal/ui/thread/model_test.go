@@ -1309,6 +1309,82 @@ func TestThreadModel_AnimatedEmojiInParentFlushes(t *testing.T) {
 	}
 }
 
+func TestThreadModel_FlushVisibleKittyOutputErrorSkipsCommit(t *testing.T) {
+	saved := imgpkg.KittyOutput
+	defer func() { imgpkg.KittyOutput = saved }()
+	imgpkg.KittyOutput = failingKittyWriter{}
+
+	parentCalls := 0
+	visibleReplyCalls := 0
+	hiddenReplyCalls := 0
+	parentCommitted := false
+	visibleReplyCommitted := false
+	hiddenReplyCommitted := false
+	m := New()
+	m.parentBlockHeight = 2
+	m.parentFlushes = []func(io.Writer) error{
+		func(w io.Writer) error {
+			parentCalls++
+			if _, err := io.WriteString(w, "parent"); err != nil {
+				return err
+			}
+			parentCommitted = true
+			return nil
+		},
+	}
+	m.cache = []viewEntry{
+		{
+			height: 2,
+			flushes: []func(io.Writer) error{
+				func(w io.Writer) error {
+					visibleReplyCalls++
+					if _, err := io.WriteString(w, "reply-visible"); err != nil {
+						return err
+					}
+					visibleReplyCommitted = true
+					return nil
+				},
+			},
+		},
+		{
+			height: 2,
+			flushes: []func(io.Writer) error{
+				func(w io.Writer) error {
+					hiddenReplyCalls++
+					if _, err := io.WriteString(w, "reply-hidden"); err != nil {
+						return err
+					}
+					hiddenReplyCommitted = true
+					return nil
+				},
+			},
+		},
+	}
+	m.entryOffsets = []int{0, 5}
+	m.vp.SetYOffset(0)
+
+	m.FlushVisibleKitty(3)
+
+	if parentCalls != 1 {
+		t.Fatalf("parent flush calls = %d, want 1", parentCalls)
+	}
+	if visibleReplyCalls != 1 {
+		t.Fatalf("visible reply flush calls = %d, want 1", visibleReplyCalls)
+	}
+	if hiddenReplyCalls != 0 {
+		t.Fatalf("hidden reply flush calls = %d, want 0", hiddenReplyCalls)
+	}
+	if parentCommitted {
+		t.Fatal("parent flush committed despite KittyOutput write failure")
+	}
+	if visibleReplyCommitted {
+		t.Fatal("visible reply flush committed despite KittyOutput write failure")
+	}
+	if hiddenReplyCommitted {
+		t.Fatal("hidden reply flush should not run")
+	}
+}
+
 // fakePlaceFetcher is a test fake for emojiutil.PlaceFetcher. v1
 // duplicates the one in internal/ui/messages/render_test.go (rather
 // than factoring into a shared testutil) — see polish list for the
@@ -1337,6 +1413,12 @@ func (f *fakePlaceFetcher) Fetch(ctx context.Context, req imgpkg.FetchRequest) (
 // Compile-time guard that `io` (used by the fake's Render flush type)
 // is referenced; renderer flushes are `func(io.Writer) error`.
 var _ = io.Discard
+
+type failingKittyWriter struct{}
+
+func (failingKittyWriter) Write([]byte) (int, error) {
+	return 0, io.ErrClosedPipe
+}
 
 func TestThreadUpdateReactionMaintainsUserIDs(t *testing.T) {
 	m := New()

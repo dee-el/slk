@@ -2,9 +2,13 @@ package image
 
 import (
 	"bytes"
+	"errors"
 	"image"
 	imgcolor "image/color"
+	"io"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -58,11 +62,21 @@ func TestKitty_WrapForTmux(t *testing.T) {
 func TestKitty_UploadEscapeWrappedInTmux(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/tmux")
 
-	var buf bytes.Buffer
-	if err := emitKittyUpload(&buf, 42, "abcd", 10, 5); err != nil {
+	payload := strings.Repeat("z", 4096+5)
+	capture := &writeCapture{}
+	if err := emitKittyUpload(SerializeOutput(capture), 42, payload, 10, 5); err != nil {
 		t.Fatal(err)
 	}
-	s := buf.String()
+	if len(capture.writes) != 1 {
+		t.Fatalf("write count = %d, want 1", len(capture.writes))
+	}
+	s := string(capture.writes[0])
+	if strings.Count(s, "\x1bPtmux;") != 2 {
+		t.Fatalf("tmux wrappers = %d, want 2", strings.Count(s, "\x1bPtmux;"))
+	}
+	if strings.Count(s, "\x1b\x1b_G") != 2 {
+		t.Fatalf("wrapped kitty starts = %d, want 2", strings.Count(s, "\x1b\x1b_G"))
+	}
 	if !strings.HasPrefix(s, "\x1bPtmux;\x1b\x1b_G") {
 		t.Fatalf("expected tmux-wrapped kitty upload, got %q", s[:minInt(20, len(s))])
 	}
@@ -71,6 +85,128 @@ func TestKitty_UploadEscapeWrappedInTmux(t *testing.T) {
 	}
 	if !strings.Contains(s, "a=T") || !strings.Contains(s, "U=1") {
 		t.Fatalf("wrapped upload missing kitty parameters: %q", s)
+	}
+}
+
+func TestEmitKittyUpload_EmptyPayloadNoOutput(t *testing.T) {
+	t.Setenv("TMUX", "")
+	capture := &writeCapture{}
+	if err := emitKittyUpload(SerializeOutput(capture), 42, "", 4, 2); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.writes) != 0 {
+		t.Fatalf("write count = %d, want 0", len(capture.writes))
+	}
+}
+
+func TestEmitKittyUpload_MultiChunkBufferedSingleWrite(t *testing.T) {
+	t.Setenv("TMUX", "")
+	payload := strings.Repeat("A", 4096*2+17)
+	capture := &writeCapture{}
+	if err := emitKittyUpload(SerializeOutput(capture), 42, payload, 4, 2); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.writes) != 1 {
+		t.Fatalf("write count = %d, want 1", len(capture.writes))
+	}
+
+	chunks := parseKittyTransfer(t, string(capture.writes[0]))
+	if len(chunks) != 3 {
+		t.Fatalf("chunk count = %d, want 3", len(chunks))
+	}
+	if chunks[0].header != "a=T,f=100,t=d,i=42,U=1,c=4,r=2,q=2,m=1" {
+		t.Fatalf("first header = %q", chunks[0].header)
+	}
+	if chunks[1].header != "m=1" {
+		t.Fatalf("second header = %q, want %q", chunks[1].header, "m=1")
+	}
+	if chunks[2].header != "m=0" {
+		t.Fatalf("third header = %q, want %q", chunks[2].header, "m=0")
+	}
+	if chunks[0].payload != payload[:4096] {
+		t.Fatal("first chunk payload mismatch")
+	}
+	if chunks[1].payload != payload[4096:8192] {
+		t.Fatal("second chunk payload mismatch")
+	}
+	if chunks[2].payload != payload[8192:] {
+		t.Fatal("final chunk payload mismatch")
+	}
+}
+
+func TestEmitKittyUpload_ConcurrentTransfersStayAtomic(t *testing.T) {
+	t.Setenv("TMUX", "")
+	capture := &writeCapture{}
+	w := SerializeOutput(capture)
+	transfers := []struct {
+		id      uint32
+		payload string
+	}{
+		{id: 101, payload: strings.Repeat("A", 4096*2+13)},
+		{id: 202, payload: strings.Repeat("B", 4096+29)},
+	}
+
+	start := make(chan struct{})
+	errCh := make(chan error, len(transfers))
+	var wg sync.WaitGroup
+	for _, transfer := range transfers {
+		transfer := transfer
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errCh <- emitKittyUpload(w, transfer.id, transfer.payload, 4, 2)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writes := capture.snapshot()
+	if len(writes) != 2 {
+		t.Fatalf("transfer writes = %d, want 2", len(writes))
+	}
+	expected := map[uint32]string{}
+	for _, transfer := range transfers {
+		expected[transfer.id] = transfer.payload
+	}
+	seen := map[uint32]bool{}
+	for _, raw := range writes {
+		chunks := parseKittyTransfer(t, string(raw))
+		id := kittyTransferID(t, chunks[0].header)
+		if seen[id] {
+			t.Fatalf("duplicate transfer for image id %d", id)
+		}
+		seen[id] = true
+		var got strings.Builder
+		for i, chunk := range chunks {
+			got.WriteString(chunk.payload)
+			if i == 0 {
+				want := "a=T,f=100,t=d,i=" + strconv.Itoa(int(id)) + ",U=1,c=4,r=2,q=2,m="
+				if !strings.HasPrefix(chunk.header, want) {
+					t.Fatalf("first header = %q, want prefix %q", chunk.header, want)
+				}
+				continue
+			}
+			wantMore := "m=1"
+			if i == len(chunks)-1 {
+				wantMore = "m=0"
+			}
+			if chunk.header != wantMore {
+				t.Fatalf("chunk %d header = %q, want %q", i, chunk.header, wantMore)
+			}
+		}
+		if got.String() != expected[id] {
+			t.Fatalf("payload mismatch for image id %d", id)
+		}
+	}
+	if len(seen) != len(transfers) {
+		t.Fatalf("seen transfers = %d, want %d", len(seen), len(transfers))
 	}
 }
 
@@ -99,6 +235,47 @@ func TestKitty_SecondRenderSameImageNoFlush(t *testing.T) {
 	}
 	if out2.ID != out1.ID {
 		t.Error("ID should be stable across renders of same (key, size)")
+	}
+}
+
+func TestKitty_StaticUploadFailureRetriesSameCallback(t *testing.T) {
+	t.Setenv("TMUX", "")
+	reg := NewRegistry()
+	r := NewKittyRenderer(reg)
+	target := image.Pt(4, 2)
+	r.SetSource("static", makeSolid(32, 32, imgcolor.RGBA{1, 2, 3, 255}))
+
+	out := r.RenderKey("static", target)
+	if out.OnFlush == nil {
+		t.Fatal("expected static OnFlush")
+	}
+	err := out.OnFlush(partialErrorWriter{n: 1})
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if _, fresh := reg.Lookup("static", target); !fresh {
+		t.Fatal("registry marked upload complete after failed emit")
+	}
+	var retry bytes.Buffer
+	if err := out.OnFlush(&retry); err != nil {
+		t.Fatal(err)
+	}
+	if retry.Len() == 0 {
+		t.Fatal("same callback retry wrote no bytes")
+	}
+	if _, fresh := reg.Lookup("static", target); fresh {
+		t.Fatal("registry should be warm after successful retry")
+	}
+	var third bytes.Buffer
+	if err := out.OnFlush(&third); err != nil {
+		t.Fatal(err)
+	}
+	if third.Len() != 0 {
+		t.Fatalf("third call should be idempotent after success, wrote %d bytes", third.Len())
+	}
+	warm := r.RenderKey("static", target)
+	if warm.OnFlush != nil {
+		t.Fatal("warm RenderKey should not return OnFlush after successful retry")
 	}
 }
 
@@ -384,6 +561,47 @@ func TestKitty_AnimatedStableIDFrameReplacementAndDedup(t *testing.T) {
 	}
 }
 
+func TestKitty_AnimatedUploadFailureDoesNotCommitFrame(t *testing.T) {
+	target := image.Pt(2, 1)
+	frame0 := makeSolid(16, 16, imgcolor.RGBA{255, 0, 0, 255}).(*image.RGBA)
+	frame1 := makeSolid(16, 16, imgcolor.RGBA{0, 0, 255, 255}).(*image.RGBA)
+	anim := &Animation{
+		Frames:    []*image.RGBA{frame0, frame1},
+		Delays:    []time.Duration{100 * time.Millisecond, 100 * time.Millisecond},
+		LoopCount: 0,
+		Duration:  200 * time.Millisecond,
+	}
+	reg := NewRegistry()
+	r := NewKittyRenderer(reg)
+	r.SetSource("anim", frame0)
+	r.SetAnimation("anim", anim)
+	r.now = func() time.Time { return time.Unix(0, 0) }
+
+	out := r.RenderKey("anim", target)
+	boom := errors.New("boom")
+	if err := out.OnFlush(partialErrorWriter{n: 7, err: boom}); !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want %v", err, boom)
+	}
+	state := r.animationState[out.ID]
+	if state.hasFrame {
+		t.Fatal("animation frame committed after failed emit")
+	}
+	if _, fresh := reg.Lookup("anim", target); !fresh {
+		t.Fatal("registry marked animated upload complete after failed emit")
+	}
+	var retry bytes.Buffer
+	if err := out.OnFlush(&retry); err != nil {
+		t.Fatal(err)
+	}
+	if retry.Len() == 0 {
+		t.Fatal("retry animated upload wrote no bytes")
+	}
+	state = r.animationState[out.ID]
+	if !state.hasFrame || state.emittedFrame != 0 {
+		t.Fatalf("animation state after retry = %+v, want committed frame 0", state)
+	}
+}
+
 func TestKitty_AnimatedDuplicateOccurrencesDeduped(t *testing.T) {
 	target := image.Pt(2, 1)
 	frame0 := makeSolid(16, 16, imgcolor.RGBA{255, 0, 0, 255}).(*image.RGBA)
@@ -576,4 +794,70 @@ func itoaInt(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+type writeCapture struct {
+	mu     sync.Mutex
+	writes [][]byte
+}
+
+func (w *writeCapture) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writes = append(w.writes, append([]byte(nil), p...))
+	return len(p), nil
+}
+
+func (w *writeCapture) snapshot() [][]byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([][]byte, len(w.writes))
+	for i := range w.writes {
+		out[i] = append([]byte(nil), w.writes[i]...)
+	}
+	return out
+}
+
+type kittyTransferChunk struct {
+	header  string
+	payload string
+}
+
+func parseKittyTransfer(t *testing.T, transfer string) []kittyTransferChunk {
+	t.Helper()
+	chunks := []kittyTransferChunk{}
+	for len(transfer) > 0 {
+		if !strings.HasPrefix(transfer, "\x1b_G") {
+			t.Fatalf("transfer missing kitty prefix: %q", transfer[:minInt(20, len(transfer))])
+		}
+		transfer = transfer[len("\x1b_G"):]
+		end := strings.Index(transfer, "\x1b\\")
+		if end < 0 {
+			t.Fatalf("transfer missing terminator: %q", transfer)
+		}
+		body := transfer[:end]
+		header, payload, ok := strings.Cut(body, ";")
+		if !ok {
+			t.Fatalf("transfer missing header separator: %q", body)
+		}
+		chunks = append(chunks, kittyTransferChunk{header: header, payload: payload})
+		transfer = transfer[end+len("\x1b\\"):]
+	}
+	return chunks
+}
+
+func kittyTransferID(t *testing.T, header string) uint32 {
+	t.Helper()
+	for _, field := range strings.Split(header, ",") {
+		if !strings.HasPrefix(field, "i=") {
+			continue
+		}
+		id, err := strconv.ParseUint(strings.TrimPrefix(field, "i="), 10, 32)
+		if err != nil {
+			t.Fatalf("parse image id from %q: %v", header, err)
+		}
+		return uint32(id)
+	}
+	t.Fatalf("header missing image id: %q", header)
+	return 0
 }

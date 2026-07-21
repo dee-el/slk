@@ -71,12 +71,24 @@ func wrapForTmux(seq string) string {
 	return "\x1bPtmux;" + strings.ReplaceAll(seq, "\x1b", "\x1b\x1b") + "\x1b\\"
 }
 
-func writeKittySequence(w io.Writer, seq string) error {
+func appendKittySequence(dst *bytes.Buffer, seq string) {
 	if inTmux() {
 		seq = wrapForTmux(seq)
 	}
-	_, err := io.WriteString(w, seq)
-	return err
+	dst.WriteString(seq)
+}
+
+func writeKittySequence(w io.Writer, seq string) error {
+	var buf bytes.Buffer
+	appendKittySequence(&buf, seq)
+	written, err := w.Write(buf.Bytes())
+	if err != nil {
+		return err
+	}
+	if written != buf.Len() {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 // KittyRenderer encodes images via the kitty graphics protocol with
@@ -391,6 +403,7 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 			debuglog.ImgRender("kitty.OnFlush: image_id=%d cells=(%d,%d) payload_len=%d payload_cache=%v",
 				imgID, cellsCols, cellsRows, len(payload), payloadHit)
 			if err := emitKittyUpload(w, imgID, payload, cellsCols, cellsRows); err != nil {
+				fired.Store(false)
 				return err
 			}
 			reg.MarkUploaded(imgID)
@@ -496,6 +509,10 @@ func buildStaticPayload(src image.Image, target image.Point) (string, error) {
 // Reference: https://sw.kovidgoyal.net/kitty/graphics-protocol/#unicode-placeholders
 func emitKittyUpload(w io.Writer, id uint32, payload string, cols, rows int) error {
 	const chunk = 4096
+	if len(payload) == 0 {
+		return nil
+	}
+	var transfer bytes.Buffer
 	for i := 0; i < len(payload); i += chunk {
 		end := i + chunk
 		more := 1
@@ -510,9 +527,14 @@ func emitKittyUpload(w io.Writer, id uint32, payload string, cols, rows int) err
 			hdr = fmt.Sprintf("m=%d", more)
 		}
 		seq := fmt.Sprintf("\x1b_G%s;%s\x1b\\", hdr, payload[i:end])
-		if err := writeKittySequence(w, seq); err != nil {
-			return err
-		}
+		appendKittySequence(&transfer, seq)
+	}
+	written, err := w.Write(transfer.Bytes())
+	if err != nil {
+		return err
+	}
+	if written != transfer.Len() {
+		return io.ErrShortWrite
 	}
 	return nil
 }

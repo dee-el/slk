@@ -5,6 +5,7 @@
 package image
 
 import (
+	"fmt"
 	"image"
 	"io"
 	"os"
@@ -144,7 +145,22 @@ func SerializeOutput(w io.Writer) io.Writer {
 func (s *serializedWriter) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.w.Write(p)
+	total := 0
+	for len(p) > 0 {
+		n, err := s.w.Write(p)
+		if n < 0 || n > len(p) {
+			return total, fmt.Errorf("invalid write count %d", n)
+		}
+		total += n
+		p = p[n:]
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+	}
+	return total, nil
 }
 
 // SixelSentinel is a private-use codepoint reserved for slk to mark a row

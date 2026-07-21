@@ -606,6 +606,63 @@ func TestView_KittyEmitsUploadEscape(t *testing.T) {
 	}
 }
 
+func TestFlushVisibleKitty_OutputErrorSkipsCommit(t *testing.T) {
+	saved := imgpkg.KittyOutput
+	defer func() { imgpkg.KittyOutput = saved }()
+	imgpkg.KittyOutput = failingKittyWriter{}
+
+	visibleCalls := 0
+	hiddenCalls := 0
+	committed := false
+	hiddenCommitted := false
+	m := New(nil, "general")
+	m.cache = []viewEntry{
+		{
+			height: 2,
+			flushes: []func(io.Writer) error{
+				func(w io.Writer) error {
+					visibleCalls++
+					if _, err := io.WriteString(w, "visible"); err != nil {
+						return err
+					}
+					committed = true
+					return nil
+				},
+			},
+		},
+		{
+			height: 2,
+			flushes: []func(io.Writer) error{
+				func(w io.Writer) error {
+					hiddenCalls++
+					if _, err := io.WriteString(w, "hidden"); err != nil {
+						return err
+					}
+					hiddenCommitted = true
+					return nil
+				},
+			},
+		},
+	}
+	m.entryOffsets = []int{0, 5}
+	m.yOffset = 0
+
+	m.FlushVisibleKitty(3)
+
+	if visibleCalls != 1 {
+		t.Fatalf("visible flush calls = %d, want 1", visibleCalls)
+	}
+	if hiddenCalls != 0 {
+		t.Fatalf("hidden flush calls = %d, want 0", hiddenCalls)
+	}
+	if committed {
+		t.Fatal("visible flush committed despite KittyOutput write failure")
+	}
+	if hiddenCommitted {
+		t.Fatal("hidden flush should not run")
+	}
+}
+
 // TestHitTest_OnImageRegion asserts that View() captures a click-
 // detection hit rect for each inline image attachment and that the
 // public HitTest method returns the correct (msgIdx, attIdx, fileID)
@@ -1616,4 +1673,10 @@ func TestSetSearchTerms_RedundantCallKeepsCache(t *testing.T) {
 	if m.cache == nil {
 		t.Fatal("redundant SetSearchTerms invalidated the render cache")
 	}
+}
+
+type failingKittyWriter struct{}
+
+func (failingKittyWriter) Write([]byte) (int, error) {
+	return 0, io.ErrClosedPipe
 }
