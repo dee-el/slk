@@ -24,6 +24,7 @@ This directory contains tracked architecture decision records for `slk`.
 - `add-multi-file-attachment-picker.md`: Accepted
 - `animate-custom-gif-emoji.md`: Accepted
 - `fix-macos-clipboard-build-and-user-name-map-races.md`: Accepted
+- `fix-atomic-kitty-image-uploads.md`: Accepted
 - `render-slack-block-kit-tables.md`: Superseded
 - `fix-table-cells-and-add-scrollable-viewports.md`: Accepted
 - `render-slack-user-group-mentions.md`: Accepted
