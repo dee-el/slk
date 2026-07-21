@@ -6,14 +6,18 @@ import (
 	"github.com/slack-go/slack"
 )
 
-func testTableTextCell(text string, style *slack.RichTextSectionTextStyle) *slack.RichTextBlock {
-	return slack.NewRichTextBlock("", slack.NewRichTextSection(
+type fakeTableCell struct{}
+
+func (fakeTableCell) TableCellType() slack.TableCellType { return "bogus" }
+
+func testTableTextCell(text string, style *slack.RichTextSectionTextStyle) slack.TableCell {
+	return slack.NewTableRichTextCell(slack.NewRichTextSection(
 		slack.NewRichTextSectionTextElement(text, style),
 	))
 }
 
-func testTableCell(elements ...slack.RichTextSectionElement) *slack.RichTextBlock {
-	return slack.NewRichTextBlock("", slack.NewRichTextSection(elements...))
+func testTableCell(elements ...slack.RichTextSectionElement) slack.TableCell {
+	return slack.NewTableRichTextCell(slack.NewRichTextSection(elements...))
 }
 
 func TestParseEmptyBlocksReturnsNil(t *testing.T) {
@@ -251,6 +255,9 @@ func TestParseTableBlockRichCellsAndSettings(t *testing.T) {
 	if len(table.Rows) != 1 || len(table.Rows[0]) != 2 {
 		t.Fatalf("rows = %#v, want one row with two cells", table.Rows)
 	}
+	if table.BlockID != "tbl" {
+		t.Fatalf("BlockID = %q, want %q", table.BlockID, "tbl")
+	}
 	if got := table.Rows[0][0].Text; got != "*Build*\n<@U123>" {
 		t.Fatalf("cell[0][0] = %q", got)
 	}
@@ -268,7 +275,7 @@ func TestParseTableBlockRichCellsAndSettings(t *testing.T) {
 func TestParseTableBlockDefaultsNilAndRaggedRows(t *testing.T) {
 	tbl := &slack.TableBlock{
 		Type: slack.MBTTable,
-		Rows: [][]*slack.RichTextBlock{
+		Rows: [][]slack.TableCell{
 			{testTableTextCell("alpha", nil), nil, testTableTextCell("gamma", nil)},
 			{testTableTextCell("beta", nil)},
 		},
@@ -298,6 +305,48 @@ func TestParseTableBlockDefaultsNilAndRaggedRows(t *testing.T) {
 	}
 }
 
+func TestParseTableBlockMixedCells(t *testing.T) {
+	tbl := slack.NewTableBlock("mixed").
+		AddRow(
+			testTableCell(slack.NewRichTextSectionTextElement("Metric", &slack.RichTextSectionTextStyle{Bold: true})),
+			testTableCell(slack.NewRichTextSectionTextElement("Value", &slack.RichTextSectionTextStyle{Bold: true})),
+			testTableCell(slack.NewRichTextSectionTextElement("Display", &slack.RichTextSectionTextStyle{Bold: true})),
+			testTableCell(slack.NewRichTextSectionTextElement("Notes", &slack.RichTextSectionTextStyle{Bold: true})),
+		).
+		AddRow(
+			slack.NewTableRawTextCell("Errors"),
+			slack.NewTableRawNumberCell(42.5),
+			slack.NewTableRawNumberCell(0.125).WithText("12.5%"),
+			nil,
+		)
+
+	table := Parse(slack.Blocks{BlockSet: []slack.Block{tbl}})[0].(TableBlock)
+	if table.BlockID != "mixed" {
+		t.Fatalf("BlockID = %q, want %q", table.BlockID, "mixed")
+	}
+	if got := table.Rows[0][0].Text; got != "*Metric*" {
+		t.Fatalf("header = %q", got)
+	}
+	if got := table.Rows[1][0].Text; got != "Errors" {
+		t.Fatalf("raw_text = %q", got)
+	}
+	if got := table.Rows[1][1].Text; got != "42.5" {
+		t.Fatalf("raw_number = %q", got)
+	}
+	if got := table.Rows[1][2].Text; got != "12.5%" {
+		t.Fatalf("raw_number with text override = %q", got)
+	}
+	if got := table.Rows[1][3].Text; got != "" {
+		t.Fatalf("nil cell text = %q, want empty", got)
+	}
+}
+
+func TestParseTableCellUnknownReturnsEmpty(t *testing.T) {
+	if got := parseTableCell(fakeTableCell{}); got.Text != "" {
+		t.Fatalf("unknown cell text = %q, want empty", got.Text)
+	}
+}
+
 func TestParseTableBlockEmpty(t *testing.T) {
 	table := Parse(slack.Blocks{BlockSet: []slack.Block{slack.NewTableBlock("tbl")}})[0].(TableBlock)
 	if len(table.Rows) != 0 {
@@ -314,7 +363,7 @@ func TestParseTableBlockEmpty(t *testing.T) {
 func TestParseTableBlockCapsRowsAndColumns(t *testing.T) {
 	tbl := slack.NewTableBlock("tbl")
 	for row := 0; row < tableMaxRows+1; row++ {
-		cells := make([]*slack.RichTextBlock, 0, tableMaxCols+1)
+		cells := make([]slack.TableCell, 0, tableMaxCols+1)
 		for col := 0; col < tableMaxCols+1; col++ {
 			cells = append(cells, testTableTextCell("r", nil))
 		}

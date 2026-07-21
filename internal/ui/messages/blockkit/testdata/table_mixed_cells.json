@@ -1,0 +1,74 @@
+{
+  "blocks": [
+    {
+      "type": "table",
+      "block_id": "mixed-table",
+      "column_settings": [
+        { "align": "left", "is_wrapped": false },
+        { "align": "right", "is_wrapped": false },
+        { "align": "right", "is_wrapped": false },
+        { "align": "left", "is_wrapped": true }
+      ],
+      "rows": [
+        [
+          {
+            "type": "rich_text",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  { "type": "text", "text": "Metric", "style": { "bold": true } }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "rich_text",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  { "type": "text", "text": "Count", "style": { "bold": true } }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "rich_text",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  { "type": "text", "text": "Rate", "style": { "bold": true } }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "rich_text",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  { "type": "text", "text": "Notes", "style": { "bold": true } }
+                ]
+              }
+            ]
+          }
+        ],
+        [
+          { "type": "raw_text", "text": "Errors" },
+          { "type": "raw_number", "value": 42.5 },
+          { "type": "raw_number", "value": 0.125, "text": "12.5%" },
+          null
+        ],
+        [
+          { "type": "raw_text", "text": "Builds" },
+          { "type": "raw_number", "value": 7 },
+          { "type": "raw_number", "value": 1 },
+          { "type": "raw_text", "text": "green across regions" }
+        ]
+      ]
+    }
+  ]
+}

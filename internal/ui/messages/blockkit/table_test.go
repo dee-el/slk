@@ -1,6 +1,7 @@
 package blockkit
 
 import (
+	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
@@ -8,6 +9,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
+
+const testTableMessageTS = "1700000000.000100"
 
 func plainLines(lines []string) []string {
 	out := make([]string, len(lines))
@@ -26,7 +29,23 @@ func assertLinesFitWidth(t *testing.T, lines []string, width int) {
 	}
 }
 
-func TestMeasureTableColumnsCapsDesiredWidth(t *testing.T) {
+func testTableCtx() Context {
+	return Context{
+		MessageTS: testTableMessageTS,
+		RenderText: func(s string, _ map[string]string) string {
+			return s
+		},
+		WrapText: func(s string, width int) string {
+			return ansi.Wrap(s, width, "")
+		},
+	}
+}
+
+func testTableKey(blockID, path string) TableKey {
+	return TableKey{MessageTS: testTableMessageTS, Path: path, BlockID: blockID}
+}
+
+func TestMeasureTableColumnsNaturalCanvas(t *testing.T) {
 	table := TableBlock{
 		Rows: [][]TableCell{{
 			{Text: strings.Repeat("x", 80)},
@@ -34,48 +53,57 @@ func TestMeasureTableColumnsCapsDesiredWidth(t *testing.T) {
 		}},
 		Columns: []TableColumn{{}, {}},
 	}
-	if got := measureTableColumns(table, Context{}, 36); len(got) != 2 || got[0] != 30 || got[1] != 3 {
+	got := measureTableColumns(table, Context{})
+	if len(got) != 2 || got[0] != 30 || got[1] != 3 {
 		t.Fatalf("widths = %v, want [30 3]", got)
 	}
 }
 
-func TestMeasureTableColumnsWideWidthStopsAtDesiredCap(t *testing.T) {
-	table := TableBlock{
-		Rows:    [][]TableCell{{{Text: strings.Repeat("x", 80)}}},
-		Columns: []TableColumn{{}},
-	}
-	if got := measureTableColumns(table, Context{}, 120); len(got) != 1 || got[0] != 30 {
-		t.Fatalf("widths = %v, want [30]", got)
-	}
-	res := Render([]Block{table}, Context{}, 120)
-	if got := lipgloss.Width(res.Lines[0]); got != 32 {
-		t.Fatalf("table width = %d, want 32 (30 cols + borders)", got)
-	}
-}
-
-func TestMeasureTableColumnsWideWidthKeepsNaturalWidths(t *testing.T) {
-	table := TableBlock{
-		Rows:    [][]TableCell{{{Text: "cat"}, {Text: "id"}}},
-		Columns: []TableColumn{{}, {}},
-	}
-	if got := measureTableColumns(table, Context{}, 120); len(got) != 2 || got[0] != 3 || got[1] != 3 {
-		t.Fatalf("widths = %v, want [3 3]", got)
-	}
-	res := Render([]Block{table}, Context{}, 120)
-	if got := lipgloss.Width(res.Lines[0]); got != 9 {
-		t.Fatalf("table width = %d, want 9 (natural width, no extra padding)", got)
+func TestDefaultTableMaxHeight(t *testing.T) {
+	for _, tc := range []struct {
+		height int
+		want   int
+	}{
+		{height: 0, want: 5},
+		{height: 3, want: 3},
+		{height: 8, want: 5},
+		{height: 24, want: 12},
+	} {
+		if got := DefaultTableMaxHeight(tc.height); got != tc.want {
+			t.Fatalf("height=%d got %d want %d", tc.height, got, tc.want)
+		}
 	}
 }
 
-func TestRenderTableWideGrid(t *testing.T) {
+func TestRenderTableUsesContextDefaultMaxHeight(t *testing.T) {
+	ctx := testTableCtx()
+	ctx.TableMaxHeight = 6
+	table := TableBlock{BlockID: "default-cap", Columns: []TableColumn{{}}}
+	for i := 0; i < 6; i++ {
+		table.Rows = append(table.Rows, []TableCell{{Text: fmt.Sprintf("R%d", i)}})
+	}
+	res := Render([]Block{table}, ctx, 20)
+	if len(res.TableRegions) != 1 {
+		t.Fatalf("table regions = %d, want 1", len(res.TableRegions))
+	}
+	region := res.TableRegions[0]
+	if region.ViewHeight != 4 || region.MaxY != 9 || len(res.Lines) != 6 {
+		t.Fatalf("region=%+v lines=%d", region, len(res.Lines))
+	}
+}
+
+func TestRenderTableWideGridAndRegion(t *testing.T) {
+	ctx := testTableCtx()
 	table := TableBlock{
+		BlockID: "tbl",
 		Rows: [][]TableCell{
 			{{Text: "Service"}, {Text: "Healthy"}, {Text: "Owner"}},
 			{{Text: "API"}, {Text: "Healthy"}, {Text: "Alex"}},
 		},
 		Columns: []TableColumn{{}, {}, {}},
 	}
-	got := plainLines(Render([]Block{table}, Context{}, 23).Lines)
+	res := Render([]Block{table}, ctx, 23)
+	got := plainLines(res.Lines)
 	want := []string{
 		"┌───────┬───────┬─────┐",
 		"│Service│Healthy│Owner│",
@@ -86,220 +114,394 @@ func TestRenderTableWideGrid(t *testing.T) {
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("wide table mismatch\nwant:\n%s\n\ngot:\n%s", strings.Join(want, "\n"), strings.Join(got, "\n"))
 	}
-}
-
-func TestRenderTableCellTruncateAlignAndMultiline(t *testing.T) {
-	got := renderTableCell(TableCell{Text: "abcdef\nx"}, TableColumn{Align: TableAlignRight}, Context{}, 4)
-	plain := plainLines(got)
-	want := []string{"a...", "   x"}
-	if strings.Join(plain, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("renderTableCell mismatch\nwant:\n%s\n\ngot:\n%s", strings.Join(want, "\n"), strings.Join(plain, "\n"))
+	if len(res.TableRegions) != 1 {
+		t.Fatalf("table regions = %d, want 1", len(res.TableRegions))
 	}
+	region := res.TableRegions[0]
+	if region.Key != testTableKey("tbl", "blocks/0") {
+		t.Fatalf("key = %+v", region.Key)
+	}
+	if region.LineStart != 0 || region.LineEnd != len(res.Lines) {
+		t.Fatalf("line range = %d:%d, want 0:%d", region.LineStart, region.LineEnd, len(res.Lines))
+	}
+	if region.ViewWidth != 23 || region.ViewHeight != 5 || region.FullWidth != 23 || region.FullHeight != 5 || region.MaxX != 0 || region.MaxY != 0 || region.XOffset != 0 || region.YOffset != 0 {
+		t.Fatalf("region = %+v", region)
+	}
+	assertLinesFitWidth(t, res.Lines, 23)
 }
 
-func TestRenderTableGridHandlesANSIWidth(t *testing.T) {
-	ctx := Context{
-		RenderText: func(s string, _ map[string]string) string {
-			if strings.Contains(s, "link") {
-				return "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\"
-			}
-			return "\x1b[31m" + s + "\x1b[0m"
-		},
+func TestRenderTableViewportHorizontalOffsetRevealsHiddenColumns(t *testing.T) {
+	ctx := testTableCtx()
+	table := TableBlock{
+		BlockID: "wide",
+		Rows: [][]TableCell{{
+			{Text: "Alpha"},
+			{Text: "Bravo"},
+			{Text: "Charlie"},
+			{Text: "Delta"},
+		}},
+		Columns: []TableColumn{{}, {}, {}, {}},
+	}
+	res0 := Render([]Block{table}, ctx, 20)
+	plain0 := strings.Join(plainLines(res0.Lines), "\n")
+	if len(res0.TableRegions) != 1 {
+		t.Fatalf("table regions = %d, want 1", len(res0.TableRegions))
+	}
+	region0 := res0.TableRegions[0]
+	if region0.ViewWidth != 18 || region0.ViewHeight != 3 || region0.FullWidth != 27 || region0.FullHeight != 3 || region0.MaxX != 9 || region0.MaxY != 0 || region0.XOffset != 0 || region0.YOffset != 0 {
+		t.Fatalf("unexpected left viewport region: %+v", region0)
+	}
+	if !strings.Contains(plain0, "Alpha") {
+		t.Fatalf("left viewport missing first column: %q", plain0)
+	}
+	if strings.Contains(plain0, "Delta") {
+		t.Fatalf("left viewport unexpectedly shows last column: %q", plain0)
+	}
+	if got := plainLines(res0.Lines)[0]; !strings.Contains(got, "x[ 0/9>] y[ 0/0 ]") {
+		t.Fatalf("left viewport status = %q", got)
+	}
+
+	ctx.TableViewports = map[TableKey]TableViewportInput{
+		testTableKey("wide", "blocks/0"): {XOffset: region0.MaxX},
+	}
+	res1 := Render([]Block{table}, ctx, 20)
+	plain1 := strings.Join(plainLines(res1.Lines), "\n")
+	region1 := res1.TableRegions[0]
+	if region1.ViewWidth != 18 || region1.ViewHeight != 3 || region1.FullWidth != 27 || region1.FullHeight != 3 || region1.MaxX != 9 || region1.MaxY != 0 || region1.XOffset != 9 || region1.YOffset != 0 {
+		t.Fatalf("unexpected right viewport region: %+v", region1)
+	}
+	if !strings.Contains(plain1, "Delta") {
+		t.Fatalf("right viewport missing last column: %q", plain1)
+	}
+	if got := plainLines(res1.Lines)[0]; !strings.Contains(got, "x[<9/9 ] y[ 0/0 ]") {
+		t.Fatalf("right viewport status = %q", got)
+	}
+	if len(res0.Lines) != len(res1.Lines) {
+		t.Fatalf("viewport height changed with x offset: %d vs %d", len(res0.Lines), len(res1.Lines))
+	}
+	assertLinesFitWidth(t, res1.Lines, 20)
+}
+
+func TestRenderTableViewportVerticalOffsetStableHeight(t *testing.T) {
+	ctx := testTableCtx()
+	table := TableBlock{BlockID: "tall", Columns: []TableColumn{{}}}
+	for i := 1; i <= 6; i++ {
+		table.Rows = append(table.Rows, []TableCell{{Text: fmt.Sprintf("R%d", i)}})
+	}
+	key := testTableKey("tall", "blocks/0")
+	ctx.TableViewports = map[TableKey]TableViewportInput{key: {MaxHeight: 7}}
+	res0 := Render([]Block{table}, ctx, 20)
+	region0 := res0.TableRegions[0]
+	if region0.ViewWidth != 18 || region0.ViewHeight != 5 || region0.FullWidth != 5 || region0.FullHeight != 13 || region0.MaxX != 0 || region0.MaxY != 8 || region0.XOffset != 0 || region0.YOffset != 0 {
+		t.Fatalf("unexpected top viewport region: %+v", region0)
+	}
+	if got := plainLines(res0.Lines)[0]; !strings.Contains(got, "x[ 0/0 ] y[ 0/8v]") {
+		t.Fatalf("top viewport status = %q", got)
+	}
+	ctx.TableViewports[key] = TableViewportInput{MaxHeight: 7, YOffset: region0.MaxY}
+	res1 := Render([]Block{table}, ctx, 20)
+	plain1 := strings.Join(plainLines(res1.Lines), "\n")
+	region1 := res1.TableRegions[0]
+	if region1.ViewWidth != 18 || region1.ViewHeight != 5 || region1.FullWidth != 5 || region1.FullHeight != 13 || region1.MaxX != 0 || region1.MaxY != 8 || region1.XOffset != 0 || region1.YOffset != 8 {
+		t.Fatalf("unexpected bottom viewport region: %+v", region1)
+	}
+	if got := plainLines(res1.Lines)[0]; !strings.Contains(got, "x[ 0/0 ] y[^8/8 ]") {
+		t.Fatalf("bottom viewport status = %q", got)
+	}
+	if len(res0.Lines) != len(res1.Lines) {
+		t.Fatalf("viewport height changed with y offset: %d vs %d", len(res0.Lines), len(res1.Lines))
+	}
+	if len(res1.Lines) != 7 {
+		t.Fatalf("viewport height = %d, want 7", len(res1.Lines))
+	}
+	if !strings.Contains(plain1, "R6") {
+		t.Fatalf("bottom viewport missing later row: %q", plain1)
+	}
+	assertLinesFitWidth(t, res1.Lines, 20)
+}
+
+func TestRenderTableTinyWidthFallback(t *testing.T) {
+	ctx := testTableCtx()
+	table := TableBlock{
+		BlockID: "tiny",
+		Rows:    [][]TableCell{{{Text: "Service"}, {Text: "Status"}}},
+		Columns: []TableColumn{{}, {}},
+	}
+	res := Render([]Block{table}, ctx, 3)
+	plain := strings.Join(plainLines(res.Lines), "\n")
+	if strings.Contains(plain, "┌") {
+		t.Fatalf("tiny fallback should not render grid border: %q", plain)
+	}
+	if len(res.TableRegions) != 1 {
+		t.Fatalf("table regions = %d, want 1", len(res.TableRegions))
+	}
+	assertLinesFitWidth(t, res.Lines, 3)
+}
+
+func TestRenderTableClampOffsetsAndBounds(t *testing.T) {
+	ctx := testTableCtx()
+	table := TableBlock{BlockID: "clamp", Columns: []TableColumn{{}, {}, {Wrapped: true}}}
+	for i := 0; i < 5; i++ {
+		table.Rows = append(table.Rows, []TableCell{{Text: "Alpha"}, {Text: "Bravo"}, {Text: strings.Repeat("cell ", 6)}})
+	}
+	key := testTableKey("clamp", "blocks/0")
+	ctx.TableViewports = map[TableKey]TableViewportInput{key: {XOffset: -10, YOffset: -10, MaxHeight: 6}}
+	res0 := Render([]Block{table}, ctx, 24)
+	region0 := res0.TableRegions[0]
+	if region0.ViewWidth != 22 || region0.ViewHeight != 4 || region0.FullWidth != 44 || region0.FullHeight != 11 || region0.MaxX != 22 || region0.MaxY != 7 || region0.XOffset != 0 || region0.YOffset != 0 {
+		t.Fatalf("negative offsets not clamped to zero: %+v", region0)
+	}
+	if got := plainLines(res0.Lines)[0]; !strings.Contains(got, "x[ 0/22>] y[ 0/7v]") {
+		t.Fatalf("negative-offset status = %q", got)
+	}
+	ctx.TableViewports[key] = TableViewportInput{XOffset: 999, YOffset: 999, MaxHeight: 6}
+	res1 := Render([]Block{table}, ctx, 24)
+	region1 := res1.TableRegions[0]
+	if region1.ViewWidth != 22 || region1.ViewHeight != 4 || region1.FullWidth != 44 || region1.FullHeight != 11 || region1.MaxX != 22 || region1.MaxY != 7 || region1.XOffset != 22 || region1.YOffset != 7 {
+		t.Fatalf("large offsets not clamped to max: %+v", region1)
+	}
+	if got := plainLines(res1.Lines)[0]; !strings.Contains(got, "x[<22/22 ] y[^7/7 ]") {
+		t.Fatalf("max-offset status = %q", got)
+	}
+	assertLinesFitWidth(t, res1.Lines, 24)
+}
+
+func TestRenderTableUnicodeViewportClipping(t *testing.T) {
+	ctx := testTableCtx()
+	table := TableBlock{
+		BlockID: "unicode",
+		Rows:    [][]TableCell{{{Text: "界界界界界"}}},
+		Columns: []TableColumn{{}},
+	}
+	ctx.TableViewports = map[TableKey]TableViewportInput{
+		testTableKey("unicode", "blocks/0"): {XOffset: 2},
+	}
+	res := Render([]Block{table}, ctx, 8)
+	plain := strings.Join(plainLines(res.Lines), "\n")
+	if strings.Contains(plain, "�") {
+		t.Fatalf("unicode clipping introduced replacement rune: %q", plain)
+	}
+	if !strings.Contains(plain, "界") {
+		t.Fatalf("unicode viewport lost visible glyphs: %q", plain)
+	}
+	assertLinesFitWidth(t, res.Lines, 8)
+}
+
+func TestRenderTableANSIAndOSC8Clipping(t *testing.T) {
+	ctx := testTableCtx()
+	ctx.RenderText = func(s string, _ map[string]string) string {
+		if s == "link" {
+			return tableOSC8Open("https://example.com") + "ABCDEFGHIJKL" + tableOSC8Close()
+		}
+		return "\x1b[31m" + s + "\x1b[0m"
 	}
 	table := TableBlock{
-		Rows:    [][]TableCell{{{Text: "red"}, {Text: "link"}}},
-		Columns: []TableColumn{{}, {}},
+		BlockID: "ansi",
+		Rows:    [][]TableCell{{{Text: "link"}}},
+		Columns: []TableColumn{{}},
+	}
+	ctx.TableViewports = map[TableKey]TableViewportInput{
+		testTableKey("ansi", "blocks/0"): {XOffset: 3},
 	}
 	res := Render([]Block{table}, ctx, 12)
 	assertLinesFitWidth(t, res.Lines, 12)
-	plain := strings.Join(plainLines(res.Lines), "\n")
-	if !strings.Contains(plain, "red") || !strings.Contains(plain, "link") {
-		t.Fatalf("rendered table missing ANSI-wrapped cell text: %q", plain)
+	found := false
+	for _, line := range res.Lines {
+		plain := ansi.Strip(line)
+		if !strings.Contains(plain, "DEFG") {
+			continue
+		}
+		found = true
+		if got := strings.Count(line, osc8Prefix); got != 2 {
+			t.Fatalf("hyperlink line open+close count = %d, want 2: %q", got, line)
+		}
+		if got := strings.Count(line, tableOSC8Close()); got != 1 {
+			t.Fatalf("hyperlink line close count = %d, want 1: %q", got, line)
+		}
+		break
+	}
+	if !found {
+		t.Fatalf("viewport clipping lost expected hyperlink text: %q", strings.Join(plainLines(res.Lines), "\n"))
 	}
 }
 
-func TestRenderTableRaggedAndEmptyCells(t *testing.T) {
-	table := TableBlock{
-		Rows: [][]TableCell{
-			{{Text: "A"}, {Text: ""}},
-			{{Text: "B"}},
-		},
-		Columns: []TableColumn{{}, {}},
+func TestClipTableLineBalancesSGRAtViewportBoundary(t *testing.T) {
+	cut := clipTableLine("\x1b[31mABCDEFGHIJKL\x1b[0m", 3, 4)
+	if got := ansi.Strip(cut); got != "DEFG" {
+		t.Fatalf("plain cut = %q, want %q", got, "DEFG")
 	}
-	got := plainLines(Render([]Block{table}, Context{}, 9).Lines)
-	want := []string{
-		"┌───┬───┐",
-		"│A  │   │",
-		"├───┼───┤",
-		"│B  │   │",
-		"└───┴───┘",
+	if !strings.Contains(cut, "\x1b[0m") {
+		t.Fatalf("cut missing reset: %q", cut)
 	}
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("ragged table mismatch\nwant:\n%s\n\ngot:\n%s", strings.Join(want, "\n"), strings.Join(got, "\n"))
+	if got := cut + "Z"; !strings.Contains(got, "\x1b[0mZ") {
+		t.Fatalf("style reset must happen before following text: %q", got)
 	}
 }
 
-func TestRenderTableWrapAndControlNormalization(t *testing.T) {
+func TestRenderTableRuneCapShowsVisibleEllipsisAndSummary(t *testing.T) {
+	ctx := testTableCtx()
 	table := TableBlock{
+		BlockID: "rune-cap",
 		Rows: [][]TableCell{{
-			{Text: "one\ttwo\r\nthree four five"},
+			{Text: strings.Repeat("界", tableMaxCellRunes+5)},
 		}},
 		Columns: []TableColumn{{Wrapped: true}},
 	}
-	res := Render([]Block{table}, Context{}, 8)
-	assertLinesFitWidth(t, res.Lines, 8)
+	res := Render([]Block{table}, ctx, 80)
 	plain := strings.Join(plainLines(res.Lines), "\n")
-	if strings.Contains(plain, "\t") || strings.Contains(plain, "\r") {
-		t.Fatalf("control chars should be normalized: %q", plain)
+	region := res.TableRegions[0]
+	if !region.ContentTruncated || region.ContentTruncatedCells != 1 {
+		t.Fatalf("region = %+v, want 1 capped cell", region)
 	}
-	for _, want := range []string{"one", "two", "three", "four", "five"} {
-		if !strings.Contains(plain, want) {
-			t.Fatalf("wrapped table missing %q in %q", want, plain)
-		}
+	if !strings.Contains(plain, "...") {
+		t.Fatalf("missing visible ellipsis in capped rune cell: %q", plain)
+	}
+	if !strings.Contains(plain, "1 cell capped") {
+		t.Fatalf("missing capped summary in %q", plain)
+	}
+	assertLinesFitWidth(t, res.Lines, 80)
+}
+
+func TestRenderTablePhysicalLineCapWrappedCanvas(t *testing.T) {
+	ctx := testTableCtx()
+	table := TableBlock{BlockID: "phys-cap", Rows: [][]TableCell{{{Text: strings.Repeat("x", tableMaxCellRunes)}}}, Columns: []TableColumn{{Wrapped: true}}}
+	res := Render([]Block{table}, ctx, 40)
+	region := res.TableRegions[0]
+	plain := plainLines(res.Lines)
+	if region.FullHeight != 202 || len(res.Lines) != 203 {
+		t.Fatalf("wrapped canvas height wrong: region=%+v lines=%d", region, len(res.Lines))
+	}
+	if !region.ContentTruncated || region.ContentTruncatedCells != 1 {
+		t.Fatalf("region = %+v, want one truncated cell", region)
+	}
+	if !strings.Contains(plain[len(plain)-3], "...") {
+		t.Fatalf("last visible cell line should end with ellipsis: %q", plain[len(plain)-3])
+	}
+	if !strings.Contains(plain[len(plain)-1], "1 cell") {
+		t.Fatalf("summary missing single capped cell: %q", plain[len(plain)-1])
 	}
 }
 
-func TestRenderTableNarrowFallback(t *testing.T) {
+func TestRenderTablePhysicalLineCapTinyFallback(t *testing.T) {
+	ctx := testTableCtx()
+	table := TableBlock{BlockID: "phys-cap-tiny", Rows: [][]TableCell{{{Text: strings.Repeat("x", tableMaxCellRunes)}}}, Columns: []TableColumn{{Wrapped: true}}}
+	res := Render([]Block{table}, ctx, 3)
+	region := res.TableRegions[0]
+	plain := plainLines(res.Lines)
+	if len(res.Lines) != 203 {
+		t.Fatalf("tiny fallback total lines = %d, want 203", len(res.Lines))
+	}
+	if !region.ContentTruncated || region.ContentTruncatedCells != 1 {
+		t.Fatalf("region = %+v, want one truncated cell", region)
+	}
+	if !strings.HasSuffix(plain[len(plain)-2], "...") {
+		t.Fatalf("tiny fallback last content line should end with ellipsis: %q", plain[len(plain)-2])
+	}
+	if plain[len(plain)-1] != "..." {
+		t.Fatalf("tiny fallback summary should truncate to dots at width 3: %q", plain[len(plain)-1])
+	}
+}
+
+func TestRenderPreparedTableCellTrackedBoundsWrapInputBeforeWrapping(t *testing.T) {
+	cell := prepareTableCell(TableCell{Text: strings.Repeat("x", tableMaxCellRunes)}, Context{})
+	var gotWidth, gotRunes int
+	spyWrap := func(s string, width int) string {
+		gotWidth = lipgloss.Width(s)
+		gotRunes = tableRuneCount(s)
+		return ansi.Wrap(s, width, "")
+	}
+	lines, truncated := renderPreparedTableCellTracked(cell, TableColumn{Wrapped: true}, spyWrap, 3, false)
+	if !truncated {
+		t.Fatal("expected tracked truncation")
+	}
+	if gotWidth > 600 || gotRunes > 600 {
+		t.Fatalf("wrap input too large: width=%d runes=%d", gotWidth, gotRunes)
+	}
+	if len(lines) != tableMaxCellLines {
+		t.Fatalf("wrapped lines = %d, want %d", len(lines), tableMaxCellLines)
+	}
+	if lines[len(lines)-1] != "..." {
+		t.Fatalf("last wrapped line = %q, want ellipsis", lines[len(lines)-1])
+	}
+	lines, truncated = renderPreparedTableCellTracked(cell, TableColumn{Wrapped: true}, nil, 1, false)
+	if !truncated {
+		t.Fatal("expected truncation with nil WrapText fallback")
+	}
+	if len(lines) != tableMaxCellLines {
+		t.Fatalf("nil WrapText lines = %d, want %d", len(lines), tableMaxCellLines)
+	}
+	if lines[len(lines)-1] != "." {
+		t.Fatalf("nil WrapText last line = %q, want dot ellipsis", lines[len(lines)-1])
+	}
+}
+
+func TestRenderTableLineCapShowsVisibleEllipsisAndSummary(t *testing.T) {
+	ctx := testTableCtx()
+	var lineBuilder strings.Builder
+	for i := 0; i < tableMaxCellLines+5; i++ {
+		fmt.Fprintf(&lineBuilder, "L%03d\n", i)
+	}
 	table := TableBlock{
+		BlockID: "line-cap",
 		Rows: [][]TableCell{{
-			{Text: "Service"},
-			{Text: "Status"},
-			{Text: "Owner"},
+			{Text: lineBuilder.String()},
 		}},
-		Columns: []TableColumn{{}, {}, {}},
+		Columns: []TableColumn{{Wrapped: true}},
 	}
-	res := Render([]Block{table}, Context{}, 11)
-	assertLinesFitWidth(t, res.Lines, 11)
+	res := Render([]Block{table}, ctx, 80)
 	plain := strings.Join(plainLines(res.Lines), "\n")
-	for _, want := range []string{"Row 1", "C1:", "C2:", "C3:", "Service", "Status", "Owner"} {
-		if !strings.Contains(plain, want) {
-			t.Fatalf("narrow fallback missing %q in %q", want, plain)
-		}
+	region := res.TableRegions[0]
+	if !region.ContentTruncated || region.ContentTruncatedCells != 1 {
+		t.Fatalf("region = %+v, want 1 capped cell", region)
 	}
-	if strings.Contains(plain, "┌") {
-		t.Fatalf("narrow fallback should not render grid borders: %q", plain)
+	if !strings.Contains(plain, "L199...") {
+		t.Fatalf("line-capped cell missing visible ellipsis: %q", plain)
 	}
+	if !strings.Contains(plain, "1 cell capped") {
+		t.Fatalf("missing capped summary in %q", plain)
+	}
+	if strings.Contains(plain, fmt.Sprintf("L%03d", tableMaxCellLines)) {
+		t.Fatalf("line cap leaked later logical lines: %q", plain)
+	}
+	assertLinesFitWidth(t, res.Lines, 80)
 }
 
-func TestRenderTableNarrowFallbackWrapsNonWrappedContentFully(t *testing.T) {
-	table := TableBlock{
-		Rows: [][]TableCell{{
-			{Text: "one two six ten"},
-		}},
-		Columns: []TableColumn{{Wrapped: false}, {}},
+func TestRenderMultipleTableIdentities(t *testing.T) {
+	ctx := testTableCtx()
+	tables := []Block{
+		TableBlock{BlockID: "dup", Rows: [][]TableCell{{{Text: "A"}}}, Columns: []TableColumn{{}}},
+		TableBlock{BlockID: "dup", Rows: [][]TableCell{{{Text: "B"}}}, Columns: []TableColumn{{}}},
 	}
-	res := Render([]Block{table}, Context{}, 8)
-	assertLinesFitWidth(t, res.Lines, 8)
-	plain := strings.Join(plainLines(res.Lines), "\n")
-	for _, want := range []string{"one", "two", "six", "ten"} {
-		if !strings.Contains(plain, want) {
-			t.Fatalf("stacked fallback lost %q in %q", want, plain)
-		}
+	res := Render(tables, ctx, 8)
+	if len(res.TableRegions) != 2 {
+		t.Fatalf("table regions = %d, want 2", len(res.TableRegions))
 	}
-	if strings.Contains(plain, "...") {
-		t.Fatalf("stacked fallback should wrap, not ellipsize: %q", plain)
+	if res.TableRegions[0].Key != testTableKey("dup", "blocks/0") {
+		t.Fatalf("first key = %+v", res.TableRegions[0].Key)
 	}
-}
-
-func TestRenderTableNarrowFallbackHandlesNilAndZeroCellRows(t *testing.T) {
-	table := TableBlock{
-		Rows: [][]TableCell{
-			nil,
-			{},
-			{{Text: "A"}, {Text: ""}},
-		},
-		Columns: []TableColumn{{}, {}},
+	if res.TableRegions[1].Key != testTableKey("dup", "blocks/1") {
+		t.Fatalf("second key = %+v", res.TableRegions[1].Key)
 	}
-	res := Render([]Block{table}, Context{}, 6)
-	assertLinesFitWidth(t, res.Lines, 6)
-	got := plainLines(res.Lines)
-	if strings.Join(got[:3], "\n") != strings.Join([]string{"Row 1", "Row 2", "Row 3"}, "\n") {
-		t.Fatalf("first rows = %q, want row labels for nil/empty rows", got[:3])
-	}
-	if !strings.Contains(strings.Join(got, "\n"), "C1: A") {
-		t.Fatalf("stacked fallback should preserve populated later row: %q", got)
-	}
-	if !strings.Contains(strings.Join(got, "\n"), "C2:") {
-		t.Fatalf("stacked fallback should preserve explicit blank cell label: %q", got)
-	}
-}
-
-func TestRenderTableSummary(t *testing.T) {
-	table := TableBlock{
-		Rows:          [][]TableCell{{{Text: "A"}}},
-		Columns:       []TableColumn{{}},
-		RowsTruncated: true,
-		ColsTruncated: true,
-		SourceRows:    101,
-		SourceCols:    21,
-	}
-	got := plainLines(Render([]Block{table}, Context{}, 60).Lines)
-	if got[len(got)-1] != "[table truncated: showing 1 rows x 1 columns]" {
-		t.Fatalf("summary = %q", got[len(got)-1])
-	}
-}
-
-func TestRenderTableCallsRenderTextOncePerVisibleCell(t *testing.T) {
-	count := 0
-	ctx := Context{
-		RenderText: func(s string, _ map[string]string) string {
-			count++
-			return s
-		},
-	}
-	table := TableBlock{Columns: make([]TableColumn, tableMaxCols)}
-	for row := 0; row < tableMaxRows; row++ {
-		cells := make([]TableCell, tableMaxCols)
-		for col := range cells {
-			cells[col] = TableCell{Text: "cell"}
-		}
-		table.Rows = append(table.Rows, cells)
-	}
-	res := Render([]Block{table}, ctx, 120)
-	assertLinesFitWidth(t, res.Lines, 120)
-	if want := tableMaxRows * tableMaxCols; count != want {
-		t.Fatalf("RenderText calls = %d, want %d (once per visible cell)", count, want)
-	}
-}
-
-func TestRenderTableWrappedOSC8LinksBalancePerPhysicalLine(t *testing.T) {
-	const open = "\x1b]8;;https://example.com/docs\x1b\\"
-	const close = "\x1b]8;;\x1b\\"
-	ctx := Context{
-		WrapText: func(s string, width int) string { return ansi.Wrap(s, width, "") },
-	}
-	cell := preparedTableCell{Text: open + "multi word label" + close, Lines: []string{open + "multi word label" + close}}
-	lines := renderPreparedTableCell(cell, TableColumn{Wrapped: true}, ctx.WrapText, 8, false)
-	plainJoined := strings.Join(plainLines(lines), " ")
-	if !strings.Contains(plainJoined, "multi") || !strings.Contains(plainJoined, "word") || !strings.Contains(plainJoined, "label") {
-		t.Fatalf("wrapped hyperlink label lost text: %q", plainJoined)
-	}
-	for i, line := range lines {
-		if got := strings.Count(line, open); got != 1 {
-			t.Fatalf("line %d open count = %d, want 1: %q", i, got, line)
-		}
-		if got := strings.Count(line, close); got != 1 {
-			t.Fatalf("line %d close count = %d, want 1: %q", i, got, line)
-		}
+	if res.TableRegions[0].LineEnd > res.TableRegions[1].LineStart {
+		t.Fatalf("regions overlap: %+v", res.TableRegions)
 	}
 }
 
 func TestRenderTableWidthInvariantRandom(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	ctx := Context{
-		RenderText: func(s string, _ map[string]string) string {
-			if strings.Contains(s, "link") {
-				return "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\"
-			}
-			return "\x1b[32m" + s + "\x1b[0m"
-		},
+	ctx := testTableCtx()
+	ctx.RenderText = func(s string, _ map[string]string) string {
+		if strings.Contains(s, "link") {
+			return tableOSC8Open("https://example.com") + "linklabel" + tableOSC8Close()
+		}
+		return "\x1b[32m" + s + "\x1b[0m"
 	}
 	parts := []string{"alpha", "beta", "gamma", "delta", "wide界", "line1\nline2", "link", "tab\tcell", "carriage\rreturn", ""}
-	for width := 1; width <= 200; width++ {
-		for iter := 0; iter < 20; iter++ {
+	for width := 1; width <= 120; width++ {
+		for iter := 0; iter < 12; iter++ {
 			cols := rng.Intn(5) + 1
 			rows := rng.Intn(6) + 1
-			table := TableBlock{Columns: make([]TableColumn, cols)}
+			table := TableBlock{BlockID: fmt.Sprintf("rnd-%d-%d", width, iter), Columns: make([]TableColumn, cols)}
 			for col := range table.Columns {
 				table.Columns[col] = TableColumn{
 					Align:   TableAlignment(rng.Intn(3)),

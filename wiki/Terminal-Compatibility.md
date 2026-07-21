@@ -18,7 +18,7 @@ something from the top of the list for the richest experience.
 
 Animated custom GIF emoji use the kitty graphics path too: kitty, Ghostty, and recent WezTerm animate them when `[animations].enabled = true` and emoji images are on. Half-block, sixel, tmux fallback, and image-off mode stay static/text-only.
 
-Block Kit tables use Unicode box-drawing characters in normal-width panes. When the message or thread pane gets too narrow to fit readable columns, slk automatically switches those tables to a stacked `Row N` / `C<N>:` layout instead of clipping or horizontally scrolling.
+Block Kit tables use Unicode box-drawing characters plus a bounded viewport frame when they overflow the current pane. Use `t` to enter TABLE mode, then `h/j/k/l`, `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`, and `Tab`/`Shift+Tab` to pan or switch tables.
 
 ## Inside tmux
 

@@ -147,8 +147,8 @@ func TestFixture_TableBlock(t *testing.T) {
 		width int
 		wants []string
 	}{
-		{width: 12, wants: []string{"Row 1", "C1:", "C2:", "C3:", "Healthy", "@alice"}},
-		{width: 42, wants: []string{"Service", "Status", "Owner", "API", "Healthy", "@alice", "runbook"}},
+		{width: 12, wants: []string{"Service", "API"}},
+		{width: 60, wants: []string{"Service", "Status", "Owner", "API", "Healthy", "@alice", "runbook"}},
 	} {
 		r := Render(blocks, ctx, tc.width)
 		plain := ansi.Strip(strings.Join(r.Lines, "\n"))
@@ -159,6 +159,38 @@ func TestFixture_TableBlock(t *testing.T) {
 		}
 		if strings.Contains(plain, "[unsupported block: table]") {
 			t.Fatalf("width=%d still rendered unsupported marker: %q", tc.width, plain)
+		}
+		if len(r.TableRegions) != 1 {
+			t.Fatalf("width=%d table regions = %d, want 1", tc.width, len(r.TableRegions))
+		}
+	}
+}
+
+func TestFixture_TableMixedCells(t *testing.T) {
+	p := loadFixture(t, "table_mixed_cells.json")
+	blocks := Parse(p.Blocks)
+	ctx := makeCtx()
+	ctx.MessageTS = testTableMessageTS
+	r := Render(blocks, ctx, 64)
+	plain := ansi.Strip(strings.Join(r.Lines, "\n"))
+	for _, want := range []string{"Metric", "Count", "Rate", "Errors", "42.5", "12.5%", "Builds", "7"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("missing %q in %q", want, plain)
+		}
+	}
+	if strings.Contains(plain, "[unsupported block: table]") {
+		t.Fatalf("still rendered unsupported marker: %q", plain)
+	}
+	if len(r.TableRegions) != 1 {
+		t.Fatalf("table regions = %d, want 1", len(r.TableRegions))
+	}
+	key := testTableKey("mixed-table", "blocks/0")
+	ctx.TableViewports = map[TableKey]TableViewportInput{key: {XOffset: 18, YOffset: 4}}
+	r = Render(blocks, ctx, 18)
+	plain = ansi.Strip(strings.Join(r.Lines, "\n"))
+	for _, want := range []string{"12.5%", "green"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("viewport missing %q in %q", want, plain)
 		}
 	}
 }

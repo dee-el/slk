@@ -3,6 +3,7 @@
 package blockkit
 
 import (
+	"fmt"
 	"image"
 	"strings"
 
@@ -21,12 +22,16 @@ const narrowBreakpoint = 60
 // content width. Width is the available content width AFTER the
 // caller has subtracted avatar gutter and border columns.
 func Render(blocks []Block, ctx Context, width int) RenderResult {
+	return renderBlocks(blocks, ctx, width, "blocks")
+}
+
+func renderBlocks(blocks []Block, ctx Context, width int, basePath string) RenderResult {
 	if len(blocks) == 0 || width <= 0 {
 		return RenderResult{}
 	}
 	var out RenderResult
-	for _, b := range blocks {
-		appendBlock(&out, b, ctx, width)
+	for i, b := range blocks {
+		appendBlock(&out, b, ctx, width, fmt.Sprintf("%s/%d", basePath, i))
 	}
 	out.Height = len(out.Lines)
 	return out
@@ -35,7 +40,7 @@ func Render(blocks []Block, ctx Context, width int) RenderResult {
 // appendBlock dispatches one block to its renderer and appends the
 // result onto out. Per-block renderers MUST produce lines that each
 // consume <= width display columns.
-func appendBlock(out *RenderResult, b Block, ctx Context, width int) {
+func appendBlock(out *RenderResult, b Block, ctx Context, width int, path string) {
 	switch v := b.(type) {
 	case DividerBlock:
 		out.Lines = append(out.Lines, renderDivider(width))
@@ -50,7 +55,7 @@ func appendBlock(out *RenderResult, b Block, ctx Context, width int) {
 	case ImageBlock:
 		appendImageBlock(out, v, ctx, width)
 	case TableBlock:
-		appendTable(out, v, ctx, width)
+		appendTable(out, v, ctx, width, path)
 	case RichTextBlock:
 		// rich_text content is rendered through Message.Text by the
 		// host (after RichTextToMrkdwn reconstructs the newline

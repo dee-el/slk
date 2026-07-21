@@ -35,7 +35,7 @@ func TestRenderThreadMessageAttachmentLinesFit(t *testing.T) {
 			{Kind: "file", Name: "specright_roi_-_final_data_-_704193", URL: "https://userevidence.slack.com/files/U05AZM7KJ1H/F0ATTEVCLUC/specright_roi_-_final_data_-_704193"},
 		},
 	}
-	got, _, _ := m.renderThreadMessage(msg, width, nil, nil, false)
+	got, _, _, _ := m.renderThreadMessage(msg, width, nil, nil, false)
 	if got == "" {
 		t.Fatal("renderThreadMessage returned empty output")
 	}
@@ -70,7 +70,7 @@ func TestRenderThreadMessageLegacyAttachmentBlocks(t *testing.T) {
 			},
 		}},
 	}
-	got, _, _ := m.renderThreadMessage(msg, width, nil, nil, false)
+	got, _, _, _ := m.renderThreadMessage(msg, width, nil, nil, false)
 	if !strings.Contains(got, "TRU-111 Customer Facing Blacklist Monitoring") {
 		t.Errorf("thread render missing legacy-attachment block content; got %q", got)
 	}
@@ -93,7 +93,7 @@ func TestRenderThreadMessageTopLevelBlocks(t *testing.T) {
 			blockkit.SectionBlock{Text: "Deploy finished: v1.2.3"},
 		},
 	}
-	got, _, _ := m.renderThreadMessage(msg, width, nil, nil, false)
+	got, _, _, _ := m.renderThreadMessage(msg, width, nil, nil, false)
 	if !strings.Contains(got, "Deploy finished: v1.2.3") {
 		t.Errorf("thread render missing top-level block content; got %q", got)
 	}

@@ -222,8 +222,267 @@ func TestViewRendersNarrowTableWithinActualThreadWidth(t *testing.T) {
 	if strings.Contains(plain, "[unsupported block: table]") {
 		t.Fatalf("thread view still rendered unsupported table marker:\n%s", plain)
 	}
-	if !strings.Contains(plain, "Row 1") || !strings.Contains(plain, "C1:") {
-		t.Fatalf("expected narrow stacked table in thread view, got:\n%s", plain)
+	for _, want := range []string{"servi"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("expected viewport table content %q in thread view, got:\n%s", want, plain)
+		}
+	}
+}
+
+func TestThreadTableModeSelectedReplyAndParentAccessibility(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{
+		TS:        "P1",
+		UserName:  "alice",
+		Timestamp: "1",
+		Blocks: []blockkit.Block{blockkit.TableBlock{
+			BlockID: "parent",
+			Rows:    [][]blockkit.TableCell{{{Text: "Parent"}, {Text: "Table"}}},
+			Columns: []blockkit.TableColumn{{}, {}},
+		}},
+	}
+	replies := []messages.MessageItem{{TS: "R1", UserName: "bob", Text: "plain"}}
+	m.SetThread(parent, replies, "C1", "P1")
+	m.View(18, 24)
+	if !m.ActivateTableMode() {
+		t.Fatal("ActivateTableMode should focus visible parent table")
+	}
+	region, ok := m.FocusedTableRegion()
+	if !ok || region.Key.MessageTS != "P1" || region.Key.Path != "blocks/0" {
+		t.Fatalf("focused parent table = %+v ok=%v", region, ok)
+	}
+	m.DeactivateTableMode()
+	replies[0].Blocks = []blockkit.Block{blockkit.TableBlock{
+		BlockID: "reply",
+		Rows:    [][]blockkit.TableCell{{{Text: "Reply"}, {Text: "Table"}}},
+		Columns: []blockkit.TableColumn{{}, {}},
+	}}
+	m.SetThread(parent, replies, "C1", "P1")
+	m.View(18, 24)
+	if !m.ActivateTableMode() {
+		t.Fatal("ActivateTableMode should focus selected reply table first")
+	}
+	region, ok = m.FocusedTableRegion()
+	if !ok || region.Key.MessageTS != "R1" || region.Key.Path != "blocks/0" {
+		t.Fatalf("focused reply table = %+v ok=%v", region, ok)
+	}
+}
+
+func TestThreadTableModePreservesOffsetsAndTargetsReply(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "P1", UserName: "alice", Text: "parent"}
+	reply := messages.MessageItem{
+		TS:        "R1",
+		UserName:  "bob",
+		Timestamp: "1",
+		Blocks: []blockkit.Block{blockkit.TableBlock{
+			BlockID: "reply",
+			Rows: [][]blockkit.TableCell{{
+				{Text: "Alpha"}, {Text: "Bravo"}, {Text: "Charlie"},
+			}},
+			Columns: []blockkit.TableColumn{{}, {}, {}},
+		}},
+	}
+	m.SetThread(parent, []messages.MessageItem{reply}, "C1", "P1")
+	m.View(12, 16)
+	if !m.ActivateTableMode() {
+		t.Fatal("ActivateTableMode should succeed")
+	}
+	region, ok := m.FocusedTableRegion()
+	if !ok || region.Key.MessageTS != "R1" || region.MaxX == 0 {
+		t.Fatalf("focused reply table = %+v ok=%v", region, ok)
+	}
+	h0 := m.cache[0].height
+	if !m.ScrollFocusedTable(region.MaxX, 0) {
+		t.Fatal("ScrollFocusedTable should stay active")
+	}
+	if len(m.staleReplies) != 1 {
+		t.Fatalf("stale replies = %v, want one source ts", m.staleReplies)
+	}
+	if _, ok := m.staleReplies["R1"]; !ok {
+		t.Fatalf("stale replies missing reply ts: %v", m.staleReplies)
+	}
+	m.View(12, 16)
+	region, _ = m.FocusedTableRegion()
+	if region.XOffset != region.MaxX {
+		t.Fatalf("reply table offset = %d, want %d", region.XOffset, region.MaxX)
+	}
+	if m.cache[0].height != h0 {
+		t.Fatalf("reply entry height changed after table scroll: %d -> %d", h0, m.cache[0].height)
+	}
+	if m.selected != 0 {
+		t.Fatalf("table mode should not move outer reply selection, got %d", m.selected)
+	}
+}
+
+func TestThreadTableModeSourceDriftAndParentPersistence(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "P1", UserName: "alice", Text: "parent"}
+	replies := []messages.MessageItem{{TS: "R1", UserName: "bob", Blocks: []blockkit.Block{blockkit.TableBlock{BlockID: "reply", Rows: [][]blockkit.TableCell{{{Text: "Reply"}}}, Columns: []blockkit.TableColumn{{}}}}}}
+	m.SetThread(parent, replies, "C1", "P1")
+	m.View(18, 24)
+	if !m.ActivateTableMode() {
+		t.Fatal("ActivateTableMode should focus reply table")
+	}
+	m.AddReply(messages.MessageItem{TS: "R2", UserName: "carol", Text: "later"})
+	if m.TableModeActive() || !tableKeyZero(m.focusedTable) {
+		t.Fatalf("reply source drift should deactivate table mode, focused=%+v", m.focusedTable)
+	}
+
+	parent = messages.MessageItem{TS: "P1", UserName: "alice", Blocks: []blockkit.Block{blockkit.TableBlock{BlockID: "parent", Rows: [][]blockkit.TableCell{{{Text: "Parent"}}}, Columns: []blockkit.TableColumn{{}}}}}
+	m.SetThread(parent, []messages.MessageItem{{TS: "R1", UserName: "bob", Text: "plain"}}, "C1", "P1")
+	m.View(18, 24)
+	if !m.ActivateTableMode() {
+		t.Fatal("ActivateTableMode should focus parent table")
+	}
+	m.AddReply(messages.MessageItem{TS: "R3", UserName: "dave", Text: "new"})
+	if !m.TableModeActive() {
+		t.Fatal("parent table should remain active across reply append")
+	}
+	region, _ := m.FocusedTableRegion()
+	if region.Key.MessageTS != "P1" {
+		t.Fatalf("parent table focus lost: %+v", region)
+	}
+}
+
+func TestThreadFocusNextTableStaysWithinSameSource(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "P1", UserName: "alice", Text: "parent"}
+	replies := []messages.MessageItem{
+		{TS: "R1", UserName: "bob", Blocks: []blockkit.Block{blockkit.TableBlock{BlockID: "r1a", Rows: [][]blockkit.TableCell{{{Text: "A"}}}, Columns: []blockkit.TableColumn{{}}}, blockkit.TableBlock{BlockID: "r1b", Rows: [][]blockkit.TableCell{{{Text: "B"}}}, Columns: []blockkit.TableColumn{{}}}}},
+		{TS: "R2", UserName: "carol", Blocks: []blockkit.Block{blockkit.TableBlock{BlockID: "r2a", Rows: [][]blockkit.TableCell{{{Text: "C"}}}, Columns: []blockkit.TableColumn{{}}}}},
+	}
+	m.SetThread(parent, replies, "C1", "P1")
+	m.SelectByIndex(0)
+	m.View(18, 24)
+	if !m.ActivateTableMode() {
+		t.Fatal("ActivateTableMode should focus selected reply table")
+	}
+	if !m.FocusNextTable() {
+		t.Fatal("FocusNextTable should succeed")
+	}
+	region, _ := m.FocusedTableRegion()
+	if region.Key.MessageTS != "R1" || region.Key.Path != "blocks/1" {
+		t.Fatalf("cycle crossed reply boundary: %+v", region)
+	}
+	if !m.FocusNextTable() {
+		t.Fatal("FocusNextTable should wrap within source reply")
+	}
+	region, _ = m.FocusedTableRegion()
+	if region.Key.MessageTS != "R1" || region.Key.Path != "blocks/0" {
+		t.Fatalf("cycle wrap wrong: %+v", region)
+	}
+}
+
+func TestThreadTableBlockIDRemapAndPrune(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "P1", UserName: "alice", Text: "parent"}
+	reply := messages.MessageItem{TS: "R1", UserName: "bob", Blocks: []blockkit.Block{
+		blockkit.TableBlock{BlockID: "left", Rows: [][]blockkit.TableCell{{{Text: "A"}, {Text: "B"}, {Text: "C"}}}, Columns: []blockkit.TableColumn{{}, {}, {}}},
+		blockkit.TableBlock{BlockID: "right", Rows: [][]blockkit.TableCell{{{Text: "D"}}}, Columns: []blockkit.TableColumn{{}}},
+	}}
+	m.SetThread(parent, []messages.MessageItem{reply}, "C1", "P1")
+	m.View(12, 12)
+	if !m.ActivateTableMode() {
+		t.Fatal("ActivateTableMode should succeed")
+	}
+	if !m.ScrollFocusedTable(2, 0) {
+		t.Fatal("ScrollFocusedTable should succeed")
+	}
+	m.View(12, 12)
+	reply.Blocks = []blockkit.Block{
+		blockkit.TableBlock{BlockID: "right", Rows: [][]blockkit.TableCell{{{Text: "D"}}}, Columns: []blockkit.TableColumn{{}}},
+		blockkit.TableBlock{BlockID: "left", Rows: [][]blockkit.TableCell{{{Text: "A"}, {Text: "B"}, {Text: "C"}}}, Columns: []blockkit.TableColumn{{}, {}, {}}},
+	}
+	m.SetThread(parent, []messages.MessageItem{reply}, "C1", "P1")
+	m.View(12, 12)
+	region, ok := m.FocusedTableRegion()
+	if !ok || region.Key.Path != "blocks/1" || region.XOffset != 2 {
+		t.Fatalf("unique reply blockID remap failed: %+v ok=%v", region, ok)
+	}
+	if _, ok := m.tableViewports[blockkit.TableKey{MessageTS: "R1", Path: "blocks/0", BlockID: "left"}]; ok {
+		t.Fatal("old reply path state should be pruned after remap")
+	}
+	m.RemoveMessageByTS("R1")
+	if len(m.tableViewports) != 0 || !tableKeyZero(m.focusedTable) {
+		t.Fatalf("removed reply should prune table state, map=%v focused=%+v", m.tableViewports, m.focusedTable)
+	}
+}
+
+func TestThreadTableBlockIDAmbiguousOrEmptyDoesNotRemap(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "P1", UserName: "alice", Text: "parent"}
+	reply := messages.MessageItem{TS: "R1", UserName: "bob", Blocks: []blockkit.Block{
+		blockkit.TableBlock{BlockID: "dup", Rows: [][]blockkit.TableCell{{{Text: "A"}}}, Columns: []blockkit.TableColumn{{}}},
+		blockkit.TableBlock{BlockID: "dup", Rows: [][]blockkit.TableCell{{{Text: "B"}}}, Columns: []blockkit.TableColumn{{}}},
+	}}
+	m.SetThread(parent, []messages.MessageItem{reply}, "C1", "P1")
+	m.View(12, 20)
+	if !m.ActivateTableMode() {
+		t.Fatal("ActivateTableMode should succeed")
+	}
+	reply.Blocks = []blockkit.Block{
+		blockkit.TableBlock{BlockID: "dup", Rows: [][]blockkit.TableCell{{{Text: "B"}}}, Columns: []blockkit.TableColumn{{}}},
+		blockkit.TableBlock{BlockID: "dup", Rows: [][]blockkit.TableCell{{{Text: "A"}}}, Columns: []blockkit.TableColumn{{}}},
+	}
+	m.SetThread(parent, []messages.MessageItem{reply}, "C1", "P1")
+	m.View(12, 20)
+	if m.TableModeActive() || !tableKeyZero(m.focusedTable) {
+		t.Fatalf("duplicate reply block IDs should clear focus, focused=%+v", m.focusedTable)
+	}
+
+	reply.Blocks = []blockkit.Block{
+		blockkit.TableBlock{Rows: [][]blockkit.TableCell{{{Text: "A"}}}, Columns: []blockkit.TableColumn{{}}},
+		blockkit.TableBlock{Rows: [][]blockkit.TableCell{{{Text: "B"}}}, Columns: []blockkit.TableColumn{{}}},
+	}
+	m.SetThread(parent, []messages.MessageItem{reply}, "C1", "P1")
+	m.View(12, 20)
+	if !m.ActivateTableMode() {
+		t.Fatal("ActivateTableMode should succeed")
+	}
+	reply.Blocks = []blockkit.Block{
+		blockkit.TableBlock{Rows: [][]blockkit.TableCell{{{Text: "B"}}}, Columns: []blockkit.TableColumn{{}}},
+		blockkit.TableBlock{Rows: [][]blockkit.TableCell{{{Text: "A"}}}, Columns: []blockkit.TableColumn{{}}},
+	}
+	m.SetThread(parent, []messages.MessageItem{reply}, "C1", "P1")
+	m.View(12, 20)
+	if m.TableModeActive() || !tableKeyZero(m.focusedTable) {
+		t.Fatalf("empty reply block IDs should clear focus, focused=%+v", m.focusedTable)
+	}
+}
+
+func TestThreadHeightChangeWithoutTablesSkipsReplyCacheRebuildAndClearsStale(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "P1", UserName: "alice", Text: "parent"}
+	replies := []messages.MessageItem{{TS: "R1", UserName: "bob", Text: "plain"}}
+	m.SetThread(parent, replies, "C1", "P1")
+	m.View(10, 20)
+	if m.cacheHasTables {
+		t.Fatal("plain thread should not mark cacheHasTables")
+	}
+	oldTableH := m.cacheTableH
+	m.View(30, 20)
+	if m.cacheTableH != oldTableH {
+		t.Fatalf("height-only view without tables should not rebuild cache: old=%d new=%d", oldTableH, m.cacheTableH)
+	}
+	m.staleReplies = map[string]struct{}{"R1": {}}
+	m.View(30, 25)
+	if len(m.staleReplies) != 0 {
+		t.Fatalf("partial/full rebuild should clear staleReplies, got %v", m.staleReplies)
+	}
+}
+
+func TestThreadReconcileTableStateAfterRenderFastPathNoTables(t *testing.T) {
+	m := New()
+	m.cacheHasTables = true
+	m.cache = []viewEntry{{tableRegions: []blockkit.TableRegion{{Key: blockkit.TableKey{MessageTS: "R1", Path: "blocks/0", BlockID: "x"}}}}}
+	allocs := testing.AllocsPerRun(1000, func() {
+		if m.reconcileTableStateAfterRender() {
+			panic("unexpected change")
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("fast path allocs = %v, want 0", allocs)
 	}
 }
 

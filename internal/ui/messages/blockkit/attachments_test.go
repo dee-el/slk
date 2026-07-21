@@ -181,6 +181,7 @@ func TestRenderLegacyImageURLFallbackWhenNoFetcher(t *testing.T) {
 // nothing.
 func TestRenderLegacyRendersNestedBlocks(t *testing.T) {
 	ctx := Context{
+		MessageTS:  testTableMessageTS,
 		RenderText: func(s string, _ map[string]string) string { return s },
 		WrapText:   func(s string, _ int) string { return s },
 	}
@@ -205,5 +206,32 @@ func TestRenderLegacyRendersNestedBlocks(t *testing.T) {
 		if !strings.HasPrefix(ansi.Strip(line), "█") {
 			t.Errorf("line %d missing stripe prefix: %q", i, ansi.Strip(line))
 		}
+	}
+}
+
+func TestRenderLegacyTranslatesNestedTableRegions(t *testing.T) {
+	ctx := Context{
+		MessageTS:  testTableMessageTS,
+		RenderText: func(s string, _ map[string]string) string { return s },
+		WrapText: func(s string, width int) string {
+			return ansi.Wrap(s, width, "")
+		},
+	}
+	r := RenderLegacy([]LegacyAttachment{
+		{Title: "first", Text: "plain"},
+		{Blocks: []Block{TableBlock{BlockID: "tbl", Rows: [][]TableCell{{{Text: "Alpha"}, {Text: "Bravo"}, {Text: "Charlie"}}}, Columns: []TableColumn{{}, {}, {}}}}},
+	}, ctx, 16)
+	if len(r.TableRegions) != 1 {
+		t.Fatalf("table regions = %d, want 1", len(r.TableRegions))
+	}
+	region := r.TableRegions[0]
+	if region.Key != testTableKey("tbl", "legacy/1/blocks/0") {
+		t.Fatalf("key = %+v", region.Key)
+	}
+	if region.LineStart < 2 || region.LineEnd <= region.LineStart {
+		t.Fatalf("line range = %d:%d", region.LineStart, region.LineEnd)
+	}
+	if !strings.HasPrefix(ansi.Strip(r.Lines[region.LineStart]), "█") {
+		t.Fatalf("translated table row missing stripe prefix: %q", ansi.Strip(r.Lines[region.LineStart]))
 	}
 }

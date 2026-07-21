@@ -591,6 +591,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		reduceIO,
 		reduceMouse,
 	); handled {
+		a.syncTableMode()
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -636,6 +637,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
+		a.syncTableMode()
 		return a, nil
 
 	case scrollFlushMsg:
@@ -654,6 +656,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// reducers; see the dispatch chain at the top of Update and the
 		// per-family reducer_*.go files / controller Handle methods.
 	}
+	a.syncTableMode()
 
 	return a, tea.Batch(cmds...)
 }
@@ -1535,6 +1538,10 @@ func (a *App) SetMode(mode Mode) {
 	if a.mode == ModeCommand && mode != ModeCommand {
 		a.cmdline = ""
 		a.statusbar.SetCommandLine("")
+	}
+	if a.mode == ModeTable && mode != ModeTable {
+		a.messagepane.DeactivateTableMode()
+		a.threadPanel.DeactivateTableMode()
 	}
 	a.mode = mode
 	a.statusbar.SetMode(mode)

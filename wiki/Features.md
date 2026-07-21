@@ -6,7 +6,7 @@
 - Edit your own messages (`E`) — reuses the compose box with stash/restore for any in-progress draft
 - Delete your own messages (`D`) — centered confirmation overlay with message preview
 - Slack markdown rendering (bold, italic, strikethrough, code, blockquotes, links, mentions)
-- Block Kit tables render as adaptive Unicode grids, with stacked row/cell fallback when pane width gets too narrow
+- Block Kit tables render as Unicode grids with bounded horizontal/vertical viewports; press `t` to enter TABLE mode, then use `h/j/k/l`, `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`, and `Tab`/`Shift+Tab` to pan and switch tables
 - Emoji shortcodes (`:rocket:` → 🚀)
 - Day separators (Today, Yesterday, Monday, full date)
 - Infinite scroll backfill into SQLite cache

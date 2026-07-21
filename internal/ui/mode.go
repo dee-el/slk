@@ -21,6 +21,7 @@ const (
 	ModeLinkPicker
 	ModeWorkspaceSearch
 	ModeAttachmentPicker
+	ModeTable
 )
 
 // IsModalOverlay reports whether the mode is a full-screen modal
@@ -88,6 +89,8 @@ func (m Mode) String() string {
 		return "WS-SEARCH"
 	case ModeAttachmentPicker:
 		return "ATTACH"
+	case ModeTable:
+		return "TABLE"
 	default:
 		return "UNKNOWN"
 	}

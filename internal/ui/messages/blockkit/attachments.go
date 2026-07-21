@@ -10,6 +10,7 @@
 package blockkit
 
 import (
+	"fmt"
 	"time"
 
 	"charm.land/lipgloss/v2"
@@ -42,7 +43,7 @@ func RenderLegacy(atts []LegacyAttachment, ctx Context, width int) RenderResult 
 		if i > 0 {
 			out.Lines = append(out.Lines, "")
 		}
-		appendLegacyAttachment(&out, a, ctx, width)
+		appendLegacyAttachment(&out, a, ctx, width, i)
 		if ctx.Perf != nil {
 			ctx.Perf.attachmentCount++
 		}
@@ -55,7 +56,7 @@ func RenderLegacy(atts []LegacyAttachment, ctx Context, width int) RenderResult 
 // Pretext is rendered above the stripe, full width; title, text,
 // and footer are rendered to the right of the colored stripe at
 // width - stripeCol.
-func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, width int) {
+func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, width int, attachmentIdx int) {
 	perf := ctx.Perf // local alias; nil disables timing
 	// Pretext renders ABOVE the stripe, full width, no indent.
 	if a.Pretext != "" {
@@ -140,7 +141,7 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 		if perf != nil {
 			t0 = time.Now()
 		}
-		nested = Render(a.Blocks, ctx, contentW)
+		nested = renderBlocks(a.Blocks, ctx, contentW, fmt.Sprintf("legacy/%d/blocks", attachmentIdx))
 		nestedRowStartInBody = len(body)
 		body = append(body, nested.Lines...)
 		if nested.Interactive {
@@ -259,6 +260,11 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 			h.ColStart += stripeCol
 			h.ColEnd += stripeCol
 			out.Hits = append(out.Hits, h)
+		}
+		for _, region := range nested.TableRegions {
+			region.LineStart += rowOffset
+			region.LineEnd += rowOffset
+			out.TableRegions = append(out.TableRegions, region)
 		}
 	}
 }

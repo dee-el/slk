@@ -192,8 +192,10 @@ func TestRenderMessagePlainNarrowTableUsesActualBlockWidth(t *testing.T) {
 	if strings.Contains(plain, "[unsupported block: table]") {
 		t.Fatalf("table block still rendered as unsupported marker: %q", plain)
 	}
-	if !strings.Contains(plain, "Row 1") || !strings.Contains(plain, "C1:") {
-		t.Fatalf("expected narrow stacked table in cache output, got %q", plain)
+	for _, want := range []string{"servi"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("expected viewport table content %q in cache output, got %q", want, plain)
+		}
 	}
 }
 

@@ -60,6 +60,12 @@ type KeyMap struct {
 	WinCycle            key.Binding
 	WinClose            key.Binding
 	WinOnly             key.Binding
+	FocusTable          key.Binding
+	TableMove           key.Binding
+	TablePage           key.Binding
+	TableHalfPage       key.Binding
+	TableCycle          key.Binding
+	TableExit           key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
@@ -121,12 +127,18 @@ func DefaultKeyMap() KeyMap {
 		// binding; the Win* entries are keyless help-only bindings
 		// (same trick as WorkspaceFinder above) — actual dispatch of
 		// the chord key happens in handleWindowChord.
-		WindowPrefix: key.NewBinding(key.WithKeys("ctrl+w"), key.WithHelp("ctrl+w", "window commands")),
-		WinSplit:     key.NewBinding(key.WithHelp("ctrl+w s / :sp", "split window")),
-		WinVSplit:    key.NewBinding(key.WithHelp("ctrl+w v / :vsp", "vertical split window")),
-		WinNavigate:  key.NewBinding(key.WithHelp("ctrl+w h/j/k/l", "focus window in direction")),
-		WinCycle:     key.NewBinding(key.WithHelp("ctrl+w w", "cycle windows")),
-		WinClose:     key.NewBinding(key.WithHelp("ctrl+w q / :q", "close window")),
-		WinOnly:      key.NewBinding(key.WithHelp("ctrl+w o / :only", "close other windows")),
+		WindowPrefix:  key.NewBinding(key.WithKeys("ctrl+w"), key.WithHelp("ctrl+w", "window commands")),
+		WinSplit:      key.NewBinding(key.WithHelp("ctrl+w s / :sp", "split window")),
+		WinVSplit:     key.NewBinding(key.WithHelp("ctrl+w v / :vsp", "vertical split window")),
+		WinNavigate:   key.NewBinding(key.WithHelp("ctrl+w h/j/k/l", "focus window in direction")),
+		WinCycle:      key.NewBinding(key.WithHelp("ctrl+w w", "cycle windows")),
+		WinClose:      key.NewBinding(key.WithHelp("ctrl+w q / :q", "close window")),
+		WinOnly:       key.NewBinding(key.WithHelp("ctrl+w o / :only", "close other windows")),
+		FocusTable:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "focus table")),
+		TableMove:     key.NewBinding(key.WithHelp("TABLE h/j/k/l", "pan table")),
+		TablePage:     key.NewBinding(key.WithHelp("TABLE PgUp/PgDn", "page table")),
+		TableHalfPage: key.NewBinding(key.WithHelp("TABLE ctrl+u/d", "half-page table")),
+		TableCycle:    key.NewBinding(key.WithHelp("TABLE Tab/shift+tab", "next/prev table")),
+		TableExit:     key.NewBinding(key.WithHelp("TABLE esc/q", "exit table mode")),
 	}
 }

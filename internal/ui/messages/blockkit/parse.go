@@ -1,6 +1,8 @@
 package blockkit
 
 import (
+	"strconv"
+
 	"github.com/slack-go/slack"
 )
 
@@ -97,6 +99,7 @@ func parseActions(a *slack.ActionBlock) ActionsBlock {
 
 func parseTable(t *slack.TableBlock) TableBlock {
 	out := TableBlock{
+		BlockID:    t.BlockID,
 		SourceRows: len(t.Rows),
 	}
 
@@ -148,11 +151,31 @@ func parseTable(t *slack.TableBlock) TableBlock {
 	return out
 }
 
-func parseTableCell(cell *slack.RichTextBlock) TableCell {
-	if cell == nil {
+func parseTableCell(cell slack.TableCell) TableCell {
+	switch v := cell.(type) {
+	case nil:
+		return TableCell{}
+	case *slack.TableRichTextCell:
+		if v == nil {
+			return TableCell{}
+		}
+		return TableCell{Text: RichTextToMrkdwn(RichTextBlock{Elements: v.Elements})}
+	case *slack.TableRawTextCell:
+		if v == nil {
+			return TableCell{}
+		}
+		return TableCell{Text: v.Text}
+	case *slack.TableRawNumberCell:
+		if v == nil {
+			return TableCell{}
+		}
+		if v.Text != "" {
+			return TableCell{Text: v.Text}
+		}
+		return TableCell{Text: strconv.FormatFloat(v.Value, 'f', -1, 64)}
+	default:
 		return TableCell{}
 	}
-	return TableCell{Text: RichTextToMrkdwn(RichTextBlock{Elements: cell.Elements})}
 }
 
 func parseTableColumn(setting slack.ColumnSetting) TableColumn {

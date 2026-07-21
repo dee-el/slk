@@ -127,6 +127,7 @@ func (RichTextBlock) blockType() string { return "rich_text" }
 // slack-go-free model. Each cell stores reconstructed mrkdwn so the
 // renderer can reuse the host's existing RenderText pipeline.
 type TableBlock struct {
+	BlockID       string
 	Rows          [][]TableCell
 	Columns       []TableColumn
 	RowsTruncated bool
@@ -136,6 +137,45 @@ type TableBlock struct {
 }
 
 func (TableBlock) blockType() string { return "table" }
+
+// TableKey is stable identity for one rendered table instance inside a
+// message. Path is structural and does not depend on render width:
+// top-level tables use blocks/N and nested legacy tables use
+// legacy/N/blocks/N.
+type TableKey struct {
+	MessageTS string
+	Path      string
+	BlockID   string
+}
+
+// TableViewportInput lets callers request a bounded viewport for a
+// specific table key. Zero values mean top-left origin and no explicit
+// height cap; Focused is surfaced back in TableRegion for later UI use.
+type TableViewportInput struct {
+	XOffset   int
+	YOffset   int
+	MaxHeight int
+	Focused   bool
+}
+
+// TableRegion describes one rendered table's visible footprint and full
+// scrollable canvas dimensions within a RenderResult.
+type TableRegion struct {
+	Key                   TableKey
+	LineStart             int
+	LineEnd               int
+	XOffset               int
+	YOffset               int
+	ViewWidth             int
+	ViewHeight            int
+	FullWidth             int
+	FullHeight            int
+	MaxX                  int
+	MaxY                  int
+	Focused               bool
+	ContentTruncated      bool
+	ContentTruncatedCells int
+}
 
 // TableCell is one table cell's reconstructed Slack mrkdwn.
 type TableCell struct {
@@ -229,12 +269,13 @@ type LegacyField struct {
 // internal/ui/messages/model.go so callers can aggregate results
 // across passes uniformly.
 type RenderResult struct {
-	Lines       []string                // ANSI-styled, ready to join with "\n"
-	Flushes     []func(io.Writer) error // kitty image upload callbacks
-	SixelRows   map[int]SixelEntry      // sixel sentinel rows keyed by row index into Lines (same coord system as HitRect.RowStart)
-	Height      int                     // == len(Lines); cached for caller's row math
-	Hits        []HitRect               // clickable image footprints
-	Interactive bool                    // any interactive element rendered
+	Lines        []string                // ANSI-styled, ready to join with "\n"
+	Flushes      []func(io.Writer) error // kitty image upload callbacks
+	SixelRows    map[int]SixelEntry      // sixel sentinel rows keyed by row index into Lines (same coord system as HitRect.RowStart)
+	Height       int                     // == len(Lines); cached for caller's row math
+	Hits         []HitRect               // clickable image footprints
+	TableRegions []TableRegion           // rendered table viewport metadata keyed by stable structural path
+	Interactive  bool                    // any interactive element rendered
 }
 
 // SixelEntry is one sixel image's pre-encoded bytes plus its
@@ -301,6 +342,13 @@ type Context struct {
 	// (stripe prefix, width measurement, truncation). Nil disables
 	// every call site's timing.
 	Perf *LegacyPerf
+	// TableMaxHeight is the default visible height budget applied to every
+	// rendered table when a per-key TableViewportInput does not override it.
+	TableMaxHeight int
+	// TableViewports lets the caller request per-table viewport offsets.
+	// Nil or missing keys default to zero offsets and no explicit height
+	// cap. Keys come from RenderResult.TableRegions.
+	TableViewports map[TableKey]TableViewportInput
 }
 
 // LegacyPerf accumulates per-sub-lane wall-clock for the legacy

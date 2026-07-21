@@ -238,11 +238,17 @@ func TestLoadCachedMessagesRestoresTableBlocks(t *testing.T) {
 				WithColumnSettings(
 					slack.ColumnSetting{Align: slack.ColumnAlignmentRight},
 					slack.ColumnSetting{Align: slack.ColumnAlignmentCenter, IsWrapped: true},
+					slack.ColumnSetting{Align: slack.ColumnAlignmentLeft},
 				).
 				AddRow(
-					slack.NewRichTextBlock("", slack.NewRichTextSection(slack.NewRichTextSectionTextElement("Service", nil))),
-					slack.NewRichTextBlock("", slack.NewRichTextSection(slack.NewRichTextSectionTextElement("owner", nil))),
-				)}},
+					slack.NewTableRichTextCell(slack.NewRichTextSection(slack.NewRichTextSectionTextElement("Service", &slack.RichTextSectionTextStyle{Bold: true}))),
+					slack.NewTableRichTextCell(slack.NewRichTextSection(slack.NewRichTextSectionTextElement("Count", &slack.RichTextSectionTextStyle{Bold: true}))),
+					slack.NewTableRichTextCell(slack.NewRichTextSection(slack.NewRichTextSectionTextElement("Rate", &slack.RichTextSectionTextStyle{Bold: true}))),
+				).AddRow(
+				slack.NewTableRawTextCell("Builds"),
+				slack.NewTableRawNumberCell(42.5),
+				slack.NewTableRawNumberCell(0.125).WithText("12.5%"),
+			)}},
 		},
 	}
 	rawBytes, err := json.Marshal(upstream)
@@ -269,10 +275,16 @@ func TestLoadCachedMessagesRestoresTableBlocks(t *testing.T) {
 	if !ok {
 		t.Fatalf("block type = %T, want blockkit.TableBlock", got[0].Blocks[0])
 	}
-	if len(table.Rows) != 1 || len(table.Rows[0]) != 2 {
+	if table.BlockID != "tbl" {
+		t.Fatalf("BlockID = %q, want %q", table.BlockID, "tbl")
+	}
+	if len(table.Rows) != 2 || len(table.Rows[0]) != 3 || len(table.Rows[1]) != 3 {
 		t.Fatalf("rows = %#v", table.Rows)
 	}
-	if table.Rows[0][0].Text != "Service" || table.Rows[0][1].Text != "owner" {
+	if table.Rows[0][0].Text != "*Service*" || table.Rows[0][1].Text != "*Count*" || table.Rows[0][2].Text != "*Rate*" {
+		t.Fatalf("header rows = %#v", table.Rows[0])
+	}
+	if table.Rows[1][0].Text != "Builds" || table.Rows[1][1].Text != "42.5" || table.Rows[1][2].Text != "12.5%" {
 		t.Fatalf("table rows = %#v", table.Rows)
 	}
 	if table.Columns[0].Align != blockkit.TableAlignRight || table.Columns[0].Wrapped {
@@ -280,5 +292,8 @@ func TestLoadCachedMessagesRestoresTableBlocks(t *testing.T) {
 	}
 	if table.Columns[1].Align != blockkit.TableAlignCenter || !table.Columns[1].Wrapped {
 		t.Fatalf("column[1] = %+v", table.Columns[1])
+	}
+	if table.Columns[2].Align != blockkit.TableAlignLeft || table.Columns[2].Wrapped {
+		t.Fatalf("column[2] = %+v", table.Columns[2])
 	}
 }

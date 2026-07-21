@@ -60,6 +60,11 @@ type viewEntry struct {
 	// Model.lastReactionHits per frame so the app-level mouse handler
 	// can route clicks to a toggle-reaction command.
 	reactionHits []reactionEntryHit
+
+	// tableRegions records rendered Block Kit table viewports in entry-
+	// relative coordinates. View() translates visible regions into
+	// pane-local coordinates for table mode.
+	tableRegions []blockkit.TableRegion
 }
 
 // reactionEntryHit is one reaction-pill hit-rect, expressed in
@@ -108,9 +113,12 @@ type Model struct {
 	// Render cache -- pre-rendered reply entries (unbordered content
 	// captured per reply; borders are applied later when assembling
 	// viewContent).
-	cache         []viewEntry
-	cacheWidth    int
-	cacheReplyLen int
+	cache          []viewEntry
+	cacheWidth     int
+	cacheReplyLen  int
+	cacheTableH    int
+	cacheHasTables bool
+	staleReplies   map[string]struct{}
 
 	// entryOffsets / totalLines mirror the FULLY BORDERED viewContent:
 	// entryOffsets[i] is the absolute line index inside viewContent where
@@ -165,8 +173,9 @@ type Model struct {
 	// Parent-message animation state. The thread parent is rendered outside the
 	// per-reply cache, so its kitty flush callbacks and block height need their
 	// own memo for cache-hit frames and viewport-scoped animation restarts.
-	parentFlushes     []func(io.Writer) error
-	parentBlockHeight int
+	parentFlushes      []func(io.Writer) error
+	parentBlockHeight  int
+	parentTableRegions []blockkit.TableRegion
 
 	// lastReactionHits holds the reaction-pill hit rects captured
 	// during the most recent View() call, in pane-local coordinates
@@ -174,6 +183,7 @@ type Model struct {
 	// rows). Consumed by HitTestReaction so the app-level mouse
 	// handler can toggle a reaction when the user clicks a pill.
 	lastReactionHits []reactionHitRect
+	lastTableRegions []blockkit.TableRegion
 
 	// unreadBoundaryTS is the Slack timestamp the user has already read up
 	// to in this thread. Replies whose TS > unreadBoundaryTS are considered
@@ -189,6 +199,10 @@ type Model struct {
 	// across renders -- mirrors the same convention used by messages.Model.
 	snappedSelection int
 	hasSnapped       bool
+
+	tableMaxHeight int
+	tableViewports map[blockkit.TableKey]blockkit.TableViewportInput
+	focusedTable   blockkit.TableKey
 
 	// version increments on every state change that could alter View() output.
 	version int64
@@ -253,7 +267,8 @@ func (m *Model) FlushVisibleKitty(replyAreaHeight int) {
 // New creates an empty thread panel.
 func New() *Model {
 	return &Model{
-		imgRenderer: imgrender.NewRenderer(),
+		imgRenderer:    imgrender.NewRenderer(),
+		tableMaxHeight: blockkit.DefaultTableMaxHeight(0),
 	}
 }
 
@@ -337,10 +352,15 @@ func (m *Model) HandleAvatarReady(userID string) {
 func (m *Model) SetThread(parent messages.MessageItem, replies []messages.MessageItem, channelID, threadTS string) {
 	if channelID != m.channelID || threadTS != m.threadTS {
 		m.unreadBoundaryTS = ""
+		m.focusedTable = blockkit.TableKey{}
+		m.tableViewports = nil
+		m.staleReplies = nil
 	}
 	m.ClearSelection()
 	m.parent = parent
 	m.replies = replies
+	m.pruneTableStateForReplies()
+	m.pruneAmbiguousTableStateForMessages()
 	m.channelID = channelID
 	m.threadTS = threadTS
 	// Per the doc comment, the cursor starts at the bottom (newest reply)
@@ -351,6 +371,7 @@ func (m *Model) SetThread(parent messages.MessageItem, replies []messages.Messag
 	} else {
 		m.selected = 0
 	}
+	m.deactivateTableModeIfSourceMismatch()
 	// Force the next View() to re-snap the viewport to the new selection.
 	// Without this, opening a thread whose newest-reply index matches the
 	// previously-viewed thread's snapped selection skips the snap and leaves
@@ -396,6 +417,7 @@ func (m *Model) AddReply(msg messages.MessageItem) {
 	m.replies = append(m.replies, msg)
 	m.InvalidateCache()
 	m.selected = len(m.replies) - 1
+	m.deactivateTableModeIfSourceMismatch()
 }
 
 // SwapLocalSentReply replaces an optimistic placeholder identified
@@ -410,6 +432,7 @@ func (m *Model) SwapLocalSentReply(localTS string, msg messages.MessageItem) boo
 	}
 	for i := len(m.replies) - 1; i >= 0; i-- {
 		if m.replies[i].TS == localTS {
+			m.pruneTableStateForReplies()
 			m.replies[i] = msg
 			m.InvalidateCache()
 			return true
@@ -428,6 +451,7 @@ func (m *Model) RemoveLocalSentReply(localTS string) bool {
 	}
 	for i := len(m.replies) - 1; i >= 0; i-- {
 		if m.replies[i].TS == localTS {
+			m.pruneTableStateForReplies()
 			m.replies = append(m.replies[:i], m.replies[i+1:]...)
 			m.InvalidateCache()
 			if m.selected >= len(m.replies) && len(m.replies) > 0 {
@@ -452,6 +476,7 @@ func (m *Model) UpsertSelfSentReply(msg messages.MessageItem) {
 	if msg.TS != "" {
 		for i := len(m.replies) - 1; i >= 0; i-- {
 			if m.replies[i].TS == msg.TS {
+				m.pruneTableStateForReplies()
 				m.replies[i] = msg
 				m.InvalidateCache()
 				return
@@ -461,6 +486,7 @@ func (m *Model) UpsertSelfSentReply(msg messages.MessageItem) {
 	m.replies = append(m.replies, msg)
 	m.InvalidateCache()
 	m.selected = len(m.replies) - 1
+	m.deactivateTableModeIfSourceMismatch()
 }
 
 // Clear resets all thread state.
@@ -471,6 +497,9 @@ func (m *Model) Clear() {
 	m.channelID = ""
 	m.threadTS = ""
 	m.selected = 0
+	m.focusedTable = blockkit.TableKey{}
+	m.tableViewports = nil
+	m.staleReplies = nil
 	m.InvalidateCache()
 }
 
@@ -575,6 +604,8 @@ func (m *Model) RemoveMessageByTS(ts string) bool {
 					m.selected = len(m.replies) - 1
 				}
 			}
+			m.pruneTableStateForReplies()
+			m.deactivateTableModeIfSourceMismatch()
 			m.InvalidateCache()
 			return true
 		}
@@ -717,6 +748,7 @@ func (m *Model) SelectByIndex(i int) {
 	}
 	if m.selected != i {
 		m.selected = i
+		m.deactivateTableModeIfSourceMismatch()
 		m.InvalidateCache()
 	}
 }
@@ -753,12 +785,560 @@ func (m *Model) ViewportAtTop() bool {
 	return m.vp.YOffset() == 0
 }
 
+func (m *Model) tableViewportsForMessage(ts string) map[blockkit.TableKey]blockkit.TableViewportInput {
+	if len(m.tableViewports) == 0 || ts == "" {
+		return nil
+	}
+	out := make(map[blockkit.TableKey]blockkit.TableViewportInput)
+	for key, input := range m.tableViewports {
+		if key.MessageTS == ts {
+			out[key] = input
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (m *Model) tableFocusActive() bool {
+	return !tableKeyZero(m.focusedTable)
+}
+
+func (m *Model) selectedReplyTS() string {
+	if m.selected < 0 || m.selected >= len(m.replies) {
+		return ""
+	}
+	return m.replies[m.selected].TS
+}
+
+func (m *Model) deactivateTableModeIfSourceMismatch() {
+	if tableKeyZero(m.focusedTable) {
+		return
+	}
+	if m.focusedTable.MessageTS == m.parent.TS {
+		return
+	}
+	if m.focusedTable.MessageTS == m.selectedReplyTS() {
+		return
+	}
+	m.DeactivateTableMode()
+}
+
+func (m *Model) pruneTableStateForReplies() {
+	if len(m.tableViewports) == 0 && tableKeyZero(m.focusedTable) {
+		return
+	}
+	keep := map[string]struct{}{m.parent.TS: {}}
+	for _, reply := range m.replies {
+		keep[reply.TS] = struct{}{}
+	}
+	for key := range m.tableViewports {
+		if _, ok := keep[key.MessageTS]; !ok {
+			delete(m.tableViewports, key)
+		}
+	}
+	if len(m.tableViewports) == 0 {
+		m.tableViewports = nil
+	}
+	if !tableKeyZero(m.focusedTable) {
+		if _, ok := keep[m.focusedTable.MessageTS]; !ok {
+			m.focusedTable = blockkit.TableKey{}
+		}
+	}
+}
+
+func messageHasAmbiguousTableIDs(msg messages.MessageItem) bool {
+	counts := make(map[string]int)
+	var walk func([]blockkit.Block) bool
+	walk = func(blocks []blockkit.Block) bool {
+		for _, blk := range blocks {
+			if table, ok := blk.(blockkit.TableBlock); ok {
+				if table.BlockID == "" {
+					return true
+				}
+				counts[table.BlockID]++
+				if counts[table.BlockID] > 1 {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if walk(msg.Blocks) {
+		return true
+	}
+	for _, att := range msg.LegacyAttachments {
+		if walk(att.Blocks) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) pruneAmbiguousTableStateForMessages() {
+	if len(m.tableViewports) == 0 && tableKeyZero(m.focusedTable) {
+		return
+	}
+	if messageHasAmbiguousTableIDs(m.parent) {
+		m.pruneTableStateForReplyTS(m.parent.TS)
+	}
+	for _, reply := range m.replies {
+		if messageHasAmbiguousTableIDs(reply) {
+			m.pruneTableStateForReplyTS(reply.TS)
+		}
+	}
+}
+
+func (m *Model) pruneTableStateForReplyTS(ts string) {
+	if ts == "" {
+		return
+	}
+	for key := range m.tableViewports {
+		if key.MessageTS == ts {
+			delete(m.tableViewports, key)
+		}
+	}
+	if len(m.tableViewports) == 0 {
+		m.tableViewports = nil
+	}
+	if m.focusedTable.MessageTS == ts {
+		m.focusedTable = blockkit.TableKey{}
+	}
+}
+
+func reconcileTableKey(key blockkit.TableKey, exact map[blockkit.TableKey]blockkit.TableRegion, currentByBlock map[string]map[string][]blockkit.TableRegion, oldByBlock map[string]map[string]int) (blockkit.TableKey, bool) {
+	if _, ok := exact[key]; ok {
+		return key, true
+	}
+	if key.BlockID == "" {
+		return blockkit.TableKey{}, false
+	}
+	if oldByBlock[key.MessageTS][key.BlockID] != 1 {
+		return blockkit.TableKey{}, false
+	}
+	current := currentByBlock[key.MessageTS][key.BlockID]
+	if len(current) != 1 {
+		return blockkit.TableKey{}, false
+	}
+	return current[0].Key, true
+}
+
+func sameTableViewportState(a, b map[blockkit.TableKey]blockkit.TableViewportInput) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, av := range a {
+		if bv, ok := b[key]; !ok || bv != av {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Model) reconcileTableStateAfterRender() bool {
+	if len(m.tableViewports) == 0 && tableKeyZero(m.focusedTable) {
+		return false
+	}
+	regions := m.allTableRegions()
+	exact := make(map[blockkit.TableKey]blockkit.TableRegion, len(regions))
+	currentByBlock := make(map[string]map[string][]blockkit.TableRegion)
+	for _, region := range regions {
+		exact[region.Key] = region
+		if region.Key.BlockID == "" {
+			continue
+		}
+		if currentByBlock[region.Key.MessageTS] == nil {
+			currentByBlock[region.Key.MessageTS] = make(map[string][]blockkit.TableRegion)
+		}
+		currentByBlock[region.Key.MessageTS][region.Key.BlockID] = append(currentByBlock[region.Key.MessageTS][region.Key.BlockID], region)
+	}
+	oldByBlock := make(map[string]map[string]int)
+	for key := range m.tableViewports {
+		if key.BlockID == "" {
+			continue
+		}
+		if oldByBlock[key.MessageTS] == nil {
+			oldByBlock[key.MessageTS] = make(map[string]int)
+		}
+		oldByBlock[key.MessageTS][key.BlockID]++
+	}
+	if !tableKeyZero(m.focusedTable) && m.focusedTable.BlockID != "" {
+		if oldByBlock[m.focusedTable.MessageTS] == nil {
+			oldByBlock[m.focusedTable.MessageTS] = make(map[string]int)
+		}
+		if _, ok := m.tableViewports[m.focusedTable]; !ok {
+			oldByBlock[m.focusedTable.MessageTS][m.focusedTable.BlockID]++
+		}
+	}
+	newViewports := make(map[blockkit.TableKey]blockkit.TableViewportInput)
+	changedTS := make(map[string]struct{})
+	for key, input := range m.tableViewports {
+		target, ok := reconcileTableKey(key, exact, currentByBlock, oldByBlock)
+		if !ok {
+			changedTS[key.MessageTS] = struct{}{}
+			continue
+		}
+		if existing, exists := newViewports[target]; exists {
+			if existing != input {
+				changedTS[key.MessageTS] = struct{}{}
+			}
+			continue
+		}
+		newViewports[target] = input
+		if target != key {
+			changedTS[key.MessageTS] = struct{}{}
+		}
+	}
+	newFocus := blockkit.TableKey{}
+	if !tableKeyZero(m.focusedTable) {
+		if target, ok := reconcileTableKey(m.focusedTable, exact, currentByBlock, oldByBlock); ok {
+			newFocus = target
+			if target != m.focusedTable {
+				changedTS[m.focusedTable.MessageTS] = struct{}{}
+			}
+		} else {
+			changedTS[m.focusedTable.MessageTS] = struct{}{}
+		}
+	}
+	for key, input := range newViewports {
+		wantFocused := !tableKeyZero(newFocus) && key == newFocus
+		if input.Focused != wantFocused {
+			input.Focused = wantFocused
+			newViewports[key] = input
+			changedTS[key.MessageTS] = struct{}{}
+		}
+	}
+	if len(newViewports) == 0 {
+		newViewports = nil
+	}
+	changed := !sameTableViewportState(m.tableViewports, newViewports) || m.focusedTable != newFocus
+	m.tableViewports = newViewports
+	m.focusedTable = newFocus
+	for ts := range changedTS {
+		m.markTableStale(ts)
+	}
+	return changed
+}
+
+func (m *Model) allTableRegions() []blockkit.TableRegion {
+	out := make([]blockkit.TableRegion, 0, len(m.parentTableRegions)+len(m.cache))
+	for _, region := range m.parentTableRegions {
+		out = append(out, region)
+	}
+	for i, entry := range m.cache {
+		entryStart := 0
+		if i < len(m.entryOffsets) {
+			entryStart = m.entryOffsets[i]
+		}
+		for _, region := range entry.tableRegions {
+			region.LineStart += entryStart
+			region.LineEnd += entryStart
+			out = append(out, region)
+		}
+	}
+	return out
+}
+
+func (m *Model) tableRegionForKey(key blockkit.TableKey) (blockkit.TableRegion, bool) {
+	for _, region := range m.allTableRegions() {
+		if region.Key == key {
+			return region, true
+		}
+	}
+	return blockkit.TableRegion{}, false
+}
+
+func (m *Model) selectedReplyTableRegion() (blockkit.TableRegion, bool) {
+	if m.selected < 0 || m.selected >= len(m.replies) {
+		return blockkit.TableRegion{}, false
+	}
+	for i, entry := range m.cache {
+		if entry.replyIdx != m.selected || len(entry.tableRegions) == 0 {
+			continue
+		}
+		region := entry.tableRegions[0]
+		region.LineStart += m.entryOffsets[i]
+		region.LineEnd += m.entryOffsets[i]
+		return region, true
+	}
+	return blockkit.TableRegion{}, false
+}
+
+func (m *Model) nearestVisibleTableRegion() (blockkit.TableRegion, bool) {
+	visibleTop := m.vp.YOffset()
+	visibleBottom := visibleTop + m.lastViewHeight
+	if visibleBottom <= visibleTop {
+		visibleBottom = visibleTop + 1
+	}
+	anchor := m.selectedStartLine
+	if anchor < visibleTop || anchor >= visibleBottom {
+		anchor = visibleTop
+	}
+	bestDist := -1
+	var best blockkit.TableRegion
+	for _, region := range m.allTableRegions() {
+		if region.LineEnd <= visibleTop || region.LineStart >= visibleBottom {
+			continue
+		}
+		center := (region.LineStart + region.LineEnd) / 2
+		dist := center - anchor
+		if dist < 0 {
+			dist = -dist
+		}
+		if bestDist < 0 || dist < bestDist || (dist == bestDist && region.LineStart < best.LineStart) {
+			bestDist = dist
+			best = region
+		}
+	}
+	if bestDist < 0 {
+		return blockkit.TableRegion{}, false
+	}
+	return best, true
+}
+
+func (m *Model) ensureTableRegionVisible(region blockkit.TableRegion) {
+	if m.lastViewHeight <= 0 {
+		return
+	}
+	if region.LineEnd > m.vp.YOffset()+m.lastViewHeight {
+		m.vp.SetYOffset(region.LineEnd - m.lastViewHeight)
+	}
+	if region.LineStart < m.vp.YOffset() {
+		m.vp.SetYOffset(region.LineStart)
+	}
+	if m.tableFocusActive() {
+		m.snappedSelection = m.selected
+		m.hasSnapped = true
+	}
+}
+
+func (m *Model) markTableStale(ts string) {
+	if ts == "" || m.cache == nil {
+		return
+	}
+	if ts == m.parent.TS {
+		m.viewCacheValid = false
+		return
+	}
+	if m.staleReplies == nil {
+		m.staleReplies = make(map[string]struct{})
+	}
+	m.staleReplies[ts] = struct{}{}
+	m.viewCacheValid = false
+}
+
+func (m *Model) updateFocusedTable(key blockkit.TableKey) bool {
+	if key == m.focusedTable {
+		if region, ok := m.tableRegionForKey(key); ok {
+			m.ensureTableRegionVisible(region)
+			return true
+		}
+		return false
+	}
+	old := m.focusedTable
+	if tableKeyZero(key) {
+		m.focusedTable = blockkit.TableKey{}
+		if len(m.tableViewports) > 0 {
+			if input, ok := m.tableViewports[old]; ok {
+				input.Focused = false
+				m.tableViewports[old] = input
+				m.markTableStale(old.MessageTS)
+			}
+		}
+		m.dirty()
+		return true
+	}
+	region, ok := m.tableRegionForKey(key)
+	if !ok {
+		return false
+	}
+	if len(m.tableViewports) == 0 {
+		m.tableViewports = make(map[blockkit.TableKey]blockkit.TableViewportInput)
+	}
+	if !tableKeyZero(old) {
+		if input, ok := m.tableViewports[old]; ok {
+			input.Focused = false
+			m.tableViewports[old] = input
+			m.markTableStale(old.MessageTS)
+		}
+	}
+	input := m.tableViewports[key]
+	input.Focused = true
+	m.tableViewports[key] = input
+	m.focusedTable = key
+	m.markTableStale(key.MessageTS)
+	m.ensureTableRegionVisible(region)
+	m.dirty()
+	return true
+}
+
+func (m *Model) ActivateTableMode() bool {
+	if region, ok := m.selectedReplyTableRegion(); ok {
+		return m.updateFocusedTable(region.Key)
+	}
+	region, ok := m.nearestVisibleTableRegion()
+	if !ok {
+		return false
+	}
+	if region.Key.MessageTS != m.parent.TS {
+		for i, reply := range m.replies {
+			if reply.TS == region.Key.MessageTS {
+				m.selected = i
+				m.hasSnapped = false
+				break
+			}
+		}
+	}
+	return m.updateFocusedTable(region.Key)
+}
+
+func (m *Model) DeactivateTableMode() {
+	if tableKeyZero(m.focusedTable) {
+		return
+	}
+	_ = m.updateFocusedTable(blockkit.TableKey{})
+}
+
+func (m *Model) TableModeActive() bool {
+	if tableKeyZero(m.focusedTable) {
+		return false
+	}
+	if m.focusedTable.MessageTS != m.parent.TS && m.focusedTable.MessageTS != m.selectedReplyTS() {
+		m.focusedTable = blockkit.TableKey{}
+		return false
+	}
+	if m.cache == nil {
+		return true
+	}
+	if _, ok := m.tableRegionForKey(m.focusedTable); ok {
+		return true
+	}
+	m.focusedTable = blockkit.TableKey{}
+	return false
+}
+
+func (m *Model) ScrollFocusedTable(dx, dy int) bool {
+	if !m.TableModeActive() {
+		return false
+	}
+	region, ok := m.tableRegionForKey(m.focusedTable)
+	if !ok {
+		return false
+	}
+	input := m.tableViewports[m.focusedTable]
+	input.Focused = true
+	input.XOffset = clampInt(input.XOffset+dx, 0, region.MaxX)
+	input.YOffset = clampInt(input.YOffset+dy, 0, region.MaxY)
+	m.tableViewports[m.focusedTable] = input
+	m.markTableStale(m.focusedTable.MessageTS)
+	m.dirty()
+	return true
+}
+
+func (m *Model) PageFocusedTable(page int, half bool) bool {
+	if !m.TableModeActive() {
+		return false
+	}
+	region, ok := m.tableRegionForKey(m.focusedTable)
+	if !ok {
+		return false
+	}
+	step := region.ViewHeight
+	if half {
+		step /= 2
+	}
+	if step < 1 {
+		step = 1
+	}
+	return m.ScrollFocusedTable(0, page*step)
+}
+
+func (m *Model) FocusNextTable() bool {
+	regions := m.allTableRegions()
+	if !tableKeyZero(m.focusedTable) {
+		filtered := regions[:0]
+		for _, region := range regions {
+			if region.Key.MessageTS == m.focusedTable.MessageTS {
+				filtered = append(filtered, region)
+			}
+		}
+		regions = filtered
+	}
+	if len(regions) == 0 {
+		return false
+	}
+	for i, region := range regions {
+		if region.Key == m.focusedTable {
+			next := (i + 1) % len(regions)
+			return m.updateFocusedTable(regions[next].Key)
+		}
+	}
+	return m.updateFocusedTable(regions[0].Key)
+}
+
+func (m *Model) FocusPrevTable() bool {
+	regions := m.allTableRegions()
+	if !tableKeyZero(m.focusedTable) {
+		filtered := regions[:0]
+		for _, region := range regions {
+			if region.Key.MessageTS == m.focusedTable.MessageTS {
+				filtered = append(filtered, region)
+			}
+		}
+		regions = filtered
+	}
+	if len(regions) == 0 {
+		return false
+	}
+	for i, region := range regions {
+		if region.Key == m.focusedTable {
+			prev := i - 1
+			if prev < 0 {
+				prev = len(regions) - 1
+			}
+			return m.updateFocusedTable(regions[prev].Key)
+		}
+	}
+	return m.updateFocusedTable(regions[len(regions)-1].Key)
+}
+
+func (m *Model) FocusedTableRegion() (blockkit.TableRegion, bool) {
+	if !m.TableModeActive() {
+		return blockkit.TableRegion{}, false
+	}
+	region, ok := m.tableRegionForKey(m.focusedTable)
+	if !ok {
+		return blockkit.TableRegion{}, false
+	}
+	input := m.tableViewports[m.focusedTable]
+	region.XOffset = clampInt(input.XOffset, 0, region.MaxX)
+	region.YOffset = clampInt(input.YOffset, 0, region.MaxY)
+	region.Focused = input.Focused
+	return region, true
+}
+
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func tableKeyZero(key blockkit.TableKey) bool {
+	return key.MessageTS == "" && key.Path == "" && key.BlockID == ""
+}
+
 func (m *Model) MoveUp() {
 	if m.reactionNavActive {
 		m.ExitReactionNav()
 	}
 	if m.selected > 0 {
 		m.selected--
+		m.deactivateTableModeIfSourceMismatch()
 		m.dirty()
 	}
 }
@@ -770,6 +1350,7 @@ func (m *Model) MoveDown() {
 	}
 	if m.selected < len(m.replies)-1 {
 		m.selected++
+		m.deactivateTableModeIfSourceMismatch()
 		m.dirty()
 	}
 }
@@ -782,6 +1363,7 @@ func (m *Model) IsAtBottom() bool {
 func (m *Model) GoToTop() {
 	if m.selected != 0 {
 		m.selected = 0
+		m.deactivateTableModeIfSourceMismatch()
 		m.dirty()
 	}
 }
@@ -790,6 +1372,7 @@ func (m *Model) GoToTop() {
 func (m *Model) GoToBottom() {
 	if len(m.replies) > 0 && m.selected != len(m.replies)-1 {
 		m.selected = len(m.replies) - 1
+		m.deactivateTableModeIfSourceMismatch()
 		m.dirty()
 	}
 }
@@ -1271,6 +1854,60 @@ func (m *Model) applySelectionOverlay(content string) string {
 	return strings.Join(lines, "\n")
 }
 
+func (m *Model) renderReplyEntry(i, width int) viewEntry {
+	reply := m.replies[i]
+	rendered, attachFlushes, reactHits, tableRegions := m.renderThreadMessage(reply, width, m.userNames, m.channelNames, i == m.selected)
+	borderFill := lipgloss.NewStyle().Background(styles.Background)
+	borderInvis := lipgloss.NewStyle().BorderStyle(thickLeftBorder).BorderLeft(true).
+		BorderForeground(styles.Background).BorderBackground(styles.Background)
+	borderSelect := lipgloss.NewStyle().BorderStyle(thickLeftBorder).BorderLeft(true).
+		BorderForeground(styles.SelectionBorderColor(m.focused)).
+		BorderBackground(styles.SelectionTintColor(m.focused)).
+		Background(styles.SelectionTintColor(m.focused))
+	filledNormal := borderFill.Width(width - 1).Render(rendered)
+	renderedTinted := messages.RepaintBgToSelectionTint(rendered, m.focused)
+	selectedFill := lipgloss.NewStyle().
+		Background(styles.SelectionTintColor(m.focused)).
+		Width(width - 1).
+		Render(renderedTinted)
+	normal := borderInvis.Render(filledNormal)
+	selected := borderSelect.Render(selectedFill)
+	linesN := strings.Split(normal, "\n")
+	linesS := strings.Split(selected, "\n")
+	return viewEntry{
+		linesNormal:      linesN,
+		linesSelected:    linesS,
+		linesPlain:       messages.PlainLines(filledNormal),
+		height:           len(linesN),
+		replyIdx:         i,
+		contentColOffset: 1,
+		flushes:          attachFlushes,
+		reactionHits:     reactHits,
+		tableRegions:     tableRegions,
+	}
+}
+
+func (m *Model) partialRebuild(width int) {
+	m.cacheHasTables = len(m.parentTableRegions) > 0
+	for ts := range m.staleReplies {
+		idx, ok := m.replyIDToIdx[ts]
+		if !ok || idx < 0 || idx >= len(m.cache) || idx >= len(m.replies) {
+			continue
+		}
+		m.cache[idx] = m.renderReplyEntry(idx, width)
+	}
+	for ts := range m.staleReplies {
+		delete(m.staleReplies, ts)
+	}
+	for _, entry := range m.cache {
+		if len(entry.tableRegions) > 0 {
+			m.cacheHasTables = true
+			break
+		}
+	}
+	m.viewCacheValid = false
+}
+
 // View renders the thread panel content without a border.
 // The parent App is responsible for adding the border.
 func (m *Model) View(height, width int) string {
@@ -1346,11 +1983,12 @@ func (m *Model) View(height, width int) string {
 	if replyAreaHeight < 1 {
 		replyAreaHeight = 1
 	}
+	m.tableMaxHeight = blockkit.DefaultTableMaxHeight(replyAreaHeight)
 	m.lastViewHeight = replyAreaHeight
 
 	// Render the parent message once -- it now lives at the top of the
 	// scrollable viewContent (chrome only carries the header + separator).
-	parentContent, parentFlushes, _ := m.renderThreadMessage(m.parent, width, m.userNames, m.channelNames, false)
+	parentContent, parentFlushes, _, parentTableRegions := m.renderThreadMessage(m.parent, width, m.userNames, m.channelNames, false)
 	parentSeparator := lipgloss.NewStyle().
 		Width(width).
 		Background(styles.Background).
@@ -1360,6 +1998,7 @@ func (m *Model) View(height, width int) string {
 	parentBlockHeight := lipgloss.Height(parentBlock)
 	m.parentFlushes = parentFlushes
 	m.parentBlockHeight = parentBlockHeight
+	m.parentTableRegions = parentTableRegions
 
 	if len(m.replies) == 0 {
 		emptyHeight := replyAreaHeight - parentBlockHeight
@@ -1405,7 +2044,7 @@ func (m *Model) View(height, width int) string {
 	// invalidate on the relevant transition or add the state to this
 	// predicate. Adding to the predicate forces a full cache rebuild on the
 	// transition, which defeats the j/k speedup — prefer invalidation.
-	if m.cache == nil || m.cacheWidth != width || m.cacheReplyLen != len(m.replies) {
+	if m.cache == nil || m.cacheWidth != width || m.cacheReplyLen != len(m.replies) || (m.cacheHasTables && m.cacheTableH != m.tableMaxHeight) {
 		var perfReason string
 		var perfStart time.Time
 		if debuglog.Enabled() {
@@ -1414,12 +2053,18 @@ func (m *Model) View(height, width int) string {
 				perfReason = "cache-nil"
 			case m.cacheWidth != width:
 				perfReason = fmt.Sprintf("width-changed %d->%d", m.cacheWidth, width)
+			case m.cacheTableH != m.tableMaxHeight:
+				perfReason = fmt.Sprintf("table-height-changed %d->%d", m.cacheTableH, m.tableMaxHeight)
 			default:
 				perfReason = fmt.Sprintf("len-changed %d->%d", m.cacheReplyLen, len(m.replies))
 			}
 			perfStart = time.Now()
 		}
 		m.cache = m.cache[:0]
+		m.cacheHasTables = len(m.parentTableRegions) > 0
+		for ts := range m.staleReplies {
+			delete(m.staleReplies, ts)
+		}
 		if m.replyIDToIdx == nil {
 			m.replyIDToIdx = make(map[string]int, len(m.replies))
 		} else {
@@ -1427,72 +2072,31 @@ func (m *Model) View(height, width int) string {
 				delete(m.replyIDToIdx, k)
 			}
 		}
-		// Pre-build border styles ONCE (don't allocate per reply). Mirrors
-		// internal/ui/messages/model.go:1051-1056: the thick left border ▌
-		// is now applied at cache-build time so View() can pick a slice
-		// (linesNormal vs linesSelected) instead of running lipgloss for
-		// every visible reply on every j/k.
-		borderFill := lipgloss.NewStyle().Background(styles.Background)
-		borderInvis := lipgloss.NewStyle().BorderStyle(thickLeftBorder).BorderLeft(true).
-			BorderForeground(styles.Background).BorderBackground(styles.Background)
-		borderSelect := lipgloss.NewStyle().BorderStyle(thickLeftBorder).BorderLeft(true).
-			BorderForeground(styles.SelectionBorderColor(m.focused)).
-			BorderBackground(styles.SelectionTintColor(m.focused)).
-			Background(styles.SelectionTintColor(m.focused))
 		for i, reply := range m.replies {
-			// renderThreadMessage's last arg ("isSelected") drives reaction-
-			// nav pill highlighting (lines 1040, 1049): when reaction nav
-			// is active on the selected reply, the navigated pill / "+"
-			// button gets a distinct style. We MUST forward i==m.selected
-			// here (not a constant false) to preserve that UX. EnterReactionNav
-			// / ReactionNavLeft / ReactionNavRight all call InvalidateCache(),
-			// so the cache rebuilds whenever the highlighted index changes.
-			// This matches the messages-pane convention
-			// (internal/ui/messages/model.go:1050).
-			rendered, attachFlushes, reactHits := m.renderThreadMessage(reply, width, m.userNames, m.channelNames, i == m.selected)
-			// Two filled variants — see internal/ui/messages/model.go for the
-			// rationale. Without per-variant fills, the trailing whitespace of
-			// every wrapped line shows the wrong bg and the tint stops at the
-			// last character of content. linesPlain mirrors the UNTINTED
-			// (filledNormal) so clipboard text never carries the tint.
-			filledNormal := borderFill.Width(width - 1).Render(rendered)
-			// For the selected variant, repaint inner explicit-bg ANSI
-			// escapes (Username, Timestamp, MessageText, RenderSlackMarkdown's
-			// reset-reapplications) with the tint color so the tint reaches
-			// every cell of the row, not just the trailing whitespace.
-			renderedTinted := messages.RepaintBgToSelectionTint(rendered, m.focused)
-			selectedFill := lipgloss.NewStyle().
-				Background(styles.SelectionTintColor(m.focused)).
-				Width(width - 1).
-				Render(renderedTinted)
-			normal := borderInvis.Render(filledNormal)
-			selected := borderSelect.Render(selectedFill)
-			linesN := strings.Split(normal, "\n")
-			linesS := strings.Split(selected, "\n")
-			m.cache = append(m.cache, viewEntry{
-				linesNormal:   linesN,
-				linesSelected: linesS,
-				// linesPlain mirrors the UNBORDERED, UNTINTED content (filledNormal)
-				// so the thick left-border column is NOT present in plain text and
-				// never bleeds into clipboard output via SelectionText. The
-				// mouse-column to plain-column mapping uses contentColOffset.
-				// Same convention as internal/ui/messages/model.go:1057-1061.
-				linesPlain:       messages.PlainLines(filledNormal),
-				height:           len(linesN),
-				replyIdx:         i,
-				contentColOffset: 1,
-				flushes:          attachFlushes,
-				reactionHits:     reactHits,
-			})
+			_ = reply
+			entry := m.renderReplyEntry(i, width)
+			if len(entry.tableRegions) > 0 {
+				m.cacheHasTables = true
+			}
+			m.cache = append(m.cache, entry)
 			m.replyIDToIdx[reply.TS] = i
 		}
 		m.cacheWidth = width
 		m.cacheReplyLen = len(m.replies)
+		m.cacheTableH = m.tableMaxHeight
 		m.viewCacheValid = false
 		if debuglog.Enabled() {
 			debuglog.Perf("thread.buildCache N=%d width=%d took=%s reason=%s",
 				len(m.replies), width, time.Since(perfStart), perfReason)
 		}
+	} else if len(m.staleReplies) > 0 {
+		m.partialRebuild(width)
+	}
+	if m.reconcileTableStateAfterRender() {
+		if len(m.staleReplies) > 0 {
+			m.partialRebuild(width)
+		}
+		m.reconcileTableStateAfterRender()
 	}
 
 	// Check if view-level cache (bordered content) can be reused
@@ -1659,7 +2263,7 @@ func (m *Model) View(height, width int) string {
 	// (or programmatic ScrollUp/Down) move the viewport away from the
 	// selected reply without the next render yanking it back. Mirrors the
 	// same guard used in messages.Model.View().
-	if !m.hasSnapped || m.snappedSelection != m.selected {
+	if !m.tableFocusActive() && (!m.hasSnapped || m.snappedSelection != m.selected) {
 		if m.selectedEndLine > m.vp.YOffset()+m.vp.Height() {
 			m.vp.SetYOffset(m.selectedEndLine - m.vp.Height())
 		}
@@ -1682,10 +2286,27 @@ func (m *Model) View(height, width int) string {
 	// invisible entry's hits don't survive the next render. Capacity
 	// is preserved across frames (typical case: a handful of pills).
 	m.lastReactionHits = m.lastReactionHits[:0]
+	m.lastTableRegions = m.lastTableRegions[:0]
 	yOff := m.vp.YOffset()
+	for _, region := range m.parentTableRegions {
+		if region.LineEnd <= yOff || region.LineStart >= yOff+replyAreaHeight {
+			continue
+		}
+		clipStart := region.LineStart - yOff
+		if clipStart < 0 {
+			clipStart = 0
+		}
+		clipEnd := region.LineEnd - yOff
+		if clipEnd > replyAreaHeight {
+			clipEnd = replyAreaHeight
+		}
+		region.LineStart = chromeHeight + clipStart
+		region.LineEnd = chromeHeight + clipEnd
+		m.lastTableRegions = append(m.lastTableRegions, region)
+	}
 	for i, e := range m.cache {
 		if len(e.reactionHits) == 0 {
-			continue
+			// fall through: this reply may still carry table regions.
 		}
 		entryStart := m.entryOffsets[i]
 		for _, h := range e.reactionHits {
@@ -1715,6 +2336,24 @@ func (m *Model) View(height, width int) string {
 				replyIdx: e.replyIdx,
 				emoji:    h.emoji,
 			})
+		}
+		for _, region := range e.tableRegions {
+			absStart := entryStart + region.LineStart
+			absEnd := entryStart + region.LineEnd
+			if absEnd <= yOff || absStart >= yOff+replyAreaHeight {
+				continue
+			}
+			clipStart := absStart - yOff
+			if clipStart < 0 {
+				clipStart = 0
+			}
+			clipEnd := absEnd - yOff
+			if clipEnd > replyAreaHeight {
+				clipEnd = replyAreaHeight
+			}
+			region.LineStart = chromeHeight + clipStart
+			region.LineEnd = chromeHeight + clipEnd
+			m.lastTableRegions = append(m.lastTableRegions, region)
 		}
 	}
 
@@ -1772,16 +2411,19 @@ func (m *Model) blockkitContext(msg messages.MessageItem, userNames, channelName
 		imgCtx = m.imgRenderer.Context()
 	}
 	send := imgCtx.SendMsg
+	viewports := m.tableViewportsForMessage(msg.TS)
 	return blockkit.Context{
-		Protocol:    imgCtx.Protocol,
-		Fetcher:     imgCtx.Fetcher,
-		KittyRender: imgCtx.KittyRender,
-		CellPixels:  imgCtx.CellPixels,
-		MaxRows:     imgCtx.MaxRows,
-		MaxCols:     imgCtx.MaxCols,
-		UserNames:   userNames,
-		MessageTS:   msg.TS,
-		Channel:     m.channelID,
+		Protocol:       imgCtx.Protocol,
+		Fetcher:        imgCtx.Fetcher,
+		KittyRender:    imgCtx.KittyRender,
+		CellPixels:     imgCtx.CellPixels,
+		MaxRows:        imgCtx.MaxRows,
+		MaxCols:        imgCtx.MaxCols,
+		UserNames:      userNames,
+		MessageTS:      msg.TS,
+		Channel:        m.channelID,
+		TableMaxHeight: m.tableMaxHeight,
+		TableViewports: viewports,
 		RenderText: func(s string, un map[string]string) string {
 			return messages.RenderSlackMarkdownWith(s, messages.RenderSlackMarkdownOpts{
 				UserNames:    un,
@@ -1801,7 +2443,7 @@ func (m *Model) blockkitContext(msg messages.MessageItem, userNames, channelName
 	}
 }
 
-func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNames map[string]string, channelNames map[string]string, isSelected bool) (string, []func(io.Writer) error, []reactionEntryHit) {
+func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNames map[string]string, channelNames map[string]string, isSelected bool) (string, []func(io.Writer) error, []reactionEntryHit, []blockkit.TableRegion) {
 	line := styles.Username.Render(msg.UserName) + lipgloss.NewStyle().Background(styles.Background).Render("  ") + styles.Timestamp.Render(msg.Timestamp)
 
 	contentWidth := width - 4
@@ -1827,6 +2469,7 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 		EmojiFlushes: &flushes,
 	}
 	text := styles.MessageText.Render(messages.WordWrap(messages.RenderSlackMarkdownWith(messages.MessageTextSource(msg), bodyOpts), contentWidth))
+	textRows := lipgloss.Height(text)
 
 	// Block Kit blocks + legacy attachments render between the body
 	// text and file attachments, mirroring the main message pane's
@@ -1836,16 +2479,29 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 	bkCtx := m.blockkitContext(msg, userNames, channelNames)
 	var bkLines []string
 	bkInteractive := false
+	var tableRegions []blockkit.TableRegion
 	if len(msg.Blocks) > 0 {
+		startInBk := len(bkLines)
 		res := blockkit.Render(msg.Blocks, bkCtx, blockWidth)
 		bkLines = append(bkLines, res.Lines...)
 		flushes = append(flushes, res.Flushes...)
+		for _, region := range res.TableRegions {
+			region.LineStart += 1 + textRows + startInBk
+			region.LineEnd += 1 + textRows + startInBk
+			tableRegions = append(tableRegions, region)
+		}
 		bkInteractive = bkInteractive || res.Interactive
 	}
 	if len(msg.LegacyAttachments) > 0 {
+		startInBk := len(bkLines)
 		res := blockkit.RenderLegacy(msg.LegacyAttachments, bkCtx, blockWidth)
 		bkLines = append(bkLines, res.Lines...)
 		flushes = append(flushes, res.Flushes...)
+		for _, region := range res.TableRegions {
+			region.LineStart += 1 + textRows + startInBk
+			region.LineEnd += 1 + textRows + startInBk
+			tableRegions = append(tableRegions, region)
+		}
 		bkInteractive = bkInteractive || res.Interactive
 	}
 	if bkInteractive {
@@ -2045,5 +2701,5 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 		}
 	}
 
-	return line + "\n" + text + bkBlock + attachmentLines + reactionLine, flushes, reactionHits
+	return line + "\n" + text + bkBlock + attachmentLines + reactionLine, flushes, reactionHits, tableRegions
 }
