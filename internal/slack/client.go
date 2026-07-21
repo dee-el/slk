@@ -28,6 +28,7 @@ type SlackAPI interface {
 	GetConversationReplies(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
 	SearchMessagesContext(ctx context.Context, query string, params slack.SearchParameters) (*slack.SearchMessages, error)
 	GetUsersContext(ctx context.Context, options ...slack.GetUsersOption) ([]slack.User, error)
+	GetUserGroupsContext(ctx context.Context, options ...slack.GetUserGroupsOption) ([]slack.UserGroup, error)
 	GetUsersInConversationContext(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error)
 	GetUserInfo(user string) (*slack.User, error)
 	GetBotInfoContext(ctx context.Context, parameters slack.GetBotInfoParameters) (*slack.Bot, error)
@@ -729,6 +730,43 @@ func (c *Client) GetUsers(ctx context.Context) ([]slack.User, error) {
 		return nil, fmt.Errorf("getting users: %w", err)
 	}
 	return users, nil
+}
+
+// GetUserGroups retrieves all user groups in the workspace, including
+// disabled groups. User lists and user counts stay off because callers only
+// need ID/handle metadata for mention rendering.
+func (c *Client) GetUserGroups(ctx context.Context) ([]slack.UserGroup, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		groups, err := c.api.GetUserGroupsContext(
+			ctx,
+			slack.GetUserGroupsOptionIncludeDisabled(true),
+			slack.GetUserGroupsOptionIncludeUsers(false),
+			slack.GetUserGroupsOptionIncludeCount(false),
+		)
+		if err != nil {
+			if rlErr, ok := err.(*slack.RateLimitedError); ok {
+				wait := rlErr.RetryAfter
+				if wait == 0 {
+					wait = 30 * time.Second
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(wait):
+				}
+				continue
+			}
+			return nil, fmt.Errorf("getting user groups: %w", err)
+		}
+
+		return groups, nil
+	}
 }
 
 // ListCustomEmoji fetches the workspace's custom emoji list via Slack's

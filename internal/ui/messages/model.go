@@ -251,16 +251,17 @@ type OpenImagePreviewMsg struct {
 }
 
 type Model struct {
-	messages     []MessageItem
-	selected     int
-	channelName  string
-	channelTopic string
-	channelType  string // "channel", "private", "dm", "group_dm" -- drives header glyph
-	loading      bool
-	spinnerFrame int               // braille-spinner frame index for "Loading messages..." animation
-	avatarFn     AvatarFunc        // optional: returns half-block avatar for a userID
-	userNames    map[string]string // user ID -> display name for mention resolution
-	channelNames map[string]string // channel ID -> name for bare <#CID> resolution
+	messages       []MessageItem
+	selected       int
+	channelName    string
+	channelTopic   string
+	channelType    string // "channel", "private", "dm", "group_dm" -- drives header glyph
+	loading        bool
+	spinnerFrame   int               // braille-spinner frame index for "Loading messages..." animation
+	avatarFn       AvatarFunc        // optional: returns half-block avatar for a userID
+	userNames      map[string]string // user ID -> display name for mention resolution
+	userGroupNames map[string]string // user-group ID -> handle for bare <!subteam^...> mentions
+	channelNames   map[string]string // channel ID -> name for bare <#CID> resolution
 
 	// searchTerms are folded word-prefix terms of the active in-channel
 	// search; non-empty enables highlight rendering. nil = no search.
@@ -1945,11 +1946,37 @@ func cloneStringMap(src map[string]string) map[string]string {
 	return out
 }
 
+func stringMapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		if vb, ok := b[k]; !ok || vb != va {
+			return false
+		}
+	}
+	return true
+}
+
 // SetUserNames sets the immutable user ID -> display name snapshot used to
 // resolve @mentions.
 func (m *Model) SetUserNames(names map[string]string) {
 	m.userNames = names
 	m.cache = nil // invalidate cache so mentions re-render
+	m.dirty()
+}
+
+// SetUserGroupNames sets the immutable user-group ID -> handle snapshot used
+// to resolve bare <!subteam^...> mentions.
+func (m *Model) SetUserGroupNames(names map[string]string) {
+	if names == nil {
+		names = map[string]string{}
+	}
+	if stringMapsEqual(m.userGroupNames, names) {
+		return
+	}
+	m.userGroupNames = names
+	m.cache = nil
 	m.dirty()
 }
 
@@ -2508,12 +2535,13 @@ func (m *Model) blockkitContext(msg MessageItem, userNames, channelNames map[str
 		// emoji on first reveal. Acceptable.
 		RenderText: func(s string, un map[string]string) string {
 			return RenderSlackMarkdownWith(s, RenderSlackMarkdownOpts{
-				UserNames:    un,
-				ChannelNames: channelNames,
-				PlaceCtx:     m.emojiCtx.PlaceCtx,
-				EmojiCells:   m.emojiCtx.Cells,
-				Customs:      m.emojiCtx.Customs,
-				EmojiFlushes: nil,
+				UserNames:      un,
+				ChannelNames:   channelNames,
+				UserGroupNames: m.userGroupNames,
+				PlaceCtx:       m.emojiCtx.PlaceCtx,
+				EmojiCells:     m.emojiCtx.Cells,
+				Customs:        m.emojiCtx.Customs,
+				EmojiFlushes:   nil,
 			})
 		},
 		WrapText: WordWrap,
@@ -2569,12 +2597,13 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 	// emoji flushes land in the same per-message `flushes` named-return
 	// slice the View() loop walks for inline-image attachments.
 	bodyOpts := RenderSlackMarkdownOpts{
-		UserNames:    userNames,
-		ChannelNames: channelNames,
-		PlaceCtx:     m.emojiCtx.PlaceCtx,
-		EmojiCells:   m.emojiCtx.Cells,
-		Customs:      m.emojiCtx.Customs,
-		EmojiFlushes: &flushes,
+		UserNames:      userNames,
+		ChannelNames:   channelNames,
+		UserGroupNames: m.userGroupNames,
+		PlaceCtx:       m.emojiCtx.PlaceCtx,
+		EmojiCells:     m.emojiCtx.Cells,
+		Customs:        m.emojiCtx.Customs,
+		EmojiFlushes:   &flushes,
 	}
 	rendered := RenderSlackMarkdownWith(MessageTextSource(msg), bodyOpts)
 	if len(m.searchTerms) > 0 {

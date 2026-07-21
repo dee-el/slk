@@ -17,15 +17,25 @@ import (
 // CommonMark markdown string. userNames and channelNames resolve
 // @mentions and #channel references in message bodies.
 func ThreadToMarkdown(parent messages.MessageItem, replies []messages.MessageItem, userNames, channelNames map[string]string) string {
+	return ThreadToMarkdownWithUserGroups(parent, replies, userNames, channelNames, nil)
+}
+
+// ThreadToMarkdownWithUserGroups is the user-group-aware form of
+// ThreadToMarkdown.
+func ThreadToMarkdownWithUserGroups(parent messages.MessageItem, replies []messages.MessageItem, userNames, channelNames, userGroupNames map[string]string) string {
 	var b strings.Builder
-	b.WriteString(formatMessage(parent, userNames, channelNames))
+	b.WriteString(formatMessageWithUserGroups(parent, userNames, channelNames, userGroupNames))
 	for _, r := range replies {
-		b.WriteString(formatMessage(r, userNames, channelNames))
+		b.WriteString(formatMessageWithUserGroups(r, userNames, channelNames, userGroupNames))
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
 
 func formatMessage(msg messages.MessageItem, userNames, channelNames map[string]string) string {
+	return formatMessageWithUserGroups(msg, userNames, channelNames, nil)
+}
+
+func formatMessageWithUserGroups(msg messages.MessageItem, userNames, channelNames, userGroupNames map[string]string) string {
 	var b strings.Builder
 
 	b.WriteString("**" + msg.UserName + "**")
@@ -33,7 +43,11 @@ func formatMessage(msg messages.MessageItem, userNames, channelNames map[string]
 	b.WriteString(msg.DateStr + " " + msg.Timestamp)
 	b.WriteByte('\n')
 
-	body := messages.SlackMrkdwnToCommonMark(messages.MessageTextSource(msg), userNames, channelNames)
+	body := messages.SlackMrkdwnToCommonMarkWith(messages.MessageTextSource(msg), messages.CommonMarkOpts{
+		UserNames:      userNames,
+		ChannelNames:   channelNames,
+		UserGroupNames: userGroupNames,
+	})
 	b.WriteString(body)
 	b.WriteByte('\n')
 

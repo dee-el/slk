@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/config"
 	"github.com/gammons/slk/internal/ui/channelfinder"
@@ -365,5 +369,162 @@ func TestOnThreadSubscriptionChanged_PersistsOnInactiveWorkspace(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ChannelID != "C1" || !got[0].Active {
 		t.Fatalf("inactive workspace must still persist thread_subscribed; got %+v, want 1 active row", got)
+	}
+}
+
+func TestApplyUserGroupChangedMatchingTeamNormalizesAndMarksActive(t *testing.T) {
+	store := newUserGroupNameStore(nil)
+	h := &rtmEventHandler{
+		workspaceID:    "T1",
+		userGroupNames: store,
+		isActive:       func() bool { return true },
+	}
+
+	active := h.applyUserGroupChanged(slack.UserGroup{ID: " S1 ", Handle: " @eng ", TeamID: "T1"})
+	if !active {
+		t.Fatal("applyUserGroupChanged returned false for active matching workspace")
+	}
+	if got, ok := store.Get("S1"); !ok || got != "eng" {
+		t.Fatalf("store.Get(S1) = %q, %v; want eng, true", got, ok)
+	}
+}
+
+func TestApplyUserGroupChangedInactiveWorkspaceStillUpdatesStore(t *testing.T) {
+	store := newUserGroupNameStore(nil)
+	h := &rtmEventHandler{
+		workspaceID:    "T1",
+		userGroupNames: store,
+		isActive:       func() bool { return false },
+	}
+
+	active := h.applyUserGroupChanged(slack.UserGroup{ID: "S2", Handle: "@@ops", TeamID: ""})
+	if active {
+		t.Fatal("applyUserGroupChanged returned true for inactive workspace")
+	}
+	if got, ok := store.Get("S2"); !ok || got != "@ops" {
+		t.Fatalf("store.Get(S2) = %q, %v; want @ops, true", got, ok)
+	}
+}
+
+func TestApplyUserGroupChangedRejectsEmptyIDAndMismatchedTeam(t *testing.T) {
+	store := newUserGroupNameStore(map[string]string{"S0": "core"})
+	h := &rtmEventHandler{
+		workspaceID:    "T1",
+		userGroupNames: store,
+	}
+
+	if h.applyUserGroupChanged(slack.UserGroup{ID: "", Handle: "eng", TeamID: "T1"}) {
+		t.Fatal("empty ID should not mark active")
+	}
+	if h.applyUserGroupChanged(slack.UserGroup{ID: "S1", Handle: "eng", TeamID: "T2"}) {
+		t.Fatal("mismatched team should not mark active")
+	}
+	if got := store.Snapshot(); len(got) != 1 || got["S0"] != "core" {
+		t.Fatalf("store mutated unexpectedly: %#v", got)
+	}
+}
+
+func TestOnConnectStartsUserGroupRefreshOnFirstConnectWithoutBlocking(t *testing.T) {
+	fetchCtxCh := make(chan context.Context, 1)
+	release := make(chan struct{})
+	done := make(chan struct{})
+	h := &rtmEventHandler{
+		workspaceID:          "T1",
+		userGroupNames:       newUserGroupNameStore(nil),
+		userGroupRefreshGate: dedupeGate{window: time.Hour},
+		sendMsg:              func(tea.Msg) {},
+		getUserGroups: func(ctx context.Context) ([]slack.UserGroup, error) {
+			fetchCtxCh <- ctx
+			<-release
+			return nil, nil
+		},
+	}
+
+	go func() {
+		h.OnConnect()
+		close(done)
+	}()
+
+	var fetchCtx context.Context
+	select {
+	case fetchCtx = <-fetchCtxCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first-connect refresh fetch")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("OnConnect blocked on user-group fetch")
+	}
+	if _, ok := fetchCtx.Deadline(); !ok {
+		t.Fatal("first-connect refresh context missing deadline")
+	}
+	close(release)
+}
+
+func TestOnConnectStartsUserGroupRefreshOnReconnectWhenGateAllows(t *testing.T) {
+	var calls atomic.Int32
+	fetches := make(chan struct{}, 2)
+	h := &rtmEventHandler{
+		workspaceID:          "T1",
+		userGroupNames:       newUserGroupNameStore(nil),
+		userGroupRefreshGate: dedupeGate{window: 0},
+		sendMsg:              func(tea.Msg) {},
+		getUserGroups: func(ctx context.Context) ([]slack.UserGroup, error) {
+			calls.Add(1)
+			fetches <- struct{}{}
+			return nil, nil
+		},
+	}
+
+	h.OnConnect()
+	h.OnConnect()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-fetches:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for fetch %d", i+1)
+		}
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("fetch call count = %d, want 2", got)
+	}
+}
+
+func TestOnConnectUserGroupRefreshDedupePreventsOverlap(t *testing.T) {
+	var calls atomic.Int32
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	done := make(chan struct{})
+	h := &rtmEventHandler{
+		workspaceID:          "T1",
+		userGroupNames:       newUserGroupNameStore(nil),
+		userGroupRefreshGate: dedupeGate{window: time.Hour},
+		sendMsg:              func(tea.Msg) {},
+		getUserGroups: func(ctx context.Context) ([]slack.UserGroup, error) {
+			calls.Add(1)
+			started <- struct{}{}
+			<-release
+			close(done)
+			return nil, nil
+		},
+	}
+
+	h.OnConnect()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first fetch start")
+	}
+	h.OnConnect()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fetch call count = %d, want 1 while first refresh in flight", got)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for blocked fetch to finish")
 	}
 }

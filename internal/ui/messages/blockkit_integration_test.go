@@ -72,6 +72,38 @@ func TestRenderMessagePlainEmitsBlockKitContent(t *testing.T) {
 	}
 }
 
+func TestRenderMessagePlainBlockKitUserGroupMentionUsesUserGroupNames(t *testing.T) {
+	msg := MessageItem{
+		TS:        "1700000000.000001",
+		UserName:  "github",
+		UserID:    "U-BOT",
+		Timestamp: "1:23 PM",
+		Blocks: []blockkit.Block{
+			blockkit.SectionBlock{Text: "Notify <!subteam^S123> now"},
+		},
+	}
+	m := New([]MessageItem{msg}, "general")
+	m.SetUserGroupNames(map[string]string{"S123": "eng"})
+	m.buildCache(100)
+	if len(m.cache) == 0 {
+		t.Fatal("buildCache produced no entries")
+	}
+	var lines []string
+	for _, e := range m.cache {
+		if e.msgIdx == 0 {
+			lines = e.linesNormal
+			break
+		}
+	}
+	plain := ansi.Strip(strings.Join(lines, "\n"))
+	if !strings.Contains(plain, "@eng") {
+		t.Fatalf("block kit user-group mention not resolved: %q", plain)
+	}
+	if strings.Contains(plain, "<!subteam^") {
+		t.Fatalf("raw user-group token leaked from block kit: %q", plain)
+	}
+}
+
 func TestRenderMessagePlainEmitsLegacyAttachment(t *testing.T) {
 	msg := MessageItem{
 		TS:        "1700000000.000000",

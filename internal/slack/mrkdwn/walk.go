@@ -652,6 +652,11 @@ func (w *walker) tokenElement(t token) slack.RichTextSectionElement {
 	case tokChannel:
 		return slack.NewRichTextSectionChannelElement(t.id, style)
 	case tokBroadcast:
+		if strings.HasPrefix(t.id, "subteam^") {
+			usergroup := slack.NewRichTextSectionUserGroupElement(strings.TrimPrefix(t.id, "subteam^"))
+			usergroup.Style = style
+			return usergroup
+		}
 		// Broadcasts don't carry a style on the wire (slack-go's
 		// RichTextSectionBroadcastElement has no Style field).
 		return slack.NewRichTextSectionBroadcastElement(t.id)

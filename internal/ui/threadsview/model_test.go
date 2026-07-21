@@ -287,6 +287,47 @@ func TestVersion_StableAcrossIdenticalSetCalls(t *testing.T) {
 	}
 }
 
+func TestView_PreviewResolvesUserGroupMentions(t *testing.T) {
+	m := New(map[string]string{"U1": "alice"}, "USELF")
+	m.SetUserGroupNames(map[string]string{"S1": "eng"})
+	m.SetSummaries([]cache.ThreadSummary{{
+		ChannelID:    "C1",
+		ChannelName:  "general",
+		ChannelType:  "channel",
+		ThreadTS:     "1.0",
+		ParentUserID: "U1",
+		ParentText:   "ping <!subteam^S1> and <!subteam^S2>",
+		ParentTS:     "1700000000.000000",
+		ReplyCount:   1,
+		LastReplyTS:  "1700000001.000000",
+		LastReplyBy:  "U1",
+	}})
+	out := m.View(20, 80)
+	if !strings.Contains(out, "@eng") {
+		t.Fatalf("threads preview missing resolved known user-group mention:\n%s", out)
+	}
+	if !strings.Contains(out, "@group") {
+		t.Fatalf("threads preview missing unknown user-group fallback:\n%s", out)
+	}
+	if strings.Contains(out, "<!subteam^") {
+		t.Fatalf("raw user-group token leaked from preview:\n%s", out)
+	}
+}
+
+func TestSetUserGroupNames_EquivalentSnapshotDoesNotBumpVersion(t *testing.T) {
+	m := New(map[string]string{}, "USELF")
+	m.SetUserGroupNames(map[string]string{"S1": "eng"})
+	v0 := m.Version()
+	m.SetUserGroupNames(map[string]string{"S1": "eng"})
+	if v1 := m.Version(); v1 != v0 {
+		t.Fatalf("SetUserGroupNames(equal snapshot) bumped Version: v0=%d v1=%d", v0, v1)
+	}
+	m.SetUserGroupNames(map[string]string{"S1": "platform"})
+	if v2 := m.Version(); v2 == v0 {
+		t.Fatalf("SetUserGroupNames(different snapshot) did not bump Version: v0=%d v2=%d", v0, v2)
+	}
+}
+
 func TestMarkByThreadTSUnread_FlipsFlagAndReturnsTrue(t *testing.T) {
 	m := New(map[string]string{}, "USELF")
 	m.SetSummaries([]cache.ThreadSummary{

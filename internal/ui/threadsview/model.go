@@ -82,10 +82,11 @@ func borderFillStyle() lipgloss.Style {
 
 // Model holds the threads-list state.
 type Model struct {
-	summaries    []cache.ThreadSummary
-	userNames    map[string]string
-	channelNames map[string]string
-	selfUserID   string
+	summaries      []cache.ThreadSummary
+	userNames      map[string]string
+	userGroupNames map[string]string
+	channelNames   map[string]string
+	selfUserID     string
 
 	selected int
 	yOffset  int
@@ -118,6 +119,7 @@ func New(userNames map[string]string, selfUserID string) Model {
 	}
 	return Model{
 		userNames:              userNames,
+		userGroupNames:         map[string]string{},
 		selfUserID:             selfUserID,
 		channelNames:           map[string]string{},
 		subscriptionsAvailable: true,
@@ -142,6 +144,19 @@ func (m *Model) SetUserNames(names map[string]string) {
 		return
 	}
 	m.userNames = names
+	m.dirty()
+}
+
+// SetUserGroupNames replaces the immutable user-group snapshot used to resolve
+// bare <!subteam^...> mentions in thread previews.
+func (m *Model) SetUserGroupNames(names map[string]string) {
+	if names == nil {
+		names = map[string]string{}
+	}
+	if stringMapsEqual(m.userGroupNames, names) {
+		return
+	}
+	m.userGroupNames = names
 	m.dirty()
 }
 
@@ -640,7 +655,11 @@ func (m *Model) renderCard(s cache.ThreadSummary, width int, selected bool) []st
 	if s.ParentText == "" && s.ParentUserID == "" {
 		previewBody = mutedStyle().Render("(parent not loaded)")
 	} else {
-		preview := messages.RenderSlackMarkdown(s.ParentText, m.userNames, m.channelNames)
+		preview := messages.RenderSlackMarkdownWith(s.ParentText, messages.RenderSlackMarkdownOpts{
+			UserNames:      m.userNames,
+			ChannelNames:   m.channelNames,
+			UserGroupNames: m.userGroupNames,
+		})
 		preview = strings.ReplaceAll(preview, "\n", " ")
 		previewMax := contentWidth - 4
 		if previewMax < 0 {

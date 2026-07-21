@@ -14,6 +14,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/ids"
 	imgpkg "github.com/gammons/slk/internal/image"
@@ -4169,6 +4170,159 @@ func TestWorkspaceUserMetadataUpdatedMsg_RefreshesActiveChannelMetadataWithoutRe
 	}
 	if ch != (wintree.Channel{ID: "D1", Name: "Helper Bot", Type: "app"}) {
 		t.Fatalf("focused window channel = %+v", ch)
+	}
+}
+
+func TestAppSetUserGroupNames_FanoutCloneAndEqualNoOp(t *testing.T) {
+	a, w1, w2 := sameChannelApp(t)
+	groupMsg := messages.MessageItem{TS: "1.0", UserName: "alice", Text: "ping <!subteam^S1>", Timestamp: "1:00 PM"}
+	a.winModels[w1].SetMessages([]messages.MessageItem{groupMsg})
+	a.winModels[w2].SetMessages([]messages.MessageItem{groupMsg})
+	a.threadPanel.SetThread(
+		messages.MessageItem{TS: "2.0", UserName: "alice", Text: "parent <!subteam^S1>", Timestamp: "1:01 PM"},
+		[]messages.MessageItem{{TS: "2.1", UserName: "bob", Text: "reply <!subteam^S1>", Timestamp: "1:02 PM"}},
+		"C1",
+		"2.0",
+	)
+	a.threadsView.SetSummaries([]cache.ThreadSummary{{
+		ChannelID:    "C1",
+		ChannelName:  "general",
+		ChannelType:  "channel",
+		ThreadTS:     "2.0",
+		ParentUserID: "U1",
+		ParentText:   "preview <!subteam^S1>",
+		ParentTS:     "1700000000.000000",
+		ReplyCount:   1,
+		LastReplyTS:  "1700000001.000000",
+		LastReplyBy:  "U1",
+	}})
+
+	snapshot := map[string]string{"S1": "eng"}
+	a.SetUserGroupNames(snapshot)
+	snapshot["S1"] = "ops"
+	if got := a.userGroupNames["S1"]; got != "eng" {
+		t.Fatalf("app userGroupNames[S1] = %q, want eng", got)
+	}
+	for _, w := range []wintree.LeafID{w1, w2} {
+		if got := ansi.Strip(a.winModels[w].View(10, 80)); !strings.Contains(got, "@eng") {
+			t.Fatalf("window %v missing @eng after fanout:\n%s", w, got)
+		}
+	}
+	if got := ansi.Strip(a.threadPanel.View(12, 80)); !strings.Contains(got, "@eng") {
+		t.Fatalf("thread panel missing @eng after fanout:\n%s", got)
+	}
+	if got := ansi.Strip(a.threadsView.View(12, 80)); !strings.Contains(got, "@eng") {
+		t.Fatalf("threads view missing @eng after fanout:\n%s", got)
+	}
+
+	w1v, w2v := a.winModels[w1].Version(), a.winModels[w2].Version()
+	threadV, threadsViewV := a.threadPanel.Version(), a.threadsView.Version()
+	a.SetUserGroupNames(map[string]string{"S1": "eng"})
+	if a.winModels[w1].Version() != w1v || a.winModels[w2].Version() != w2v || a.threadPanel.Version() != threadV || a.threadsView.Version() != threadsViewV {
+		t.Fatal("equal user-group snapshot should be a no-op across every surface")
+	}
+
+	a.SetUserGroupNames(map[string]string{"S1": "platform"})
+	if a.winModels[w1].Version() <= w1v || a.winModels[w2].Version() <= w2v || a.threadPanel.Version() <= threadV || a.threadsView.Version() <= threadsViewV {
+		t.Fatal("changed user-group snapshot should bump every dependent surface")
+	}
+	for _, w := range []wintree.LeafID{w1, w2} {
+		if got := ansi.Strip(a.winModels[w].View(10, 80)); !strings.Contains(got, "@platform") {
+			t.Fatalf("window %v missing renamed @platform mention:\n%s", w, got)
+		}
+	}
+}
+
+func TestWorkspaceUserGroups_ReadySwitchAndUpdateIsolation(t *testing.T) {
+	app := NewApp()
+	latestT1 := map[string]string{"S1": "eng"}
+	app.SetWorkspaceUserGroupStateReader(func(teamID string) map[string]string {
+		switch teamID {
+		case "T1":
+			return cloneStringMap(latestT1)
+		case "T2":
+			return map[string]string{"S1": "ops"}
+		default:
+			return nil
+		}
+	})
+
+	app.Update(WorkspaceReadyMsg{TeamID: "T1", TeamName: "One", InitialActive: true, UserGroupNames: map[string]string{"S1": "eng"}})
+	if got := app.userGroupNames["S1"]; got != "eng" {
+		t.Fatalf("active ready user-group = %q, want eng", got)
+	}
+
+	app.Update(WorkspaceReadyMsg{TeamID: "T2", TeamName: "Two", UserGroupNames: map[string]string{"S1": "ops"}})
+	if got := app.userGroupNames["S1"]; got != "eng" {
+		t.Fatalf("background ready leaked inactive workspace groups: got %q want eng", got)
+	}
+
+	latestT1["S1"] = "platform"
+	app.Update(WorkspaceUserGroupsUpdatedMsg{TeamID: "T2"})
+	if got := app.userGroupNames["S1"]; got != "eng" {
+		t.Fatalf("inactive update leaked across workspaces: got %q want eng", got)
+	}
+
+	app.Update(WorkspaceUserGroupsUpdatedMsg{TeamID: "T1"})
+	if got := app.userGroupNames["S1"]; got != "platform" {
+		t.Fatalf("active update should pull latest reader snapshot: got %q want platform", got)
+	}
+
+	app.Update(WorkspaceSwitchedMsg{TeamID: "T2", TeamName: "Two", UserGroupNames: map[string]string{"S1": "ops"}, Channels: nil})
+	if got := app.userGroupNames["S1"]; got != "ops" {
+		t.Fatalf("workspace switch should apply switched workspace groups: got %q want ops", got)
+	}
+
+	app.Update(WorkspaceSwitchedMsg{TeamID: "T1", TeamName: "One", UserGroupNames: map[string]string{"S1": "platform"}, Channels: nil})
+	if got := app.userGroupNames["S1"]; got != "platform" {
+		t.Fatalf("switching back should restore T1 groups without leak: got %q want platform", got)
+	}
+}
+
+func TestSaveThreadToFile_UsesUserGroupNames(t *testing.T) {
+	app := NewApp()
+	app.focusedPanel = PanelThread
+	app.SetChannels([]sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}})
+	app.SetUserGroupNames(map[string]string{"S1": "eng"})
+	app.threadPanel.SetThread(
+		messages.MessageItem{TS: "1.0", UserName: "alice", Text: "parent <!subteam^S1>", Timestamp: "1:00 PM"},
+		[]messages.MessageItem{{TS: "1.1", UserName: "bob", Text: "reply <!subteam^S1>", Timestamp: "1:01 PM"}},
+		"C1",
+		"1.0",
+	)
+
+	dataHome := t.TempDir()
+	oldDataHome := os.Getenv("XDG_DATA_HOME")
+	if err := os.Setenv("XDG_DATA_HOME", dataHome); err != nil {
+		t.Fatalf("Setenv: %v", err)
+	}
+	t.Cleanup(func() {
+		if oldDataHome == "" {
+			_ = os.Unsetenv("XDG_DATA_HOME")
+			return
+		}
+		_ = os.Setenv("XDG_DATA_HOME", oldDataHome)
+	})
+
+	cmd := app.saveThreadToFile()
+	if cmd == nil {
+		t.Fatal("saveThreadToFile returned nil cmd")
+	}
+	msg := cmd()
+	saved, ok := msg.(statusbar.ThreadSavedMsg)
+	if !ok {
+		t.Fatalf("saveThreadToFile msg = %T, want statusbar.ThreadSavedMsg", msg)
+	}
+	body, err := os.ReadFile(saved.Path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", saved.Path, err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "@eng") {
+		t.Fatalf("export missing resolved user-group mention:\n%s", text)
+	}
+	if strings.Contains(text, "<!subteam^") {
+		t.Fatalf("export leaked raw user-group token:\n%s", text)
 	}
 }
 

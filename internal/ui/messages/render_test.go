@@ -225,6 +225,60 @@ func TestNonHTTPBracketedSurvives(t *testing.T) {
 	}
 }
 
+func TestUserGroupMentionResolution(t *testing.T) {
+	tests := []struct {
+		name       string
+		in         string
+		userGroups map[string]string
+		want       string
+	}{
+		{"label wins over map", "ping <!subteam^S123|@platform> please", map[string]string{"S123": "eng"}, "ping @platform please"},
+		{"label without at gets one", "ping <!subteam^S123|platform> please", nil, "ping @platform please"},
+		{"bare token uses map", "ping <!subteam^S123> please", map[string]string{"S123": "eng"}, "ping @eng please"},
+		{"map handle keeps one at", "ping <!subteam^S123> please", map[string]string{"S123": "@@eng"}, "ping @eng please"},
+		{"unknown falls back", "ping <!subteam^S999> please", nil, "ping @group please"},
+		{"multiple mentions", "<!subteam^S1> <!subteam^S2|sales>", map[string]string{"S1": "eng"}, "@eng @sales"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := RenderSlackMarkdownWith(tt.in, RenderSlackMarkdownOpts{UserGroupNames: tt.userGroups})
+			plain := ansi.Strip(out)
+			if plain != tt.want {
+				t.Errorf("plain = %q, want %q", plain, tt.want)
+			}
+			if strings.Contains(plain, "<!subteam^") {
+				t.Errorf("raw user-group token leaked: %q", plain)
+			}
+		})
+	}
+}
+
+func TestUserGroupMentionUsesMentionStyle(t *testing.T) {
+	out := RenderSlackMarkdownWith("<!subteam^S123>", RenderSlackMarkdownOpts{
+		UserGroupNames: map[string]string{"S123": "eng"},
+	})
+	plain := ansi.Strip(out)
+	if plain != "@eng" {
+		t.Fatalf("plain = %q, want %q", plain, "@eng")
+	}
+	styledPrefix := strings.TrimSuffix(mentionStyle().Render("@eng"), "\x1b[m")
+	styledPrefix = strings.TrimSuffix(styledPrefix, "\x1b[0m")
+	if !strings.Contains(out, styledPrefix) {
+		t.Errorf("expected mention style in raw output, got %q", out)
+	}
+}
+
+func TestEscapedUserGroupMentionStaysLiteral(t *testing.T) {
+	in := "&lt;!subteam^S123|@platform&gt;"
+	out := RenderSlackMarkdownWith(in, RenderSlackMarkdownOpts{
+		UserGroupNames: map[string]string{"S123": "eng"},
+	})
+	plain := ansi.Strip(out)
+	if plain != "<!subteam^S123|@platform>" {
+		t.Errorf("plain = %q, want %q", plain, "<!subteam^S123|@platform>")
+	}
+}
+
 // TestDateTokenRendersFallback covers Slack's <!date^TS^FORMAT|FALLBACK>
 // token (emitted by Linear/Jira/etc. unfurls). We render the precomputed
 // fallback text and never leak the raw token or its format string.
@@ -521,6 +575,35 @@ func TestCommonMark_ChannelMention(t *testing.T) {
 	}
 }
 
+func TestCommonMark_UserGroupMentionFallback(t *testing.T) {
+	got := SlackMrkdwnToCommonMark("ping <!subteam^S123>", nil, nil)
+	if got != "ping @group" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestCommonMarkWith_UserGroupMentions(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		opts CommonMarkOpts
+		want string
+	}{
+		{"bare token uses map", "ping <!subteam^S123>", CommonMarkOpts{UserGroupNames: map[string]string{"S123": "eng"}}, "ping @eng"},
+		{"label wins over map", "ping <!subteam^S123|@platform>", CommonMarkOpts{UserGroupNames: map[string]string{"S123": "eng"}}, "ping @platform"},
+		{"label without at gets one", "ping <!subteam^S123|platform>", CommonMarkOpts{}, "ping @platform"},
+		{"escaped token stays literal", "&lt;!subteam^S123|@platform&gt;", CommonMarkOpts{UserGroupNames: map[string]string{"S123": "eng"}}, "<!subteam^S123|@platform>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SlackMrkdwnToCommonMarkWith(tt.in, tt.opts)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCommonMark_EntityDecode(t *testing.T) {
 	got := SlackMrkdwnToCommonMark("a &amp; b &lt; c &gt; d", nil, nil)
 	if got != "a & b < c > d" {
@@ -776,12 +859,13 @@ func TestBgFgANSIForBasicColorOutOfRange(t *testing.T) {
 
 // TestSubstituteBgSGR exercises the grammar-aware bg-parameter
 // substitution. The helper must:
-//   (1) substitute the param when it stands alone (\x1b[40m)
-//   (2) substitute the param within a bundled SGR (\x1b[1;31;40m)
-//   (3) NOT corrupt literal digits in non-SGR content
-//   (4) NOT match the param value inside a 256-color sub-argument
-//       (\x1b[38;5;40m is an FG index 40, not a bg basic 40)
-//   (5) leave the string unchanged when from == to
+//
+//	(1) substitute the param when it stands alone (\x1b[40m)
+//	(2) substitute the param within a bundled SGR (\x1b[1;31;40m)
+//	(3) NOT corrupt literal digits in non-SGR content
+//	(4) NOT match the param value inside a 256-color sub-argument
+//	    (\x1b[38;5;40m is an FG index 40, not a bg basic 40)
+//	(5) leave the string unchanged when from == to
 func TestSubstituteBgSGR(t *testing.T) {
 	const to = "48;2;100;100;200"
 

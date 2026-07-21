@@ -66,3 +66,25 @@ func TestThreadToMarkdown_BoldConverted(t *testing.T) {
 		t.Errorf("bold not converted, got:\n%s", got)
 	}
 }
+
+func TestThreadToMarkdown_UserGroupFallback(t *testing.T) {
+	parent := messages.MessageItem{UserName: "alice", DateStr: "2026-05-18", Timestamp: "3:04 PM", Text: "ping <!subteam^S123>"}
+	got := ThreadToMarkdown(parent, nil, nil, nil)
+	if !strings.Contains(got, "ping @group") {
+		t.Errorf("missing user-group fallback, got:\n%s", got)
+	}
+	if strings.Contains(got, "<!subteam^") {
+		t.Errorf("raw user-group token leaked, got:\n%s", got)
+	}
+}
+
+func TestThreadToMarkdownWithUserGroups(t *testing.T) {
+	parent := messages.MessageItem{UserName: "alice", DateStr: "2026-05-18", Timestamp: "3:04 PM", Text: "ping <!subteam^S123|@platform>"}
+	got := ThreadToMarkdownWithUserGroups(parent, nil, nil, nil, map[string]string{"S123": "eng"})
+	if !strings.Contains(got, "ping @platform") {
+		t.Errorf("expected embedded label to win, got:\n%s", got)
+	}
+	if strings.Contains(got, "<!subteam^") || strings.Contains(got, "@eng") {
+		t.Errorf("unexpected user-group rendering, got:\n%s", got)
+	}
+}

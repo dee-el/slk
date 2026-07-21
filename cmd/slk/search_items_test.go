@@ -40,12 +40,14 @@ func testResolveChannel(id string) (string, bool) {
 	return "", false
 }
 
+var testUserGroups = map[string]string{"S123": "eng"}
+
 // testNow is the fixed "current time" used by conversion tests so
 // today/this-year/prior-year date formatting is deterministic.
 var testNow = time.Date(2026, time.June, 11, 12, 0, 0, 0, time.Local)
 
 func convert(matches ...slack.SearchMessage) []searchItemsOut {
-	items := searchResultItems(matches, "15:04", testNow, testResolveUser, testResolveChannel)
+	items := searchResultItems(matches, "15:04", testNow, testResolveUser, testResolveChannel, testUserGroups)
 	out := make([]searchItemsOut, len(items))
 	for i, it := range items {
 		out[i] = searchItemsOut{it.ChannelName, it.Text, it.IsDM}
@@ -74,6 +76,20 @@ func TestSearchResultItemsFlattensMrkdwn(t *testing.T) {
 func TestSearchResultItemsUnknownMentionFallsBack(t *testing.T) {
 	got := convert(searchMatch("C1", "general", "grant", "hi <@U0ZZZZZZZZZ>"))
 	if want := "hi @U0ZZZZZZZZZ"; got[0].Text != want {
+		t.Errorf("Text = %q, want %q", got[0].Text, want)
+	}
+}
+
+func TestSearchResultItemsKnownUserGroupMention(t *testing.T) {
+	got := convert(searchMatch("C1", "general", "grant", "paging <!subteam^S123> now"))
+	if want := "paging @eng now"; got[0].Text != want {
+		t.Errorf("Text = %q, want %q", got[0].Text, want)
+	}
+}
+
+func TestSearchResultItemsUnknownUserGroupMentionFallsBack(t *testing.T) {
+	got := convert(searchMatch("C1", "general", "grant", "paging <!subteam^S999> now"))
+	if want := "paging @group now"; got[0].Text != want {
 		t.Errorf("Text = %q, want %q", got[0].Text, want)
 	}
 }
@@ -121,7 +137,7 @@ func TestSearchResultItemsRegularChannelNameNotTreatedAsUser(t *testing.T) {
 func TestSearchResultItemsThreadTSFromPermalink(t *testing.T) {
 	m := searchMatch("C1", "general", "grant", "reply")
 	m.Permalink = "https://x.slack.com/archives/C1/p1700000002000200?thread_ts=1700000001.000100&cid=C1"
-	items := searchResultItems([]slack.SearchMessage{m}, "15:04", testNow, testResolveUser, testResolveChannel)
+	items := searchResultItems([]slack.SearchMessage{m}, "15:04", testNow, testResolveUser, testResolveChannel, testUserGroups)
 	if items[0].ThreadTS != "1700000001.000100" {
 		t.Errorf("ThreadTS = %q, want %q", items[0].ThreadTS, "1700000001.000100")
 	}
@@ -156,7 +172,7 @@ func TestSearchResultItemsTimestampIncludesDate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := searchMatch("C1", "general", "grant", "hello")
 			m.Timestamp = slackTS(tc.when)
-			items := searchResultItems([]slack.SearchMessage{m}, "15:04", testNow, testResolveUser, testResolveChannel)
+			items := searchResultItems([]slack.SearchMessage{m}, "15:04", testNow, testResolveUser, testResolveChannel, testUserGroups)
 			if items[0].Timestamp != tc.want {
 				t.Errorf("Timestamp = %q, want %q", items[0].Timestamp, tc.want)
 			}
@@ -167,7 +183,7 @@ func TestSearchResultItemsTimestampIncludesDate(t *testing.T) {
 func TestSearchResultItemsTimestampUnparseableFallsBack(t *testing.T) {
 	m := searchMatch("C1", "general", "grant", "hello")
 	m.Timestamp = "garbage"
-	items := searchResultItems([]slack.SearchMessage{m}, "15:04", testNow, testResolveUser, testResolveChannel)
+	items := searchResultItems([]slack.SearchMessage{m}, "15:04", testNow, testResolveUser, testResolveChannel, testUserGroups)
 	if items[0].Timestamp != "garbage" {
 		t.Errorf("Timestamp = %q, want raw value kept", items[0].Timestamp)
 	}

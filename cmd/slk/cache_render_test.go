@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/gammons/slk/internal/cache"
+	uimessages "github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/messages/blockkit"
 	"github.com/slack-go/slack"
 )
@@ -295,5 +297,63 @@ func TestLoadCachedMessagesRestoresTableBlocks(t *testing.T) {
 	}
 	if table.Columns[2].Align != blockkit.TableAlignLeft || table.Columns[2].Wrapped {
 		t.Fatalf("column[2] = %+v", table.Columns[2])
+	}
+}
+
+func TestLoadCachedMessagesRichTextUserGroupResolvesWithSnapshot(t *testing.T) {
+	db := newCacheForTest(t)
+
+	const (
+		channelID = "C4"
+		msgTS     = "1700000200.000000"
+	)
+	upstream := slack.Message{Msg: slack.Msg{
+		Timestamp: msgTS,
+		User:      "UAUTHOR",
+		Blocks: slack.Blocks{BlockSet: []slack.Block{
+			slack.NewRichTextBlock("rt",
+				slack.NewRichTextSection(
+					slack.NewRichTextSectionTextElement("team ", nil),
+					slack.NewRichTextSectionUserGroupElement("S123"),
+				),
+			),
+		}},
+	}}
+	rawBytes, err := json.Marshal(upstream)
+	if err != nil {
+		t.Fatalf("marshal upstream: %v", err)
+	}
+	if err := db.UpsertMessage(cache.Message{
+		TS:          msgTS,
+		ChannelID:   channelID,
+		WorkspaceID: "T1",
+		UserID:      "UAUTHOR",
+		Text:        "team <!subteam^S123>",
+		RawJSON:     string(rawBytes),
+		CreatedAt:   1700000200,
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+
+	got := loadCachedMessages(db, "USELF", channelID, map[string]string{"UAUTHOR": "alice"}, "3:04 PM", nil)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(got))
+	}
+	rt, ok := got[0].Blocks[0].(blockkit.RichTextBlock)
+	if !ok {
+		t.Fatalf("block type = %T, want blockkit.RichTextBlock", got[0].Blocks[0])
+	}
+	mrkdwn := blockkit.RichTextToMrkdwn(rt)
+	if mrkdwn != "team <!subteam^S123>" {
+		t.Fatalf("RichTextToMrkdwn = %q, want team <!subteam^S123>", mrkdwn)
+	}
+	rendered := uimessages.RenderSlackMarkdownWith(mrkdwn, uimessages.RenderSlackMarkdownOpts{
+		UserGroupNames: map[string]string{"S123": "eng"},
+	})
+	if !strings.Contains(rendered, "@eng") {
+		t.Fatalf("rendered = %q, want @eng", rendered)
+	}
+	if strings.Contains(rendered, "<!subteam^") {
+		t.Fatalf("rendered leaked raw token: %q", rendered)
 	}
 }

@@ -57,3 +57,29 @@ func TestFlattenMrkdwnNilResolvers(t *testing.T) {
 		t.Errorf("got %q, want %q", got, "@U1 #C1")
 	}
 }
+
+func TestFlattenMrkdwnWithUserGroups(t *testing.T) {
+	resolveUser := func(id string) (string, bool) { return "", false }
+	resolveChannel := func(id string) (string, bool) { return "", false }
+
+	tests := []struct {
+		name       string
+		in         string
+		userGroups map[string]string
+		want       string
+	}{
+		{"bare token uses map", "ping <!subteam^S123>", map[string]string{"S123": "eng"}, "ping @eng"},
+		{"label wins over map", "ping <!subteam^S123|@platform>", map[string]string{"S123": "eng"}, "ping @platform"},
+		{"map handle keeps one at", "ping <!subteam^S123>", map[string]string{"S123": "@@eng"}, "ping @eng"},
+		{"unknown falls back", "ping <!subteam^S999>", nil, "ping @group"},
+		{"escaped token stays literal", "&lt;!subteam^S123|@platform&gt;", map[string]string{"S123": "eng"}, "<!subteam^S123|@platform>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FlattenMrkdwnWithUserGroups(tt.in, resolveUser, resolveChannel, tt.userGroups)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

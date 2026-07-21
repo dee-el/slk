@@ -491,6 +491,42 @@ func TestConvert_Broadcast(t *testing.T) {
 	}
 }
 
+func TestConvert_UserGroupMention(t *testing.T) {
+	mr, blk := Convert("ping <!subteam^S123|@eng> please")
+	if mr != "ping <!subteam^S123|@eng> please" {
+		t.Errorf("mrkdwn = %q", mr)
+	}
+	sec := blk.Elements[0].(*slack.RichTextSection)
+	if len(sec.Elements) != 3 {
+		t.Fatalf("got %d elements, want 3 (text, usergroup, text)", len(sec.Elements))
+	}
+	ug, ok := sec.Elements[1].(*slack.RichTextSectionUserGroupElement)
+	if !ok {
+		t.Fatalf("middle element is %T, want *RichTextSectionUserGroupElement", sec.Elements[1])
+	}
+	if ug.UsergroupID != "S123" {
+		t.Errorf("UsergroupID = %q, want S123", ug.UsergroupID)
+	}
+}
+
+func TestConvert_BoldContainingUserGroupMention(t *testing.T) {
+	mr, blk := Convert("**<!subteam^S123|@eng>**")
+	if mr != "*<!subteam^S123|@eng>*" {
+		t.Errorf("mrkdwn = %q, want %q", mr, "*<!subteam^S123|@eng>*")
+	}
+	sec := blk.Elements[0].(*slack.RichTextSection)
+	if len(sec.Elements) != 1 {
+		t.Fatalf("got %d elements, want 1 usergroup element", len(sec.Elements))
+	}
+	ug, ok := sec.Elements[0].(*slack.RichTextSectionUserGroupElement)
+	if !ok {
+		t.Fatalf("element is %T, want *RichTextSectionUserGroupElement", sec.Elements[0])
+	}
+	if ug.Style == nil || !ug.Style.Bold {
+		t.Errorf("usergroup style = %+v, want Bold=true", ug.Style)
+	}
+}
+
 func TestConvert_BoldContainingMention(t *testing.T) {
 	mr, blk := Convert("**Hi <@U1>**")
 	if mr != "*Hi <@U1>*" {

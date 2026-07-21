@@ -13,10 +13,6 @@ import (
 var (
 	userMentionWithLabelRe = regexp.MustCompile(`<@([A-Z0-9]+)\|([^>]+)>`)
 	specialMentionRe       = regexp.MustCompile(`<!(here|channel|everyone)(?:\|[^>]*)?>`)
-	// Usergroup mentions: <!subteam^SID|@label> or bare <!subteam^SID>.
-	// Group 1 is the optional label (conventionally already "@"-prefixed
-	// on the wire, but not guaranteed).
-	usergroupMentionRe = regexp.MustCompile(`<!subteam\^[A-Z0-9]+(?:\|([^>]+))?>`)
 )
 
 // FlattenMrkdwn converts Slack mrkdwn entity tokens into plain text for
@@ -36,6 +32,11 @@ var (
 //
 // Either resolver may be nil; unknown IDs fall back to the raw ID.
 func FlattenMrkdwn(text string, resolveUser, resolveChannel func(id string) (string, bool)) string {
+	return FlattenMrkdwnWithUserGroups(text, resolveUser, resolveChannel, nil)
+}
+
+// FlattenMrkdwnWithUserGroups is the user-group-aware form of FlattenMrkdwn.
+func FlattenMrkdwnWithUserGroups(text string, resolveUser, resolveChannel func(id string) (string, bool), userGroupNames map[string]string) string {
 	// Date tokens first: their payload never contains other entity
 	// forms, and handling them up front keeps specialMentionRe from
 	// having to exclude `<!date...>`.
@@ -84,15 +85,9 @@ func FlattenMrkdwn(text string, resolveUser, resolveChannel func(id string) (str
 		return "@" + specialMentionRe.FindStringSubmatch(match)[1]
 	})
 
-	text = usergroupMentionRe.ReplaceAllStringFunc(text, func(match string) string {
-		label := usergroupMentionRe.FindStringSubmatch(match)[1]
-		if label == "" {
-			// Bare token: there's no local usergroup cache to resolve
-			// SIDs against, so a generic placeholder beats leaking the
-			// raw <!subteam^S...> wire form into a snippet.
-			return "@group"
-		}
-		return "@" + strings.TrimPrefix(label, "@")
+	text = userGroupMentionRe.ReplaceAllStringFunc(text, func(match string) string {
+		groups := userGroupMentionRe.FindStringSubmatch(match)
+		return userGroupMentionText(groups[1], groups[2], userGroupNames)
 	})
 
 	// Wire-format escapes, decoded last so they can't be reinterpreted

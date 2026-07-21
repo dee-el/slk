@@ -46,6 +46,8 @@ type mockEventHandler struct {
 
 	prefChanges []prefChangeRecord
 
+	userGroupChanges []slack.UserGroup
+
 	memberJoined []memberEventRecord
 	memberLeft   []memberEventRecord
 }
@@ -142,6 +144,9 @@ func (m *mockEventHandler) OnChannelSectionChannelsRemoved(sectionID string, cha
 }
 func (m *mockEventHandler) OnPrefChange(name, value string) {
 	m.prefChanges = append(m.prefChanges, prefChangeRecord{name, value})
+}
+func (m *mockEventHandler) OnUserGroupChanged(group slack.UserGroup) {
+	m.userGroupChanges = append(m.userGroupChanges, group)
 }
 
 func (m *mockEventHandler) OnMemberJoined(channelID, userID string) {
@@ -655,6 +660,55 @@ func TestDispatch_PrefChange_EmptyValue(t *testing.T) {
 	}
 	if h.prefChanges[0].value != "" {
 		t.Errorf("value = %q, want empty", h.prefChanges[0].value)
+	}
+}
+
+func TestDispatch_SubteamCreated_CallsHandler(t *testing.T) {
+	h := &mockEventHandler{}
+	data := []byte(`{"type":"subteam_created","subteam":{"id":"S1","handle":"eng","name":"Engineering"}}`)
+	dispatchWebSocketEvent(data, h)
+	if len(h.userGroupChanges) != 1 {
+		t.Fatalf("expected 1 user group change, got %d", len(h.userGroupChanges))
+	}
+	got := h.userGroupChanges[0]
+	if got.ID != "S1" || got.Handle != "eng" || got.Name != "Engineering" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestDispatch_SubteamUpdated_CallsHandler(t *testing.T) {
+	h := &mockEventHandler{}
+	data := []byte(`{"type":"subteam_updated","subteam":{"id":"S2","handle":"platform","name":"Platform"}}`)
+	dispatchWebSocketEvent(data, h)
+	if len(h.userGroupChanges) != 1 {
+		t.Fatalf("expected 1 user group change, got %d", len(h.userGroupChanges))
+	}
+	if h.userGroupChanges[0].ID != "S2" {
+		t.Errorf("ID = %q, want S2", h.userGroupChanges[0].ID)
+	}
+}
+
+func TestDispatch_SubteamCreated_EmptyIDIgnored(t *testing.T) {
+	h := &mockEventHandler{}
+	data := []byte(`{"type":"subteam_created","subteam":{"id":"   ","handle":"eng","name":"Engineering"}}`)
+	dispatchWebSocketEvent(data, h)
+	if len(h.userGroupChanges) != 0 {
+		t.Fatalf("expected 0 user group changes, got %d", len(h.userGroupChanges))
+	}
+}
+
+func TestDispatch_SubteamMembershipAndSelfEventsIgnored(t *testing.T) {
+	cases := []string{
+		`{"type":"subteam_members_changed","subteam_id":"S1","added_users":["U1"]}`,
+		`{"type":"subteam_self_added","subteam_id":"S1"}`,
+		`{"type":"subteam_self_removed","subteam_id":"S1"}`,
+	}
+	for _, data := range cases {
+		h := &mockEventHandler{}
+		dispatchWebSocketEvent([]byte(data), h)
+		if len(h.userGroupChanges) != 0 {
+			t.Fatalf("payload %s triggered %d user group changes", data, len(h.userGroupChanges))
+		}
 	}
 }
 

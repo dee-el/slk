@@ -39,6 +39,28 @@ func TestSplitWindow_NewWindowGetsSeededClone(t *testing.T) {
 	}
 }
 
+func TestSplitWindow_NewWindowInheritsUserGroupNames(t *testing.T) {
+	a := newWideTestApp(t)
+	_, _ = a.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+	a.SetUserGroupNames(map[string]string{"S1": "eng"})
+	a.messagepane.SetMessages([]messages.MessageItem{{
+		TS:        "1.0",
+		UserName:  "alice",
+		UserID:    "U1",
+		Text:      "hello <!subteam^S1>",
+		Timestamp: "1:00 PM",
+	}})
+
+	src := a.messagepane
+	_ = a.splitWindow(wintree.SplitSideBySide)
+	if got := ansi.Strip(a.messagepane.View(10, 80)); !strings.Contains(got, "@eng") {
+		t.Fatalf("new split window missing inherited @eng mention:\n%s", got)
+	}
+	if got := ansi.Strip(src.View(10, 80)); !strings.Contains(got, "@eng") {
+		t.Fatalf("source window lost @eng mention after split:\n%s", got)
+	}
+}
+
 func TestFocusWindow_IsPointerSwapNoDispatch(t *testing.T) {
 	a := newWideTestApp(t)
 	_, _ = a.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})

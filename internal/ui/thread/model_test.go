@@ -957,6 +957,52 @@ func TestThreadPatchUserName_InvalidatesCacheEvenWithNoMatchingRows(t *testing.T
 	}
 }
 
+func TestThreadSetUserGroupNames_RendersParentAndReplyMentions(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "1.0", UserName: "alice", Text: "parent <!subteam^S1>", Timestamp: "1:00 PM"}
+	replies := []messages.MessageItem{{TS: "1.001", UserName: "bob", Text: "reply <!subteam^S1> <!subteam^S2>", Timestamp: "1:01 PM"}}
+	m.SetThread(parent, replies, "C1", "1.0")
+	m.SetUserGroupNames(map[string]string{"S1": "eng"})
+
+	out := ansi.Strip(m.View(20, 80))
+	if !strings.Contains(out, "parent @eng") {
+		t.Fatalf("parent mention not resolved:\n%s", out)
+	}
+	if !strings.Contains(out, "reply @eng @group") {
+		t.Fatalf("reply mentions not resolved with known/unknown parity:\n%s", out)
+	}
+	if strings.Contains(out, "<!subteam^") {
+		t.Fatalf("raw user-group token leaked:\n%s", out)
+	}
+	if m.cache == nil {
+		t.Fatal("expected cache populated after View()")
+	}
+	verBefore := m.Version()
+
+	m.SetUserGroupNames(map[string]string{"S1": "platform"})
+
+	if m.cache != nil {
+		t.Fatal("SetUserGroupNames should invalidate thread cache on rename")
+	}
+	if m.Version() <= verBefore {
+		t.Fatal("SetUserGroupNames should bump Version on rename")
+	}
+	out = ansi.Strip(m.View(20, 80))
+	if !strings.Contains(out, "parent @platform") || !strings.Contains(out, "reply @platform @group") {
+		t.Fatalf("renamed thread user-group mentions not rendered:\n%s", out)
+	}
+}
+
+func TestThreadSetUserGroupNames_EquivalentSnapshotDoesNotBumpVersion(t *testing.T) {
+	m := New()
+	m.SetUserGroupNames(map[string]string{"S1": "eng"})
+	v0 := m.Version()
+	m.SetUserGroupNames(map[string]string{"S1": "eng"})
+	if v1 := m.Version(); v1 != v0 {
+		t.Fatalf("SetUserGroupNames(equal snapshot) bumped Version: v0=%d v1=%d", v0, v1)
+	}
+}
+
 // TestHitTestReaction_OnPill asserts that the thread panel records a
 // hit rect for every rendered reaction pill, and that HitTestReaction
 // returns the correct (replyIdx, emoji) when a click lands inside the

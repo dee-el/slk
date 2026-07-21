@@ -14,14 +14,16 @@ import (
 // newWindowModel constructs a messages model for a new window and
 // applies the app-global config every pane needs — mirroring exactly
 // the Set* calls made on the root model via App's Set* forwarders
-// (SetAvatarFunc / SetUserNames / SetChannels / SetEmojiContext /
-// SetCustomEmoji / SetImageContext / the bootstrap spinner tick).
+// (SetAvatarFunc / SetUserNames / SetUserGroupNames / SetChannels /
+// SetEmojiContext / SetCustomEmoji / SetImageContext / the bootstrap
+// spinner tick).
 // The values are retained on App fields by those forwarders so
 // late-created windows get them too.
 func (a *App) newWindowModel(chName string) *messages.Model {
 	m := messages.New(nil, chName)
 	m.SetAvatarFunc(a.avatarFn)
 	m.SetUserNames(a.userNames)
+	m.SetUserGroupNames(a.userGroupNames)
 	m.SetChannelNames(a.channelNames)
 	m.SetEmojiContext(a.emojiCtx)
 	if a.emojiCustoms != nil {

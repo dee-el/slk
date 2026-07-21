@@ -102,6 +102,7 @@ type Model struct {
 	focused           bool
 	avatarFn          messages.AvatarFunc
 	userNames         map[string]string
+	userGroupNames    map[string]string
 	channelNames      map[string]string
 	vp                viewport.Model
 	reactionNavActive bool
@@ -660,6 +661,18 @@ func cloneStringMap(src map[string]string) map[string]string {
 	return out
 }
 
+func stringMapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		if vb, ok := b[k]; !ok || vb != va {
+			return false
+		}
+	}
+	return true
+}
+
 // SetUserNames sets the immutable user ID -> display name snapshot for mention
 // resolution.
 // Bumps userNamesV unconditionally so chromeCache (and any other cache
@@ -667,6 +680,19 @@ func cloneStringMap(src map[string]string) map[string]string {
 func (m *Model) SetUserNames(names map[string]string) {
 	m.userNames = names
 	m.userNamesV++
+	m.InvalidateCache()
+}
+
+// SetUserGroupNames sets the immutable user-group ID -> handle snapshot for
+// bare <!subteam^...> mention resolution.
+func (m *Model) SetUserGroupNames(names map[string]string) {
+	if names == nil {
+		names = map[string]string{}
+	}
+	if stringMapsEqual(m.userGroupNames, names) {
+		return
+	}
+	m.userGroupNames = names
 	m.InvalidateCache()
 }
 
@@ -2426,12 +2452,13 @@ func (m *Model) blockkitContext(msg messages.MessageItem, userNames, channelName
 		TableViewports: viewports,
 		RenderText: func(s string, un map[string]string) string {
 			return messages.RenderSlackMarkdownWith(s, messages.RenderSlackMarkdownOpts{
-				UserNames:    un,
-				ChannelNames: channelNames,
-				PlaceCtx:     m.emojiCtx.PlaceCtx,
-				EmojiCells:   m.emojiCtx.Cells,
-				Customs:      m.emojiCtx.Customs,
-				EmojiFlushes: nil,
+				UserNames:      un,
+				ChannelNames:   channelNames,
+				UserGroupNames: m.userGroupNames,
+				PlaceCtx:       m.emojiCtx.PlaceCtx,
+				EmojiCells:     m.emojiCtx.Cells,
+				Customs:        m.emojiCtx.Customs,
+				EmojiFlushes:   nil,
 			})
 		},
 		WrapText: messages.WordWrap,
@@ -2461,12 +2488,13 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 	// Mirrors the messages-pane named-return `flushes` slice.
 	var flushes []func(io.Writer) error
 	bodyOpts := messages.RenderSlackMarkdownOpts{
-		UserNames:    userNames,
-		ChannelNames: channelNames,
-		PlaceCtx:     m.emojiCtx.PlaceCtx,
-		EmojiCells:   m.emojiCtx.Cells,
-		Customs:      m.emojiCtx.Customs,
-		EmojiFlushes: &flushes,
+		UserNames:      userNames,
+		ChannelNames:   channelNames,
+		UserGroupNames: m.userGroupNames,
+		PlaceCtx:       m.emojiCtx.PlaceCtx,
+		EmojiCells:     m.emojiCtx.Cells,
+		Customs:        m.emojiCtx.Customs,
+		EmojiFlushes:   &flushes,
 	}
 	text := styles.MessageText.Render(messages.WordWrap(messages.RenderSlackMarkdownWith(messages.MessageTextSource(msg), bodyOpts), contentWidth))
 	textRows := lipgloss.Height(text)

@@ -103,6 +103,10 @@ type WorkspaceContext struct {
 	ConnMgr    *slackclient.ConnectionManager
 	RTMHandler *rtmEventHandler
 	UserNames  *userNameStore
+	// UserGroupNames maps Slack user-group IDs to handles without a
+	// leading @. Best-effort metadata only; empty when usergroups.list
+	// is unavailable for this workspace.
+	UserGroupNames *userGroupNameStore
 	// AvatarURLs maps userID -> avatar image URL. Populated from the
 	// local users cache at connect time (synchronous, before any
 	// goroutines spin up) and refreshed from the background
@@ -1067,6 +1071,17 @@ func run() error {
 			return wctx.UserNames.Snapshot(), wctx.ExternalUsers.Snapshot()
 		})
 
+		app.SetWorkspaceUserGroupStateReader(func(teamID string) map[string]string {
+			if teamID == "" {
+				return nil
+			}
+			wctx := router.ByID(teamID)
+			if wctx == nil || wctx.UserGroupNames == nil {
+				return nil
+			}
+			return wctx.UserGroupNames.Snapshot()
+		})
+
 		app.SetChannelService(ui.NewChannelService(ui.ChannelServiceFuncs{
 			RecordVisit: func(channelID ids.ChannelID) {
 				chIDStr := string(channelID)
@@ -1556,7 +1571,7 @@ func run() error {
 
 		external := wctx.ExternalUsers.Snapshot()
 
-		return ui.WorkspaceSwitchedMsg{
+		msg := ui.WorkspaceSwitchedMsg{
 			TeamID:           wctx.TeamID,
 			TeamName:         wctx.TeamName,
 			Domain:           wctx.Client.TeamSubdomain(),
@@ -1565,11 +1580,13 @@ func run() error {
 			Channels:         wctx.ChannelsSnapshot(),
 			FinderItems:      wctx.FinderItemsSnapshot(),
 			UserNames:        wctx.UserNames.Snapshot(),
+			UserGroupNames:   wctx.UserGroupNames.Snapshot(),
 			ExternalUsers:    external,
 			UserID:           wctx.UserID,
 			CustomEmoji:      wctx.CustomEmoji,
 			SectionsProvider: sectionsProviderAdapter{store: wctx.SectionStore},
 		}
+		return msg
 	})
 
 	// Resolve general.default_workspace if set. We honor it only if
@@ -1666,28 +1683,30 @@ func run() error {
 			// Start WebSocket for this workspace
 			teamID := wctx.TeamID
 			handler := &rtmEventHandler{
-				program:         p,
-				userNames:       wctx.UserNames,
-				tsFormat:        tsFormat,
-				db:              db,
-				workspaceID:     teamID,
-				isActive:        func() bool { return teamID == activeTeamID },
-				notifier:        notifier,
-				notifyCfg:       cfg.Notifications,
-				currentUserID:   wctx.UserID,
-				workspaceName:   wctx.TeamName,
-				activeChannelID: func() string { return app.ActiveChannelID() },
-				cfg:             cfg,
-				wsCtx:           wctx,
-				backfillGate:    dedupeGate{window: 30 * time.Second},
+				program:              p,
+				userNames:            wctx.UserNames,
+				userGroupNames:       wctx.UserGroupNames,
+				getUserGroups:        wctx.Client.GetUserGroups,
+				tsFormat:             tsFormat,
+				db:                   db,
+				workspaceID:          teamID,
+				isActive:             func() bool { return teamID == activeTeamID },
+				notifier:             notifier,
+				notifyCfg:            cfg.Notifications,
+				currentUserID:        wctx.UserID,
+				workspaceName:        wctx.TeamName,
+				activeChannelID:      func() string { return app.ActiveChannelID() },
+				cfg:                  cfg,
+				wsCtx:                wctx,
+				backfillGate:         dedupeGate{window: 30 * time.Second},
+				userGroupRefreshGate: dedupeGate{window: 30 * time.Second},
 			}
 			wctx.RTMHandler = handler
 			wctx.ConnMgr = slackclient.NewConnectionManager(wctx.Client, handler)
-			go wctx.ConnMgr.Run(ctx)
 
 			external := wctx.ExternalUsers.Snapshot()
 
-			p.Send(ui.WorkspaceReadyMsg{
+			msg := ui.WorkspaceReadyMsg{
 				TeamID:           wctx.TeamID,
 				TeamName:         wctx.TeamName,
 				Domain:           wctx.Client.TeamSubdomain(),
@@ -1696,12 +1715,18 @@ func run() error {
 				Channels:         wctx.ChannelsSnapshot(),
 				FinderItems:      wctx.FinderItemsSnapshot(),
 				UserNames:        wctx.UserNames.Snapshot(),
+				UserGroupNames:   wctx.UserGroupNames.Snapshot(),
 				ExternalUsers:    external,
 				UserID:           wctx.UserID,
 				CustomEmoji:      wctx.CustomEmoji, // empty at this point; filled by the goroutine below
 				SectionsProvider: sectionsProviderAdapter{store: wctx.SectionStore},
 				InitialActive:    isInitial,
 				LastChannelID:    mostRecentlyVisitedChannel(wctx.LastVisitedByChannel.Snapshot()),
+			}
+			startWorkspaceRealtime(func() {
+				p.Send(msg)
+			}, func() {
+				wctx.ConnMgr.Run(ctx)
 			})
 
 			// Fetch workspace custom emojis in the background. When done,
@@ -1787,6 +1812,7 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		TeamName:             token.TeamName,
 		UserID:               client.UserID(),
 		UserNames:            newUserNameStore(nil),
+		UserGroupNames:       newUserGroupNameStore(nil),
 		AvatarURLs:           &sync.Map{},
 		UserNamesByHandle:    newHandleNameStore(nil),
 		BotUserIDs:           newBotUserIDStore(nil),
@@ -3143,6 +3169,10 @@ func searchWorkspaceFunc(router *workspaceRouter, db *cache.DB, tsFormat string)
 		// goroutine, so it snapshots once and never mutates the
 		// workspace's canonical store.
 		userNames := wctx.UserNames.Snapshot()
+		userGroups := map[string]string{}
+		if wctx.UserGroupNames != nil {
+			userGroups = wctx.UserGroupNames.Snapshot()
+		}
 		resolveUser := func(id string) (string, bool) {
 			return lookupUserCached(id, userNames, db)
 		}
@@ -3155,7 +3185,7 @@ func searchWorkspaceFunc(router *workspaceRouter, db *cache.DB, tsFormat string)
 			}
 			return "", false
 		}
-		items := searchResultItems(res.Matches, tsFormat, time.Now(), resolveUser, resolveChannel)
+		items := searchResultItems(res.Matches, tsFormat, time.Now(), resolveUser, resolveChannel, userGroups)
 		return ui.WorkspaceSearchResultsMsg{Query: query, Items: items, Total: res.Total}
 	}
 }
@@ -3170,7 +3200,7 @@ var userIDShapeRe = regexp.MustCompile(`^[UW][A-Z0-9]{5,}$`)
 // channel names (raw user IDs on the wire) are resolved to the
 // counterpart's display name, and thread TSes are recovered from
 // permalinks. Pure: all lookups go through the supplied resolvers.
-func searchResultItems(matches []slack.SearchMessage, tsFormat string, now time.Time, resolveUser, resolveChannel func(id string) (string, bool)) []searchresults.Item {
+func searchResultItems(matches []slack.SearchMessage, tsFormat string, now time.Time, resolveUser, resolveChannel func(id string) (string, bool), userGroupNames map[string]string) []searchresults.Item {
 	items := make([]searchresults.Item, 0, len(matches))
 	for _, match := range matches {
 		// ThreadTS comes from the hit's permalink. Known v1
@@ -3201,7 +3231,7 @@ func searchResultItems(matches []slack.SearchMessage, tsFormat string, now time.
 			UserName:    match.Username,
 			TS:          match.Timestamp,
 			ThreadTS:    threadTS,
-			Text:        messages.FlattenMrkdwn(match.Text, resolveUser, resolveChannel),
+			Text:        messages.FlattenMrkdwnWithUserGroups(match.Text, resolveUser, resolveChannel, userGroupNames),
 			Timestamp:   formatSearchTimestamp(match.Timestamp, tsFormat, now),
 			IsDM:        isDM,
 		})
@@ -3344,16 +3374,31 @@ func mostRecentlyVisitedChannel(visits map[string]int64) string {
 	return bestID
 }
 
+// startWorkspaceRealtime preserves startup ordering for one workspace:
+// enqueue WorkspaceReadyMsg first, then allow the connection manager to
+// invoke OnConnect from its own goroutine.
+func startWorkspaceRealtime(sendReady func(), runConn func()) {
+	if sendReady != nil {
+		sendReady()
+	}
+	if runConn != nil {
+		go runConn()
+	}
+}
+
 // rtmEventHandler bridges WebSocket events into bubbletea messages via p.Send()
 // and caches all incoming messages to the SQLite database.
 type rtmEventHandler struct {
-	program     *tea.Program
-	userNames   *userNameStore
-	tsFormat    string
-	db          *cache.DB
-	workspaceID string
-	connected   bool
-	isActive    func() bool
+	program        *tea.Program
+	sendMsg        func(tea.Msg)
+	userNames      *userNameStore
+	userGroupNames *userGroupNameStore
+	getUserGroups  func(context.Context) ([]slack.UserGroup, error)
+	tsFormat       string
+	db             *cache.DB
+	workspaceID    string
+	connected      bool
+	isActive       func() bool
 
 	// Notifications
 	notifier        *notify.Notifier
@@ -3375,6 +3420,23 @@ type rtmEventHandler struct {
 	// backfill passes. Per-handler so each workspace has its own gate.
 	// Initialized at construction with window = 30 * time.Second.
 	backfillGate dedupeGate
+	// userGroupRefreshGate dedupes reconnect-triggered usergroups.list
+	// refreshes the same way backfillGate dedupes reconnect catch-up.
+	userGroupRefreshGate dedupeGate
+}
+
+func (h *rtmEventHandler) send(msg tea.Msg) {
+	if h == nil || msg == nil {
+		return
+	}
+	if h.sendMsg != nil {
+		h.sendMsg(msg)
+		return
+	}
+	if h.program != nil {
+		h.program.Send(msg)
+	}
+	return
 }
 
 func (h *rtmEventHandler) currentChannelMeta(channelID string) (name string, channelType string) {
@@ -3479,7 +3541,11 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 			if chType == "dm" || chType == "group_dm" {
 				title = h.workspaceName + ": " + senderName
 			}
-			body := senderName + ": " + notify.StripSlackMarkup(text, h.userNames.Snapshot())
+			userGroupNames := map[string]string{}
+			if store := h.userGroupStore(); store != nil {
+				userGroupNames = store.Snapshot()
+			}
+			body := formatNotificationBody(senderName, text, h.userNames.Snapshot(), userGroupNames)
 			go h.notifier.Notify(title, body)
 		}
 	}
@@ -3665,7 +3731,7 @@ func (h *rtmEventHandler) OnUserTyping(channelID, userID string) {
 
 func (h *rtmEventHandler) OnConnect() {
 	h.connected = true
-	h.program.Send(ui.ConnectionStateMsg{State: int(statusbar.StateConnected)})
+	h.send(ui.ConnectionStateMsg{State: int(statusbar.StateConnected)})
 	if h.wsCtx != nil {
 		go bootstrapPresenceAndDND(context.Background(), h.wsCtx, h.program)
 	}
@@ -3699,6 +3765,7 @@ func (h *rtmEventHandler) OnConnect() {
 	// GetHistorySince calls return zero messages quickly. The 4-wide
 	// concurrency cap bounds the cost.
 	h.triggerBackfill("reconnect")
+	h.triggerUserGroupRefresh("reconnect")
 
 	// Force-stale the active channel's membership cache and re-fetch.
 	// The WS may have missed member_joined/left deltas during the
@@ -3750,8 +3817,40 @@ func (h *rtmEventHandler) triggerBackfill(trigger string) bool {
 	return true
 }
 
+func (h *rtmEventHandler) triggerUserGroupRefresh(trigger string) bool {
+	store := h.userGroupStore()
+	if h == nil || store == nil || h.getUserGroups == nil {
+		return false
+	}
+	if !h.userGroupRefreshGate.tryStart(time.Now()) {
+		debuglog.Backfill("team=%s trigger=%s usergroups skipped reason=dedupe", h.workspaceID, trigger)
+		return false
+	}
+	teamName := h.workspaceID
+	if h.wsCtx != nil && h.wsCtx.TeamName != "" {
+		teamName = h.wsCtx.TeamName
+	}
+	fetch := h.getUserGroups
+	send := h.send
+	teamID := h.workspaceID
+	isActive := h.isActive
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), workspaceUserGroupFetchTimeout)
+		defer cancel()
+		if _, err := refreshWorkspaceUserGroups(ctx, fetch, store); err != nil {
+			log.Printf("user group refresh for %s failed: %v", teamName, err)
+			return
+		}
+		if isActive == nil || isActive() {
+			sendWorkspaceUserGroupUpdate(send, teamID)
+		}
+	}()
+	return true
+}
+
 func (h *rtmEventHandler) OnDisconnect() {
-	h.program.Send(ui.ConnectionStateMsg{State: int(statusbar.StateDisconnected)})
+	h.connected = false
+	h.send(ui.ConnectionStateMsg{State: int(statusbar.StateDisconnected)})
 }
 
 func (h *rtmEventHandler) OnSelfPresenceChange(presence string) {

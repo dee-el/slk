@@ -2,7 +2,7 @@
 //
 // Workspace-lifecycle reducer for App.Update (Phase 4k).
 //
-// Owns the nine Update arms that drive workspace activation,
+// Owns the workspace-lifecycle Update arms that drive workspace activation,
 // per-workspace data resolution echoes, and the sidebar / read-state
 // refresh paths:
 //
@@ -30,6 +30,10 @@
 //	UserResolvedMsg         - per-user display-name resolved:
 //	                          patch any in-history references in
 //	                          both messages pane and thread panel.
+//	WorkspaceUserGroupsUpdatedMsg
+//	                        - active workspace user-group handles changed;
+//	                          pull latest snapshot and re-render every
+//	                          user-group-aware surface.
 //	UserExternalMsg         - per-user external/internal flag
 //	                          resolved: update the cache + re-push
 //	                          SetUserNames so styling refreshes.
@@ -156,6 +160,16 @@ var reduceWorkspace reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		}
 		return nil, true
 
+	case WorkspaceUserGroupsUpdatedMsg:
+		if m.TeamID != a.activeTeamID {
+			return nil, true
+		}
+		if a.workspaceUserGroupStateReader == nil {
+			return nil, true
+		}
+		a.SetUserGroupNames(a.workspaceUserGroupStateReader(m.TeamID))
+		return nil, true
+
 	case UserExternalMsg:
 		if a.externalUsers == nil {
 			a.externalUsers = map[string]bool{}
@@ -232,6 +246,7 @@ func reduceWorkspaceReady(a *App, m WorkspaceReadyMsg) tea.Cmd {
 		// SetUserNames last is the canonical state.
 		a.SetExternalUsers(m.ExternalUsers)
 		a.SetUserNames(m.UserNames)
+		a.SetUserGroupNames(m.UserGroupNames)
 		a.SetCustomEmoji(m.CustomEmoji)
 		// Route through the setter so messagepane/threadPanel also learn
 		// the current user — production never calls SetCurrentUserID
@@ -326,6 +341,7 @@ func reduceWorkspaceSwitched(a *App, m WorkspaceSwitchedMsg) tea.Cmd {
 	// last is the canonical state.
 	a.SetExternalUsers(m.ExternalUsers)
 	a.SetUserNames(m.UserNames)
+	a.SetUserGroupNames(m.UserGroupNames)
 	a.SetCustomEmoji(m.CustomEmoji)
 	// Route through the setter so messagepane/threadPanel also learn the
 	// current user (see WorkspaceReadyMsg above).

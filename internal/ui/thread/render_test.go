@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/messages/blockkit"
@@ -96,5 +97,27 @@ func TestRenderThreadMessageTopLevelBlocks(t *testing.T) {
 	got, _, _, _ := m.renderThreadMessage(msg, width, nil, nil, false)
 	if !strings.Contains(got, "Deploy finished: v1.2.3") {
 		t.Errorf("thread render missing top-level block content; got %q", got)
+	}
+}
+
+func TestRenderThreadMessageBlockKitUserGroupMentionUsesUserGroupNames(t *testing.T) {
+	const width = 60
+	m := New()
+	m.SetUserGroupNames(map[string]string{"S123": "eng"})
+	msg := messages.MessageItem{
+		TS:        "1700000004.000000",
+		UserName:  "deploybot",
+		Timestamp: "10:33 AM",
+		Blocks: []blockkit.Block{
+			blockkit.SectionBlock{Text: "Notify <!subteam^S123> now"},
+		},
+	}
+	got, _, _, _ := m.renderThreadMessage(msg, width, nil, nil, false)
+	plain := ansi.Strip(got)
+	if !strings.Contains(plain, "@eng") {
+		t.Fatalf("thread block kit user-group mention not resolved: %q", plain)
+	}
+	if strings.Contains(plain, "<!subteam^") {
+		t.Fatalf("raw user-group token leaked from thread block kit: %q", plain)
 	}
 }

@@ -84,7 +84,7 @@ func ShouldNotify(ctx NotifyContext, channelID, userID, text, channelType string
 var (
 	userMentionRe    = regexp.MustCompile(`<@([A-Z0-9]+)>`)
 	channelMentionRe = regexp.MustCompile(`<#[A-Z0-9]+\|([^>]+)>`)
-	subteamMentionRe = regexp.MustCompile(`<!subteam\^[A-Z0-9]+\|([^>]+)>`)
+	subteamMentionRe = regexp.MustCompile(`<!subteam\^([A-Z0-9]+)(?:\|([^>]+))?>`)
 	broadcastRe      = regexp.MustCompile(`<!(here|channel|everyone)>`)
 	// Match both http(s) URLs and mailto: addresses; Slack
 	// auto-linkifies typed emails into <mailto:X|X>. Bare-link
@@ -95,11 +95,35 @@ var (
 	linkBareRe      = regexp.MustCompile(`<((?:https?://|mailto:)[^>]+)>`)
 )
 
+func userGroupMentionText(groupID, label string, userGroupNames map[string]string) string {
+	if name := normalizeMentionHandle(label); name != "" {
+		return "@" + name
+	}
+	if userGroupNames != nil {
+		if name := normalizeMentionHandle(userGroupNames[groupID]); name != "" {
+			return "@" + name
+		}
+	}
+	return "@group"
+}
+
+func normalizeMentionHandle(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.TrimLeft(name, "@")
+	return name
+}
+
 // StripSlackMarkup converts Slack-formatted text to plain text suitable for
 // OS notification bodies. User mentions are resolved against userNames; if
 // a user ID is missing from the map (or the map is nil) the raw user ID is
 // used as a fallback. Output is truncated to 100 characters with "..." suffix.
 func StripSlackMarkup(text string, userNames map[string]string) string {
+	return StripSlackMarkupWithUserGroups(text, userNames, nil)
+}
+
+// StripSlackMarkupWithUserGroups is the user-group-aware form of
+// StripSlackMarkup.
+func StripSlackMarkupWithUserGroups(text string, userNames, userGroupNames map[string]string) string {
 	text = channelMentionRe.ReplaceAllString(text, "#$1")
 	text = linkWithLabelRe.ReplaceAllString(text, "$2")
 	// Bare links: drop the mailto: scheme so notification bodies read
@@ -108,7 +132,10 @@ func StripSlackMarkup(text string, userNames map[string]string) string {
 		url := linkBareRe.FindStringSubmatch(match)[1]
 		return strings.TrimPrefix(url, "mailto:")
 	})
-	text = subteamMentionRe.ReplaceAllString(text, "$1")
+	text = subteamMentionRe.ReplaceAllStringFunc(text, func(match string) string {
+		groups := subteamMentionRe.FindStringSubmatch(match)
+		return userGroupMentionText(groups[1], groups[2], userGroupNames)
+	})
 	text = broadcastRe.ReplaceAllString(text, "@$1")
 	text = userMentionRe.ReplaceAllStringFunc(text, func(match string) string {
 		userID := userMentionRe.FindStringSubmatch(match)[1]

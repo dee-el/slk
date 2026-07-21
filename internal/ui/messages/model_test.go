@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/gammons/slk/internal/config"
 	emojiutil "github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
@@ -1170,6 +1171,65 @@ func TestPatchUserName_InvalidatesCacheEvenWithNoMatchingMessages(t *testing.T) 
 	m.PatchUserName("U99", "carol")
 	if m.cache != nil {
 		t.Error("PatchUserName should have invalidated m.cache so the mention re-resolves")
+	}
+}
+
+func TestSetUserGroupNames_RendersKnownAndUnknownMentions(t *testing.T) {
+	m := New([]MessageItem{{
+		TS:        "1.0",
+		UserName:  "alice",
+		Text:      "ping <!subteam^S1> and <!subteam^S2>",
+		Timestamp: "1:00 PM",
+	}}, "general")
+	m.SetUserGroupNames(map[string]string{"S1": "eng"})
+
+	out := ansi.Strip(m.View(10, 80))
+	if !strings.Contains(out, "@eng") {
+		t.Fatalf("known user-group mention not resolved:\n%s", out)
+	}
+	if !strings.Contains(out, "@group") {
+		t.Fatalf("unknown user-group mention should fall back to @group:\n%s", out)
+	}
+	if strings.Contains(out, "<!subteam^") {
+		t.Fatalf("raw user-group token leaked:\n%s", out)
+	}
+}
+
+func TestSetUserGroupNames_EquivalentSnapshotDoesNotBumpVersion(t *testing.T) {
+	m := New(nil, "general")
+	m.SetUserGroupNames(map[string]string{"S1": "eng"})
+	v0 := m.Version()
+	m.SetUserGroupNames(map[string]string{"S1": "eng"})
+	if v1 := m.Version(); v1 != v0 {
+		t.Fatalf("SetUserGroupNames(equal snapshot) bumped Version: v0=%d v1=%d", v0, v1)
+	}
+}
+
+func TestSetUserGroupNames_InvalidatesCacheOnRename(t *testing.T) {
+	m := New([]MessageItem{{
+		TS:        "1.0",
+		UserName:  "alice",
+		Text:      "ping <!subteam^S1>",
+		Timestamp: "1:00 PM",
+	}}, "general")
+	m.SetUserGroupNames(map[string]string{"S1": "eng"})
+	_ = m.View(10, 80)
+	if m.cache == nil {
+		t.Fatal("expected cache populated after View()")
+	}
+	verBefore := m.Version()
+
+	m.SetUserGroupNames(map[string]string{"S1": "platform"})
+
+	if m.cache != nil {
+		t.Fatal("SetUserGroupNames should invalidate cache on rename")
+	}
+	if m.Version() <= verBefore {
+		t.Fatal("SetUserGroupNames should bump Version on rename")
+	}
+	out := ansi.Strip(m.View(10, 80))
+	if !strings.Contains(out, "@platform") || strings.Contains(out, "@eng") {
+		t.Fatalf("renamed user-group mention not rendered:\n%s", out)
 	}
 }
 

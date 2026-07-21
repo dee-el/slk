@@ -78,6 +78,12 @@ type EventHandler interface {
 	// Slack ships the full updated list, comma-separated.
 	OnPrefChange(name, value string)
 
+	// OnUserGroupChanged is delivered for subteam_created and
+	// subteam_updated events. Membership-only events use separate payloads
+	// and are ignored here because mention rendering only needs ID/handle
+	// metadata.
+	OnUserGroupChanged(group slack.UserGroup)
+
 	// OnMemberJoined is delivered for member_joined_channel WS events:
 	// a user joined the conversation. For shared channels this includes
 	// external (Slack Connect) users. The receiver should persist the
@@ -213,6 +219,13 @@ type wsPrefChangeEvent struct {
 	Type  string          `json:"type"`
 	Name  string          `json:"name"`
 	Value json.RawMessage `json:"value"`
+}
+
+// wsUserGroupEvent is the shared payload for subteam_created and
+// subteam_updated websocket events.
+type wsUserGroupEvent struct {
+	Type    string          `json:"type"`
+	Subteam slack.UserGroup `json:"subteam"`
 }
 
 // stringValue returns the pref value coerced to a string. JSON strings
@@ -452,6 +465,21 @@ func dispatchWebSocketEvent(data []byte, handler EventHandler) {
 			return
 		}
 		handler.OnPrefChange(evt.Name, evt.stringValue())
+
+	case "subteam_created", "subteam_updated":
+		var evt wsUserGroupEvent
+		if err := json.Unmarshal(data, &evt); err != nil {
+			return
+		}
+		evt.Subteam.ID = strings.TrimSpace(evt.Subteam.ID)
+		if evt.Subteam.ID == "" {
+			return
+		}
+		debuglog.WS("%s: id=%s handle=%q", evt.Type, evt.Subteam.ID, evt.Subteam.Handle)
+		handler.OnUserGroupChanged(evt.Subteam)
+
+	case "subteam_members_changed", "subteam_self_added", "subteam_self_removed":
+		// Mention rendering only needs subteam metadata changes.
 
 	case "hello":
 		debuglog.WS("hello: connected")

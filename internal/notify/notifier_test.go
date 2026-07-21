@@ -210,3 +210,26 @@ func TestStripSlackMarkup_Truncation(t *testing.T) {
 		t.Error("expected ... suffix")
 	}
 }
+
+func TestStripSlackMarkupWithUserGroups(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		userGroups map[string]string
+		want       string
+	}{
+		{"bare token uses map", "ping <!subteam^S123> please", map[string]string{"S123": "eng"}, "ping @eng please"},
+		{"label wins over map", "ping <!subteam^S123|@platform> please", map[string]string{"S123": "eng"}, "ping @platform please"},
+		{"map handle keeps one at", "ping <!subteam^S123> please", map[string]string{"S123": "@@eng"}, "ping @eng please"},
+		{"unknown falls back", "ping <!subteam^S999> please", nil, "ping @group please"},
+		{"escaped token stays literal", "&lt;!subteam^S123|@platform&gt;", map[string]string{"S123": "eng"}, "&lt;!subteam^S123|@platform&gt;"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := StripSlackMarkupWithUserGroups(tt.input, nil, tt.userGroups)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

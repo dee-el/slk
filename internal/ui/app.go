@@ -204,6 +204,9 @@ type App struct {
 	// thread panel parent's UserName without round-tripping through any
 	// sub-component's API.
 	userNames map[string]string
+	// Cached user-group-id -> handle map for bare <!subteam^...>
+	// mention resolution in the active workspace.
+	userGroupNames map[string]string
 
 	// Per-window model config retention (Phase 3): the most recent
 	// values pushed through the App-level Set* forwarders, kept so
@@ -305,6 +308,10 @@ type App struct {
 	// external-user snapshots for a workspace. Used by bulk user-metadata
 	// refresh so stale async signals cannot overwrite newer scalar updates.
 	workspaceUserStateReader func(teamID string) (map[string]string, map[string]bool)
+	// workspaceUserGroupStateReader returns the current synchronized user-group
+	// handle snapshot for a workspace. Used by bulk user-group refresh so stale
+	// async signals cannot overwrite newer names.
+	workspaceUserGroupStateReader func(teamID string) map[string]string
 
 	// pendingLinkNav tracks an in-flight permalink navigation: the
 	// channel was (or is being) opened and the message-select /
@@ -486,6 +493,7 @@ func NewApp() *App {
 		fetchingOlder:        map[string]bool{},
 		mouseWheelLines:      3,
 		userNames:            map[string]string{},
+		userGroupNames:       map[string]string{},
 		externalUsers:        map[string]bool{},
 		presence:             newPresenceController(),
 		renderCache:          newPanelRenderCache(),
@@ -1103,7 +1111,7 @@ func (a *App) saveThreadToFile() tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		content := export.ThreadToMarkdown(parent, replies, userNames, channelNames)
+		content := export.ThreadToMarkdownWithUserGroups(parent, replies, userNames, channelNames, a.userGroupNames)
 
 		dir, err := export.ExportDir()
 		if err != nil {
@@ -1955,6 +1963,10 @@ func (a *App) SetWorkspaceUserStateReader(f func(teamID string) (map[string]stri
 	a.workspaceUserStateReader = f
 }
 
+func (a *App) SetWorkspaceUserGroupStateReader(f func(teamID string) map[string]string) {
+	a.workspaceUserGroupStateReader = f
+}
+
 // SetAvatarFunc sets the function used to get rendered avatars for messages.
 func (a *App) SetAvatarFunc(fn messages.AvatarFunc) {
 	a.avatarFn = fn
@@ -2273,6 +2285,18 @@ func cloneBoolMap(src map[string]bool) map[string]bool {
 	return out
 }
 
+func stringMapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		if vb, ok := b[k]; !ok || vb != va {
+			return false
+		}
+	}
+	return true
+}
+
 // SetUserNames passes the user ID -> display name map to the message pane for mention resolution.
 func (a *App) SetUserNames(names map[string]string) {
 	owned := cloneStringMap(names)
@@ -2295,6 +2319,24 @@ func (a *App) SetUserNames(names map[string]string) {
 	}
 	a.compose.SetUsers(users)
 	a.threadCompose.SetUsers(users)
+}
+
+// SetUserGroupNames passes the active workspace's user-group handle map to
+// every renderer that resolves bare <!subteam^...> mentions.
+func (a *App) SetUserGroupNames(names map[string]string) {
+	if names == nil {
+		names = map[string]string{}
+	}
+	if stringMapsEqual(a.userGroupNames, names) {
+		return
+	}
+	owned := cloneStringMap(names)
+	a.userGroupNames = owned
+	a.threadsView.SetUserGroupNames(owned)
+	for _, m := range a.allWinModels() {
+		m.SetUserGroupNames(owned)
+	}
+	a.threadPanel.SetUserGroupNames(owned)
 }
 
 // seedNewMessagePicker snapshots the current workspace's user list

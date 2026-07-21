@@ -147,6 +147,7 @@ type mockSlackAPI struct {
 	endDNDContextFn                 func(ctx context.Context) error
 	getDNDInfoContextFn             func(ctx context.Context, user *string, options ...slack.ParamOption) (*slack.DNDStatus, error)
 	uploadFileContextFn             func(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error)
+	getUserGroupsContextFn          func(ctx context.Context, options ...slack.GetUserGroupsOption) ([]slack.UserGroup, error)
 	getUsersInConversationContextFn func(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error)
 	openConversationContextFn       func(ctx context.Context, params *slack.OpenConversationParameters) (*slack.Channel, bool, bool, error)
 	searchMessagesFn                func(ctx context.Context, query string, params slack.SearchParameters) (*slack.SearchMessages, error)
@@ -193,6 +194,13 @@ func (m *mockSlackAPI) GetBotInfoContext(ctx context.Context, parameters slack.G
 }
 
 func (m *mockSlackAPI) GetUsersContext(ctx context.Context, options ...slack.GetUsersOption) ([]slack.User, error) {
+	return nil, nil
+}
+
+func (m *mockSlackAPI) GetUserGroupsContext(ctx context.Context, options ...slack.GetUserGroupsOption) ([]slack.UserGroup, error) {
+	if m.getUserGroupsContextFn != nil {
+		return m.getUserGroupsContextFn(ctx, options...)
+	}
 	return nil, nil
 }
 
@@ -2121,6 +2129,145 @@ func TestGetUsersInConversationRetriesOnRateLimit(t *testing.T) {
 	// On rate-limit, cursor must NOT advance — the retry hits the same page.
 	if seenCursors[0] != "" || seenCursors[1] != "" {
 		t.Errorf("expected both calls with empty cursor (same page retry), got %v", seenCursors)
+	}
+}
+
+func TestGetUserGroups_PassesExpectedOptions(t *testing.T) {
+	var gotParams slack.GetUserGroupsParams
+	mock := &mockSlackAPI{
+		getUserGroupsContextFn: func(ctx context.Context, options ...slack.GetUserGroupsOption) ([]slack.UserGroup, error) {
+			for _, opt := range options {
+				opt(&gotParams)
+			}
+			return []slack.UserGroup{{ID: "S1", Handle: "eng"}}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	got, err := c.GetUserGroups(context.Background())
+	if err != nil {
+		t.Fatalf("GetUserGroups: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "S1" {
+		t.Fatalf("got %+v, want single S1 group", got)
+	}
+	if !gotParams.IncludeDisabled {
+		t.Error("IncludeDisabled = false, want true")
+	}
+	if gotParams.IncludeUsers {
+		t.Error("IncludeUsers = true, want false")
+	}
+	if gotParams.IncludeCount {
+		t.Error("IncludeCount = true, want false")
+	}
+	if gotParams.TeamID != "" {
+		t.Errorf("TeamID = %q, want empty", gotParams.TeamID)
+	}
+}
+
+func TestGetUserGroups_WrapsError(t *testing.T) {
+	wantErr := errors.New("boom")
+	mock := &mockSlackAPI{
+		getUserGroupsContextFn: func(ctx context.Context, options ...slack.GetUserGroupsOption) ([]slack.UserGroup, error) {
+			return nil, wantErr
+		},
+	}
+	c := &Client{api: mock}
+
+	_, err := c.GetUserGroups(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("expected wrapped wantErr, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "getting user groups") {
+		t.Errorf("expected prefix in %q", err.Error())
+	}
+}
+
+func TestGetUserGroups_RetriesOnRateLimit(t *testing.T) {
+	var calls int
+	var seenParams []slack.GetUserGroupsParams
+	mock := &mockSlackAPI{
+		getUserGroupsContextFn: func(ctx context.Context, options ...slack.GetUserGroupsOption) ([]slack.UserGroup, error) {
+			calls++
+			var params slack.GetUserGroupsParams
+			for _, opt := range options {
+				opt(&params)
+			}
+			seenParams = append(seenParams, params)
+			if calls == 1 {
+				return nil, &slack.RateLimitedError{RetryAfter: 10 * time.Millisecond}
+			}
+			return []slack.UserGroup{{ID: "S1", Handle: "eng"}}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	got, err := c.GetUserGroups(context.Background())
+	if err != nil {
+		t.Fatalf("GetUserGroups: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "S1" {
+		t.Fatalf("got %+v, want single S1 group", got)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 API calls, got %d", calls)
+	}
+	for i, params := range seenParams {
+		if !params.IncludeDisabled || params.IncludeUsers || params.IncludeCount {
+			t.Errorf("call[%d] params = %+v, want disabled=true users=false count=false", i, params)
+		}
+	}
+}
+
+func TestGetUserGroups_CanceledContextSkipsAPICall(t *testing.T) {
+	var calls int
+	mock := &mockSlackAPI{
+		getUserGroupsContextFn: func(ctx context.Context, options ...slack.GetUserGroupsOption) ([]slack.UserGroup, error) {
+			calls++
+			return nil, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := c.GetUserGroups(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if calls != 0 {
+		t.Fatalf("API calls = %d, want 0", calls)
+	}
+}
+
+func TestGetUserGroups_CancelledDuringRateLimitWait(t *testing.T) {
+	var calls int
+	ctx, cancel := context.WithCancel(context.Background())
+	mock := &mockSlackAPI{
+		getUserGroupsContextFn: func(callCtx context.Context, options ...slack.GetUserGroupsOption) ([]slack.UserGroup, error) {
+			calls++
+			if calls == 1 {
+				go func() {
+					time.Sleep(10 * time.Millisecond)
+					cancel()
+				}()
+				return nil, &slack.RateLimitedError{RetryAfter: 200 * time.Millisecond}
+			}
+			return []slack.UserGroup{{ID: "S1"}}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	_, err := c.GetUserGroups(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if calls != 1 {
+		t.Fatalf("API calls = %d, want 1", calls)
 	}
 }
 

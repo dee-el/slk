@@ -236,6 +236,13 @@ type (
 	WorkspaceUserMetadataUpdatedMsg struct {
 		TeamID string
 	}
+	// WorkspaceUserGroupsUpdatedMsg carries one team-scoped immutable refresh
+	// signal for workspace user-group handles. Reducer pulls the current
+	// synchronized workspace snapshot at apply time so older async signals
+	// cannot overwrite newer user-group names.
+	WorkspaceUserGroupsUpdatedMsg struct {
+		TeamID string
+	}
 	// UserExternalMsg flags a single user as external (Slack Connect /
 	// shared-channel guest). Emitted by the user-resolution path when a
 	// users.info response shows team_id != workspace TeamID. The App
@@ -256,6 +263,9 @@ type (
 		Channels     []sidebar.ChannelItem
 		FinderItems  []channelfinder.Item
 		UserNames    map[string]string
+		// UserGroupNames maps workspace user-group IDs to handles without a
+		// leading @. Used to resolve bare <!subteam^...> mentions.
+		UserGroupNames map[string]string
 		// ExternalUsers maps userID -> true for users this workspace
 		// considers Slack Connect / shared-channel guests. Hydrated from
 		// cache.User.IsExternal so the mention picker can flag externals
@@ -320,6 +330,9 @@ type (
 		Channels     []sidebar.ChannelItem
 		FinderItems  []channelfinder.Item
 		UserNames    map[string]string
+		// UserGroupNames maps workspace user-group IDs to handles without a
+		// leading @. Used to resolve bare <!subteam^...> mentions.
+		UserGroupNames map[string]string
 		// ExternalUsers maps userID -> true for users this workspace
 		// considers Slack Connect / shared-channel guests. Hydrated from
 		// cache.User.IsExternal so the mention picker can flag externals
